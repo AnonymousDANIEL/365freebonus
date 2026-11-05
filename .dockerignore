@@ -1,0 +1,9 @@
+.git
+node_modules
+.next
+.env*
+.data
+data
+outputs
+*.sqlite*
+*.db*
