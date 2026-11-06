@@ -1,11 +1,13 @@
 import { z } from "zod";
 import { ApiError } from "./_security";
-import { isSafeImageUrl } from "../../lib/image-url";
+import { isSafeImageUrl, isUploadedImageUrl } from "../../lib/image-url";
 
-const safeUrl = z.string().trim().max(2048).refine(value => {
+function isHttpUrl(value: string): boolean {
   if (!value) return true;
   try { return ["https:", "http:"].includes(new URL(value).protocol); } catch { return false; }
-}, "请输入完整的 https:// 或 http:// 链接。");
+}
+
+const safeUrl = z.string().trim().max(2048).refine(isHttpUrl, "请输入完整的 https:// 或 http:// 链接。");
 
 export const brandInput = z.object({
   name: z.string().trim().min(1).max(80),
@@ -15,7 +17,7 @@ export const brandInput = z.object({
   description: z.string().trim().max(4000),
   color: z.string().regex(/^#[a-fA-F0-9]{6}$/),
   icon: z.string().trim().min(1).max(30),
-  imageUrl: safeUrl,
+  imageUrl: z.string().trim().max(2048).refine(value => isHttpUrl(value) || isUploadedImageUrl(value), "请上传照片或输入完整的图片链接。"),
   featured: z.boolean(),
   published: z.boolean(),
   sortOrder: z.number().int().min(0).max(99999),

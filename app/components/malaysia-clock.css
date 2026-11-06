@@ -1,0 +1,67 @@
+.site-header .wordmark {
+  min-width: 0;
+}
+
+.site-header .site-logo-image,
+.site-header .nav-actions {
+  flex-shrink: 0;
+}
+
+.header-brand-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.malaysia-clock {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 8px;
+  margin-inline-start: auto;
+  color: #d4b779;
+  white-space: nowrap;
+}
+
+.malaysia-clock-label {
+  color: #bcb1c3;
+  font-size: 10px;
+}
+
+.malaysia-clock time {
+  color: #efdfbe;
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: .04em;
+}
+
+@media (max-width: 900px) {
+  .site-header .nav-actions {
+    margin-left: 0;
+  }
+}
+
+@media (max-width: 640px) {
+  .site-header .nav-shell {
+    gap: 8px;
+    padding-inline: 14px;
+  }
+
+  .malaysia-clock {
+    flex-direction: column;
+    gap: 2px;
+    line-height: 1.25;
+  }
+
+  .malaysia-clock svg {
+    display: none;
+  }
+
+  .malaysia-clock-label {
+    font-size: 8px;
+  }
+
+  .malaysia-clock time {
+    font-size: 12px;
+  }
+}

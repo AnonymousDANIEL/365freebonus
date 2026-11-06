@@ -3,10 +3,11 @@
 import { useEffect, useRef, useState } from "react";
 import { ArrowUpRight, Check, ChevronRight, CircleHelp, ExternalLink, Eye, FileText, ImageIcon, LayoutGrid, LoaderCircle, Plus, Search, Settings2, ShieldCheck, Sparkles, Trash2, Upload, UserRound, X, Pencil, Globe, LogOut, Orbit, Sun, Gamepad2, Moon, Triangle } from "lucide-react";
 import type { Brand, SiteSettings } from "../lib/directory";
-import { isSafeImageUrl } from "../lib/image-url";
+import { isSafeImageUrl, isUploadedImageUrl } from "../lib/image-url";
 
 type Section = "brands" | "settings";
 type ImageField = "coverImageUrl" | "avatarImageUrl";
+type UploadTarget = ImageField | "brand";
 const uploadTypes = ["image/jpeg", "image/png", "image/gif", "image/webp"];
 const imageFields: { key: ImageField; label: string; detail: string }[] = [
   { key: "coverImageUrl", label: "首页封面", detail: "首页横幅使用，建议选用横向图片。" },
@@ -27,6 +28,22 @@ function imagePreviewUrl(value: string): string {
   return isSafeImageUrl(trimmed) ? trimmed : "";
 }
 
+function ImageUploadButton({ label, uploading, onUpload }: {
+  label: string;
+  uploading: boolean;
+  onUpload: (file: File) => void;
+}) {
+  return <div className="cms-secondary cms-file-picker">
+    {uploading ? <LoaderCircle size={15} className="cms-spin" aria-hidden="true" /> : <Upload size={15} aria-hidden="true" />}
+    <span aria-hidden="true">{uploading ? "正在上传…" : label}</span>
+    <input type="file" accept="image/jpeg,image/png,image/gif,image/webp,.jpg,.jpeg,.png,.gif,.webp" aria-label={label} onChange={event => {
+      const file = event.currentTarget.files?.[0];
+      event.currentTarget.value = "";
+      if (file) onUpload(file);
+    }} />
+  </div>;
+}
+
 function SettingsImageField({ field, label, detail, value, filename, uploading, onChange, onUpload }: {
   field: ImageField;
   label: string;
@@ -37,7 +54,6 @@ function SettingsImageField({ field, label, detail, value, filename, uploading, 
   onChange: (value: string) => void;
   onUpload: (file: File) => void;
 }) {
-  const fileInput = useRef<HTMLInputElement>(null);
   const [failedSrc, setFailedSrc] = useState("");
   const previewSrc = imagePreviewUrl(value);
   const invalid = Boolean(value.trim() && !previewSrc);
@@ -54,12 +70,7 @@ function SettingsImageField({ field, label, detail, value, filename, uploading, 
       <small id={`${field}-hint`} className={invalid ? "cms-image-invalid" : undefined}>{invalid ? "请输入 HTTPS 图片地址或以 / 开头的本站图片路径。" : "可粘贴图片地址，也可从设备上传。"}</small>
     </div>
     <div className="cms-image-actions">
-      <input ref={fileInput} type="file" hidden accept="image/jpeg,image/png,image/gif,image/webp,.jpg,.jpeg,.png,.gif,.webp" aria-label={`上传${label}`} onChange={event => {
-        const file = event.currentTarget.files?.[0];
-        event.currentTarget.value = "";
-        if (file) onUpload(file);
-      }} />
-      <button type="button" className="cms-secondary" onClick={() => fileInput.current?.click()}>{uploading ? <LoaderCircle size={15} className="cms-spin" /> : <Upload size={15} />}{uploading ? "正在上传…" : `上传${label}`}</button>
+      <ImageUploadButton label={`上传${label}`} uploading={uploading} onUpload={onUpload} />
       {value && <button type="button" className="cms-image-clear" onClick={() => { onChange(""); setFailedSrc(""); }}><X size={14} />恢复默认</button>}
     </div>
     {filename && <div className="cms-image-filename" title={filename}><Check size={14} />{filename}</div>}
@@ -81,6 +92,13 @@ async function request<T>(path: string, method = "GET", body?: unknown): Promise
   } finally { clearTimeout(timer); }
 }
 
+function imageUploadError(file: File): string {
+  if (!(file.type && file.type !== "application/octet-stream" ? uploadTypes.includes(file.type) : /\.(jpe?g|png|gif|webp)$/i.test(file.name))) {
+    return "请选择 JPG、PNG、GIF 或 WebP 图片。";
+  }
+  return !file.size || file.size > 5 * 1024 * 1024 ? "图片不能为空，每张最多 5 MB。" : "";
+}
+
 export default function AdminClient({ displayName }: { displayName: string }) {
   const [section, setSection] = useState<Section>("brands");
   const [brands, setBrands] = useState<Brand[]>([]);
@@ -92,8 +110,9 @@ export default function AdminClient({ displayName }: { displayName: string }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
-  const [uploading, setUploading] = useState<ImageField | null>(null);
+  const [uploading, setUploading] = useState<UploadTarget | null>(null);
   const [imageNames, setImageNames] = useState<Partial<Record<ImageField, string>>>({});
+  const [brandPhotoName, setBrandPhotoName] = useState("");
   const [sessionExpired, setSessionExpired] = useState(false);
   const [editing, setEditing] = useState<Brand | null>(null);
   const [deleting, setDeleting] = useState<Brand | null>(null);
@@ -115,7 +134,7 @@ export default function AdminClient({ displayName }: { displayName: string }) {
   useEffect(() => { if (success) { const timer = setTimeout(() => setSuccess(""), 4500); return () => clearTimeout(timer); } }, [success]);
 
   function notify(message: string) { setSessionExpired(false); setError(""); setSuccess(message); }
-  function openEditor(brand?: Brand) { if (busy || !loaded) return; setError(""); setEditing(brand ? { ...brand } : emptyBrand()); }
+  function openEditor(brand?: Brand) { if (busy || !loaded) return; setError(""); setBrandPhotoName(""); setEditing(brand ? { ...brand } : emptyBrand()); }
   async function saveBrand(event: React.FormEvent) {
     event.preventDefault(); if (!editing || busy) return;
     setBusy(true); setError("");
@@ -154,22 +173,23 @@ export default function AdminClient({ displayName }: { displayName: string }) {
     setSettings(current => current ? { ...current, [field]: value } : current);
     setImageNames(current => ({ ...current, [field]: undefined }));
   }
-  async function uploadSettingsImage(field: ImageField, file: File) {
-    if (!settings || busy) return;
+  async function uploadPhoto(target: UploadTarget, file: File) {
+    if (busy || (target === "brand" ? !editing : !settings)) return;
     setError(""); setSuccess(""); setSessionExpired(false);
-    if (!(file.type && file.type !== "application/octet-stream" ? uploadTypes.includes(file.type) : /\.(jpe?g|png|gif|webp)$/i.test(file.name))) {
-      setError("请选择 JPG、PNG、GIF 或 WebP 图片。"); return;
-    }
-    if (!file.size || file.size > 5 * 1024 * 1024) {
-      setError("图片不能为空，每张最多 5 MB。"); return;
-    }
-    setBusy(true); setUploading(field);
+    const validationError = imageUploadError(file);
+    if (validationError) { setError(validationError); return; }
+    setBusy(true); setUploading(target);
     try {
       const { url } = await request<{ url: string }>("/api/admin/images", "POST", file);
-      if (typeof url !== "string" || !url.startsWith("/api/images/") || !imagePreviewUrl(url)) throw new Error("无法读取上传结果，请重试。");
-      setSettings(current => current ? { ...current, [field]: url } : current);
-      setImageNames(current => ({ ...current, [field]: file.name }));
-      notify("已上传，保存设置后生效。");
+      if (typeof url !== "string" || !isUploadedImageUrl(url)) throw new Error("无法读取上传结果，请重试。");
+      if (target === "brand") {
+        setEditing(current => current && current === editing ? { ...current, imageUrl: url } : current);
+        setBrandPhotoName(file.name);
+      } else {
+        setSettings(current => current ? { ...current, [target]: url } : current);
+        setImageNames(current => ({ ...current, [target]: file.name }));
+        notify("已上传，保存设置后生效。");
+      }
     } catch (err) { fail(err, "上传图片失败，请重试。"); }
     finally { setUploading(null); setBusy(false); }
   }
@@ -214,7 +234,7 @@ export default function AdminClient({ displayName }: { displayName: string }) {
           <p className="cms-footnote">内容由你管理 · 演示品牌仅用于展示页面效果</p>
         </> : settings ? <form className="cms-settings-form" onSubmit={saveSettings}><fieldset disabled={busy}><section className="cms-settings-panel"><div><h2>品牌与首页</h2><p>这里的内容会显示在前台首页。</p></div><div className="cms-settings-fields"><label>网站名称<input required maxLength={40} value={settings.name} onChange={event => setSettings({ ...settings, name: event.target.value })} /></label><label>首页小标题<input maxLength={100} value={settings.eyebrow} onChange={event => setSettings({ ...settings, eyebrow: event.target.value })} /><small>显示在首页主标题上方。</small></label><label>首页主标题<textarea required rows={3} maxLength={120} value={settings.headline} onChange={event => setSettings({ ...settings, headline: event.target.value })} /></label><label>首页介绍<textarea rows={4} maxLength={600} value={settings.description} onChange={event => setSettings({ ...settings, description: event.target.value })} /></label></div></section>
           <section className="cms-settings-panel"><div><h2>首页封面与头像</h2><p>上传图片或输入图片地址。保存后更新前台，留空则使用默认图片。</p></div><div className="cms-settings-fields cms-image-fields">
-            {imageFields.map(({ key, label, detail }) => <SettingsImageField key={key} field={key} label={label} detail={detail} value={settings[key] || ""} filename={imageNames[key]} uploading={uploading === key} onChange={value => changeImage(key, value)} onUpload={file => uploadSettingsImage(key, file)} />)}
+            {imageFields.map(({ key, label, detail }) => <SettingsImageField key={key} field={key} label={label} detail={detail} value={settings[key] || ""} filename={imageNames[key]} uploading={uploading === key} onChange={value => changeImage(key, value)} onUpload={file => uploadPhoto(key, file)} />)}
             <p className="cms-image-form-hint">支持 JPG、PNG、GIF、WebP，每张最多 5 MB。</p>
           </div></section>
           <section className="cms-settings-panel">
@@ -233,8 +253,13 @@ export default function AdminClient({ displayName }: { displayName: string }) {
     <dialog ref={dialog} className="cms-dialog" onCancel={event => { if (busy) event.preventDefault(); else setEditing(null); }} onClick={event => { if (event.target === dialog.current && !busy) setEditing(null); }}>
       {editing && <form onSubmit={saveBrand}><div className="cms-dialog-heading"><div><span className="cms-eyebrow">BRAND EDITOR</span><h2>{editing.id ? "编辑品牌" : "添加新品牌"}</h2></div><button type="button" disabled={busy} onClick={() => setEditing(null)} aria-label="关闭编辑"><X size={21} /></button></div>
       <fieldset disabled={busy} className="cms-dialog-body">{error && <div className="cms-alert cms-error" role="alert"><span>{error}</span>{sessionExpired && <Reauthenticate />}</div>}<div className="cms-editor-preview"><span className="cms-brand-icon" style={{ background: `${editing.color}18`, color: editing.color }}>{editing.imageUrl ? <img src={editing.imageUrl} alt="品牌图片预览" /> : <BrandIcon value={editing.icon} />}</span><div><strong>{editing.name || "你的品牌名称"}</strong><small>{editing.tagline || "一句话，让品牌被记住。"}</small></div></div>
-      <div className="cms-form-grid"><label>品牌名称 <em>*</em><input autoFocus required maxLength={80} value={editing.name} onChange={event => setEditing({ ...editing, name: event.target.value })} placeholder="例如 NOVA PLAY" /></label><label>唯一标识<input pattern="[a-z0-9]+(?:-[a-z0-9]+)*" maxLength={80} value={editing.slug} onChange={event => setEditing({ ...editing, slug: event.target.value })} placeholder="例如 nova-play" /><small>小写字母、数字及短横线。</small></label><label>品牌分类<select value={editing.category} onChange={event => setEditing({ ...editing, category: event.target.value as Brand["category"] })}>{Object.entries(categoryNames).map(([value, label]) => <option key={value} value={value}>{label} / {value}</option>)}</select></label><label>显示顺序<input type="number" required min={0} max={99999} value={editing.sortOrder} onChange={event => setEditing({ ...editing, sortOrder: Number(event.target.value) })} /></label><label className="cms-wide">一句话介绍<input required maxLength={160} value={editing.tagline} onChange={event => setEditing({ ...editing, tagline: event.target.value })} placeholder="介绍这个品牌的独特之处" /></label><label className="cms-wide">详细介绍<textarea rows={4} maxLength={2000} value={editing.description} onChange={event => setEditing({ ...editing, description: event.target.value })} /></label><label>品牌图标<select value={editing.icon} onChange={event => setEditing({ ...editing, icon: event.target.value })}>{[["sparkles", "星光"], ["orbit", "轨道"], ["sun", "太阳"], ["gamepad", "游戏"], ["moon", "月亮"], ["triangle", "三角"]].map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select><small>未填写图片时使用。</small></label><label>主题颜色<div className="cms-color-field"><input type="color" value={/^#[0-9a-f]{6}$/i.test(editing.color) ? editing.color : "#d3b477"} onChange={event => setEditing({ ...editing, color: event.target.value })} aria-label="选择主题颜色" /><input required pattern="#[0-9a-fA-F]{6}" maxLength={7} value={editing.color} onChange={event => setEditing({ ...editing, color: event.target.value })} /></div></label><label className="cms-wide">品牌图片 URL<input type="url" maxLength={1000} value={editing.imageUrl} onChange={event => setEditing({ ...editing, imageUrl: event.target.value })} placeholder="https://.../brand.png" /><small>填写可公开访问的 HTTPS 图片地址。</small></label><label className="cms-wide">品牌链接<input type="url" maxLength={1000} value={editing.link} onChange={event => setEditing({ ...editing, link: event.target.value })} placeholder="https://..." /><small>可选，留空时仅展示详情。</small></label></div>
-      <div className="cms-switches"><label><span><strong>上架品牌</strong><small>允许品牌显示在前台。</small></span><input type="checkbox" checked={editing.published} onChange={event => setEditing({ ...editing, published: event.target.checked })} /></label><label><span><strong>首页精选</strong><small>在首页精选区域展示。</small></span><input type="checkbox" checked={editing.featured} onChange={event => setEditing({ ...editing, featured: event.target.checked })} /></label></div></fieldset><div className="cms-dialog-footer"><button disabled={busy} type="button" className="cms-secondary" onClick={() => setEditing(null)}>取消</button><button disabled={busy} type="submit" className="cms-primary">{busy ? <LoaderCircle size={17} className="cms-spin" /> : <Check size={17} />}{busy ? "正在保存…" : "保存品牌"}</button></div></form>}
+      <div className="cms-form-grid"><label>品牌名称 <em>*</em><input autoFocus required maxLength={80} value={editing.name} onChange={event => setEditing({ ...editing, name: event.target.value })} placeholder="例如 NOVA PLAY" /></label><label>唯一标识<input pattern="[a-z0-9]+(?:-[a-z0-9]+)*" maxLength={80} value={editing.slug} onChange={event => setEditing({ ...editing, slug: event.target.value })} placeholder="例如 nova-play" /><small>小写字母、数字及短横线。</small></label><label>品牌分类<select value={editing.category} onChange={event => setEditing({ ...editing, category: event.target.value as Brand["category"] })}>{Object.entries(categoryNames).map(([value, label]) => <option key={value} value={value}>{label} / {value}</option>)}</select></label><label>显示顺序<input type="number" required min={0} max={99999} value={editing.sortOrder} onChange={event => setEditing({ ...editing, sortOrder: Number(event.target.value) })} /></label><label className="cms-wide">一句话介绍<input required maxLength={160} value={editing.tagline} onChange={event => setEditing({ ...editing, tagline: event.target.value })} placeholder="介绍这个品牌的独特之处" /></label><label className="cms-wide">详细介绍<textarea rows={4} maxLength={2000} value={editing.description} onChange={event => setEditing({ ...editing, description: event.target.value })} /></label><label>品牌图标<select value={editing.icon} onChange={event => setEditing({ ...editing, icon: event.target.value })}>{[["sparkles", "星光"], ["orbit", "轨道"], ["sun", "太阳"], ["gamepad", "游戏"], ["moon", "月亮"], ["triangle", "三角"]].map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select><small>未填写图片时使用。</small></label><label>主题颜色<div className="cms-color-field"><input type="color" value={/^#[0-9a-f]{6}$/i.test(editing.color) ? editing.color : "#d3b477"} onChange={event => setEditing({ ...editing, color: event.target.value })} aria-label="选择主题颜色" /><input required pattern="#[0-9a-fA-F]{6}" maxLength={7} value={editing.color} onChange={event => setEditing({ ...editing, color: event.target.value })} /></div></label><div className="cms-wide cms-brand-photo">
+        <div className="cms-image-actions"><ImageUploadButton label="上传品牌照片" uploading={uploading === "brand"} onUpload={file => uploadPhoto("brand", file)} /></div>
+        <small className="cms-photo-hint">支持 JPG、PNG、GIF、WebP，每张最多 5 MB。上传后点击「保存品牌」生效。</small>
+        {brandPhotoName && <div className="cms-image-filename" role="status"><Check size={14} />已上传 {brandPhotoName}</div>}
+        <label>品牌图片 URL<input type="text" inputMode="url" autoComplete="off" spellCheck={false} maxLength={1000} value={editing.imageUrl} onChange={event => { setEditing({ ...editing, imageUrl: event.target.value }); setBrandPhotoName(""); }} placeholder="也可输入公开的图片地址" /></label>
+      </div><label className="cms-wide">品牌链接<input type="url" maxLength={1000} value={editing.link} onChange={event => setEditing({ ...editing, link: event.target.value })} placeholder="https://..." /><small>可选，留空时仅展示详情。</small></label></div>
+      <div className="cms-switches"><label><span><strong>上架品牌</strong><small>允许品牌显示在前台。</small></span><input type="checkbox" checked={editing.published} onChange={event => setEditing({ ...editing, published: event.target.checked })} /></label><label><span><strong>首页精选</strong><small>在首页精选区域展示。</small></span><input type="checkbox" checked={editing.featured} onChange={event => setEditing({ ...editing, featured: event.target.checked })} /></label></div></fieldset><div className="cms-dialog-footer"><button disabled={busy} type="button" className="cms-secondary" onClick={() => setEditing(null)}>取消</button><button disabled={busy} type="submit" className="cms-primary">{busy ? <LoaderCircle size={17} className="cms-spin" /> : <Check size={17} />}{uploading === "brand" ? "正在上传…" : busy ? "正在保存…" : "保存品牌"}</button></div></form>}
     </dialog>
     <dialog ref={deleteDialog} className="cms-confirm cms-delete-dialog" aria-labelledby="delete-title" onCancel={event => { if (busy) event.preventDefault(); else setDeleting(null); }}>
       {deleting && <><span className="cms-confirm-icon"><Trash2 size={23} /></span><h2 id="delete-title">删除 {deleting.name}？</h2><p>这会永久删除该品牌资料，前台也会同步移除。此操作无法撤销。</p>{error && <div className="cms-alert cms-error" role="alert"><span>{error}</span>{sessionExpired && <Reauthenticate />}</div>}<div className="cms-confirm-actions"><button autoFocus disabled={busy} className="cms-secondary" onClick={() => setDeleting(null)}>取消</button><button disabled={busy} className="cms-danger" onClick={deleteBrand}>{busy ? "正在删除…" : "确认删除"}</button></div></>}

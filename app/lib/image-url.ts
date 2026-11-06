@@ -1,3 +1,7 @@
+export function isUploadedImageUrl(value: string): boolean {
+  return /^\/api\/images\/[0-9a-f]{32}\.(?:png|jpg|gif|webp)$/.test(value);
+}
+
 export function isSafeImageUrl(value: string): boolean {
   if (!value) return true;
   if (value.length > 2048 || /[\s\\"'<>\x00-\x1f\x7f]/.test(value)) return false;
