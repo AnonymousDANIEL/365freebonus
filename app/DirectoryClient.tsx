@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowUpRight, ArrowRight, Search, X, Heart, Gamepad2, Sparkles, Orbit, Sun, Moon, Triangle, ChevronDown, SlidersHorizontal, LayoutGrid, Bookmark, Menu, Globe2, Compass, ExternalLink, Check, Zap, Layers, MoveUpRight, HelpCircle } from 'lucide-react';
 import BrandScene from './components/BrandScene';
 import GiftOrbit from './components/GiftOrbit';
-import { defaultAvatarImageUrl, defaultCoverImageUrl, legacyDefaultCoverImageUrl } from './lib/brand-media';
+import { defaultAvatarImageUrl, defaultCoverImageUrl, defaultGiftOpeningPlateUrl, legacyDefaultCoverImageUrl } from './lib/brand-media';
 import type { Brand, DirectoryData } from './lib/directory';
 
 type Lang = 'EN' | 'BM' | '中文';
@@ -69,7 +69,10 @@ export default function DirectoryClient({initialData}:{initialData:DirectoryData
       </div>
      </div>
      <div className="hero-visual">
-      <BrandScene coverImageUrl={hasDefaultGift ? defaultCoverImageUrl : settings.coverImageUrl} />
+      <BrandScene
+       coverImageUrl={hasDefaultGift ? defaultCoverImageUrl : settings.coverImageUrl}
+       openingPlateUrl={hasDefaultGift ? defaultGiftOpeningPlateUrl : undefined}
+      />
      </div>
     </div>
     {hasDefaultGift && <GiftOrbit />}

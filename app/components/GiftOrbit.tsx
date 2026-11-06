@@ -17,7 +17,19 @@ type OrbitLayout = {
   radius: number;
   copy: Bounds | null;
 };
+type OpeningScene = {
+  view: SVGSVGElement;
+  lid: SVGGElement;
+  lidShade: SVGPathElement;
+  interior: SVGPathElement;
+  bloom: SVGEllipseElement;
+  wordmark: SVGGElement;
+  plateUrl: string;
+};
 
+const OPENING_LAUNCH_TIME = 2.18;
+const POSTER_REVEAL_START = 1.96;
+const POSTER_REVEAL_END = 2.15;
 const FULL_TURN = Math.PI * 2;
 const LAUNCH_INTERVAL = 0.65;
 const LIFTOFF = 0.68;
@@ -37,6 +49,46 @@ const clamp = (value: number, lower: number, upper: number) => Math.min(upper, M
 function ease(value: number) {
   const x = clamp(value, 0, 1);
   return x * x * (3 - 2 * x);
+}
+
+function getOpening(stage: Element): OpeningScene | null {
+  const view = stage.querySelector<SVGSVGElement>('[data-gift-opening]');
+  const lid = view?.querySelector<SVGGElement>('[data-gift-lid]');
+  const lidShade = view?.querySelector<SVGPathElement>('[data-gift-lid-shade]');
+  const interior = view?.querySelector<SVGPathElement>('[data-gift-interior]');
+  const bloom = view?.querySelector<SVGEllipseElement>('[data-gift-bloom]');
+  const wordmark = view?.querySelector<SVGGElement>('[data-gift-wordmark]');
+  const plateUrl = view?.querySelector('[data-gift-plate]')?.getAttribute('href');
+  return view && lid && lidShade && interior && bloom && wordmark && plateUrl
+    ? { view, lid, lidShade, interior, bloom, wordmark, plateUrl }
+    : null;
+}
+
+function showOpenPoster(scene: OpeningScene) {
+  scene.view.parentElement?.style.setProperty('--gift-poster-opacity', '1');
+  scene.view.style.visibility = 'hidden';
+}
+
+function paintOpening(scene: OpeningScene, elapsed: number) {
+  const rise = ease((elapsed - 0.18) / 0.86);
+  const tilt = Math.sin(Math.PI * rise);
+  scene.lid.setAttribute('transform', `translate(${-13 * tilt} ${411 * (1 - rise)}) rotate(${-4 * tilt} 724 255)`);
+
+  const light = ease((elapsed - 0.48) / 0.64);
+  const lightSettle = ease((elapsed - 1.20) / 0.42);
+  scene.interior.setAttribute('opacity', String(0.94 * (1 - light)));
+  scene.lidShade.setAttribute('opacity', String(0.92 * (1 - light)));
+  scene.bloom.setAttribute('opacity', String(light * (0.76 - 0.42 * lightSettle)));
+
+  const emerge = ease((elapsed - 1.18) / 0.78);
+  const wordmarkScale = 0.84 + 0.16 * emerge;
+  scene.wordmark.setAttribute('transform', `translate(0 ${310 * (1 - emerge)}) translate(724 744) scale(${wordmarkScale}) translate(-724 -744)`);
+  scene.wordmark.setAttribute('opacity', String(ease((elapsed - 1.18) / 0.31)));
+
+  if (elapsed >= POSTER_REVEAL_START) {
+    const reveal = ease((elapsed - POSTER_REVEAL_START) / (POSTER_REVEAL_END - POSTER_REVEAL_START));
+    scene.view.parentElement?.style.setProperty('--gift-poster-opacity', String(reveal));
+  }
 }
 
 function measureLayout(canvas: HTMLCanvasElement, artwork: HTMLImageElement, copy: HTMLElement | null): OrbitLayout | null {
@@ -182,7 +234,7 @@ function drawGem(ctx: CanvasRenderingContext2D, r: number, turn: number, palette
 function paint(ctx: CanvasRenderingContext2D, layout: OrbitLayout, elapsed: number) {
   ctx.clearRect(0, 0, layout.width, layout.height);
   const latest = Math.floor(elapsed / LAUNCH_INTERVAL);
-  const oldest = Math.max(-6, Math.floor((elapsed - LIFETIME) / LAUNCH_INTERVAL) + 1);
+  const oldest = Math.max(0, Math.floor((elapsed - LIFETIME) / LAUNCH_INTERVAL) + 1);
   const phase = elapsed - latest * LAUNCH_INTERVAL;
   if (phase < 0.33) {
     const glowRadius = layout.radius * 1.48;
@@ -207,7 +259,7 @@ function paint(ctx: CanvasRenderingContext2D, layout: OrbitLayout, elapsed: numb
     const fade = ease(age / 0.16) * (1 - ease((age - (LIFTOFF + ORBIT_TIME - 0.14)) / (END_FADE + 0.14)));
     const underCopy = layout.copy && point.x > layout.copy.left && point.x < layout.copy.right && point.y > layout.copy.top && point.y < layout.copy.bottom;
     const alpha = fade * (underCopy ? 0.56 : 0.84 + depth * 0.14);
-    const gem = GEMS[((Math.floor(index / 2) % GEMS.length) + GEMS.length) % GEMS.length];
+    const gem = GEMS[Math.floor(index / 2) % GEMS.length];
 
     ctx.save();
     ctx.fillStyle = coin ? '#f0ce85' : gem[0];
@@ -239,25 +291,41 @@ export default function GiftOrbit() {
     const stage = canvas?.closest('.hero-stage');
     const artwork = stage?.querySelector<HTMLImageElement>('.hero-visual .brand-scene-image img');
     if (!canvas || !stage || !artwork) return;
+    const opening = getOpening(stage);
     const ctx = canvas.getContext('2d');
-    if (!ctx) return;
+    if (!ctx) {
+      if (opening) showOpenPoster(opening);
+      return;
+    }
 
     const copy = stage.querySelector<HTMLElement>('.hero-copy');
     const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
     let layout: OrbitLayout | null = null;
     let inView = true;
     let elapsed = 0;
+    let openingReady = !opening;
+    let openingActive = !!opening;
+    let launchTime = opening ? OPENING_LAUNCH_TIME : 0;
     let previousTime: number | null = null;
     let frame = 0;
 
-    const canAnimate = () => layout && inView && !document.hidden && !reducedMotion.matches;
+    const canAnimate = () => layout && openingReady && inView && !document.hidden && !reducedMotion.matches;
 
     const tick = (now: number) => {
       frame = 0;
       if (!layout || !canAnimate()) return;
       if (previousTime !== null) elapsed += Math.min(0.1, (now - previousTime) / 1000);
       previousTime = now;
-      paint(ctx, layout, elapsed);
+      if (opening && openingActive) {
+        if (elapsed >= POSTER_REVEAL_END) {
+          showOpenPoster(opening);
+          openingActive = false;
+        } else {
+          paintOpening(opening, elapsed);
+        }
+      }
+      // The first emission is always a coin. No particles exist until the logo has settled.
+      if (elapsed >= launchTime) paint(ctx, layout, elapsed - launchTime);
       frame = window.requestAnimationFrame(tick);
     };
 
@@ -287,6 +355,23 @@ export default function GiftOrbit() {
       sync();
     };
 
+    const skipOpening = () => {
+      if (opening) showOpenPoster(opening);
+      openingActive = false;
+      openingReady = true;
+      launchTime = 0;
+      sync();
+    };
+
+    // Wait for the visible closed frame and original art before advancing the one clock.
+    // The SVG uses the same cached plate URL, so this does not duplicate the download.
+    const plate = opening ? new Image() : null;
+    if (plate && opening) {
+      plate.onload = () => { openingReady = true; sync(); };
+      plate.onerror = skipOpening;
+      plate.src = opening.plateUrl;
+    }
+
     const resize = new ResizeObserver(measure);
     resize.observe(stage);
     resize.observe(artwork);
@@ -297,8 +382,10 @@ export default function GiftOrbit() {
     });
     visibility.observe(stage);
     artwork.addEventListener('load', measure);
+    artwork.addEventListener('error', skipOpening);
     document.addEventListener('visibilitychange', sync);
     reducedMotion.addEventListener('change', sync);
+    if (artwork.complete && !artwork.naturalWidth) skipOpening();
     measure();
 
     return () => {
@@ -306,6 +393,8 @@ export default function GiftOrbit() {
       resize.disconnect();
       visibility.disconnect();
       artwork.removeEventListener('load', measure);
+      artwork.removeEventListener('error', skipOpening);
+      if (plate) { plate.onload = null; plate.onerror = null; }
       document.removeEventListener('visibilitychange', sync);
       reducedMotion.removeEventListener('change', sync);
     };
