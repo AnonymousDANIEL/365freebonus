@@ -1,0 +1,37 @@
+.announcement-viewport {
+  position: relative;
+  width: 100%;
+  min-width: 0;
+  min-height: 1.5em;
+  overflow: hidden;
+  line-height: 1.5;
+}
+
+.announcement-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+
+.announcement-viewport[data-scrolling] .announcement-list {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.announcement-line {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  width: max-content;
+  white-space: pre;
+  visibility: hidden;
+}

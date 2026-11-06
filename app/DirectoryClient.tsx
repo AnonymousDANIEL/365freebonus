@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowUpRight, ArrowRight, Search, X, Heart, Gamepad2, Sparkles, Orbit, Sun, Moon, Triangle, ChevronDown, SlidersHorizontal, LayoutGrid, Bookmark, Menu, Globe2, Compass, ExternalLink, Check, Zap, Layers, MoveUpRight, HelpCircle } from 'lucide-react';
+import AnnouncementTicker from './components/AnnouncementTicker';
 import BrandScene from './components/BrandScene';
 import GiftOrbit from './components/GiftOrbit';
 import { defaultAvatarImageUrl, defaultCoverImageUrl, defaultGiftOpeningPlateUrl, legacyDefaultCoverImageUrl } from './lib/brand-media';
@@ -44,7 +45,7 @@ export default function DirectoryClient({initialData}:{initialData:DirectoryData
  const showSaved=()=>{setOnlySaved(s=>!s);jump('collection');};
  const categories=[['All',t.all,LayoutGrid],['Gaming',t.gaming,Gamepad2],['Lifestyle',t.lifestyle,Sun],['Entertainment',t.entertainment,Sparkles]] as const;
  return <div className="public-site" id="top">
-  {settings.announcement && <div className="announcement"><span className="live-dot"/>{settings.announcement}<ArrowUpRight size={13}/></div>}
+  <AnnouncementTicker text={settings.announcement} />
   <header className="site-header"><div className="nav-shell"><a className="wordmark" href="/" aria-label={`${settings.name} home`}><img className="site-logo-image" src={avatarImageUrl} alt=""/>{settings.name}<span className="wordmark-point">®</span></a><nav className="desktop-nav" aria-label="Main navigation"><button className="nav-active" onClick={()=>{setOnlySaved(false);jump('collection');}}>{t.discover}<span/></button><button onClick={()=>jump('collection')}>{t.collection}</button><button onClick={()=>jump('how-it-works')}>{t.how}</button></nav><div className="nav-actions"><div className="lang-switch" aria-label="Language">{(['EN','BM','中文'] as Lang[]).map(l=><button key={l} aria-pressed={lang===l} className={lang===l?'selected':''} onClick={()=>setLang(l)}>{l}</button>)}</div><button className={`saved-nav ${onlySaved?'is-saved':''}`} onClick={showSaved}><Bookmark size={15}/><span>{t.saved}</span><span className="saved-count">{saved.length}</span></button><button className="mobile-menu icon-button" aria-label="Toggle menu" aria-expanded={menu} onClick={()=>setMenu(!menu)}>{menu?<X/>:<Menu/>}</button></div></div>{menu&&<nav className="mobile-nav"><button onClick={()=>jump('collection')}>{t.collection}</button><button onClick={()=>jump('how-it-works')}>{t.how}</button><button onClick={showSaved}>{t.saved} ({saved.length})</button><a href="/admin">{t.dashboard}</a></nav>}</header>
   <main>
    <section className={hasDefaultGift ? 'hero-stage has-gift-orbit' : 'hero-stage'}>

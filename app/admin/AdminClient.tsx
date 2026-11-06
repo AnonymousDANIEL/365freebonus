@@ -217,7 +217,16 @@ export default function AdminClient({ displayName }: { displayName: string }) {
             {imageFields.map(({ key, label, detail }) => <SettingsImageField key={key} field={key} label={label} detail={detail} value={settings[key] || ""} filename={imageNames[key]} uploading={uploading === key} onChange={value => changeImage(key, value)} onUpload={file => uploadSettingsImage(key, file)} />)}
             <p className="cms-image-form-hint">支持 JPG、PNG、GIF、WebP，每张最多 5 MB。</p>
           </div></section>
-          <section className="cms-settings-panel"><div><h2>公告与联系</h2><p>保持首页消息及时、清晰。</p></div><div className="cms-settings-fields"><label>顶部公告<input maxLength={250} value={settings.announcement} onChange={event => setSettings({ ...settings, announcement: event.target.value })} /><small>留空时不显示公告栏。</small></label><label>联系链接<input type="url" placeholder="https://..." maxLength={1000} value={settings.contactUrl} onChange={event => setSettings({ ...settings, contactUrl: event.target.value })} /><small>可填写你的官方联系页面，留空则隐藏。</small></label></div></section><div className="cms-settings-save"><span>保存后，刷新前台即可查看最新内容。</span><button disabled={busy} className="cms-primary" type="submit">{busy ? <LoaderCircle size={17} className="cms-spin" /> : <Check size={17} />}保存设置</button></div></fieldset></form> : <div className="cms-empty"><p>暂时无法加载网站设置。</p><button className="cms-secondary" onClick={load}>重新加载</button></div>}
+          <section className="cms-settings-panel">
+            <div><h2>公告与联系</h2><p>保持首页消息及时、清晰。</p></div>
+            <div className="cms-settings-fields">
+              <label>顶部公告
+                <textarea rows={4} maxLength={250} value={settings.announcement} onChange={event => setSettings({ ...settings, announcement: event.target.value })} />
+                <small>每行一条公告。上一条滚完后会间隔片刻，再播放下一条。留空时不显示公告栏。</small>
+              </label>
+              <label>联系链接<input type="url" placeholder="https://..." maxLength={1000} value={settings.contactUrl} onChange={event => setSettings({ ...settings, contactUrl: event.target.value })} /><small>可填写你的官方联系页面，留空则隐藏。</small></label>
+            </div>
+          </section><div className="cms-settings-save"><span>保存后，刷新前台即可查看最新内容。</span><button disabled={busy} className="cms-primary" type="submit">{busy ? <LoaderCircle size={17} className="cms-spin" /> : <Check size={17} />}保存设置</button></div></fieldset></form> : <div className="cms-empty"><p>暂时无法加载网站设置。</p><button className="cms-secondary" onClick={load}>重新加载</button></div>}
       </div>
     </main>
 
