@@ -1,6 +1,21 @@
+import type { Metadata } from 'next';
 import DirectoryClient from './DirectoryClient';
 import { readDirectory } from './lib/server-directory';
 export const dynamic = 'force-dynamic';
+
+export async function generateMetadata(): Promise<Metadata> {
+  try {
+    const { settings } = await readDirectory();
+    const avatar = settings.avatarImageUrl;
+    return {
+      title: `${settings.name} — A space for discovery`,
+      ...(avatar && { icons: { icon: avatar, apple: avatar } }),
+    };
+  } catch {
+    return {};
+  }
+}
+
 export default async function Home() {
   try {
     const data = await readDirectory();

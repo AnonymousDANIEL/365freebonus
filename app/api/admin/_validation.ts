@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { ApiError } from "./_security";
+import { isSafeImageUrl } from "../../lib/image-url";
 
 const safeUrl = z.string().trim().max(2048).refine(value => {
   if (!value) return true;
@@ -28,6 +29,8 @@ export const settingsInput = z.object({
   description: z.string().trim().max(1000),
   announcement: z.string().trim().max(300),
   contactUrl: safeUrl,
+  coverImageUrl: z.string().trim().max(2048).refine(isSafeImageUrl, "请输入 HTTPS 图片网址或以 / 开始的站内图片路径。").optional(),
+  avatarImageUrl: z.string().trim().max(2048).refine(isSafeImageUrl, "请输入 HTTPS 图片网址或以 / 开始的站内图片路径。").optional(),
 }).strict();
 
 export function validate<T>(schema: z.ZodType<T>, input: unknown): T {

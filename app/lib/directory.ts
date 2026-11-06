@@ -21,6 +21,8 @@ export type SiteSettings = {
   description: string;
   announcement: string;
   contactUrl: string;
+  coverImageUrl: string;
+  avatarImageUrl: string;
 };
 
 export type DirectoryData = { settings: SiteSettings; brands: Brand[] };
@@ -32,6 +34,8 @@ export const defaultSettings: SiteSettings = {
   description: "Thoughtfully chosen brands and fresh ideas, all in one elegant space. Take a look around — your next favourite could be here.",
   announcement: "Welcome to 365freebonus · A space for discovery.",
   contactUrl: "",
+  coverImageUrl: "",
+  avatarImageUrl: "",
 };
 
 // Fictional demonstration content. These entries make no real-world claims.

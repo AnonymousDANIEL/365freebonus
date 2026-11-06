@@ -11,12 +11,12 @@ export function authorizeOrigin(request: Request) {
   if (!hasValidOrigin(request)) throw new ApiError(403, "无法验证请求来源，请刷新后再试。");
 }
 
-export async function authorizeAdmin(request?: Request) {
+export async function authorizeAdmin(request?: Request, options?: { requireJson?: boolean }) {
   const user = await getChatGPTUser();
   if (!user) throw new ApiError(401, "登入已失效，请重新登入。");
   if (request && !["GET", "HEAD"].includes(request.method)) {
     authorizeOrigin(request);
-    if (!(request.headers.get("content-type") || "").toLowerCase().startsWith("application/json")) throw new ApiError(415, "请使用 JSON 格式。");
+    if (options?.requireJson !== false && !(request.headers.get("content-type") || "").toLowerCase().startsWith("application/json")) throw new ApiError(415, "请使用 JSON 格式。");
   }
   return user;
 }

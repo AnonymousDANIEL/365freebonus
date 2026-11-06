@@ -1,10 +1,17 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { ArrowUpRight, Check, ChevronRight, CircleHelp, ExternalLink, Eye, FileText, LayoutGrid, LoaderCircle, Plus, Search, Settings2, ShieldCheck, Sparkles, Trash2, X, Pencil, Globe, LogOut, Orbit, Sun, Gamepad2, Moon, Triangle } from "lucide-react";
+import { ArrowUpRight, Check, ChevronRight, CircleHelp, ExternalLink, Eye, FileText, ImageIcon, LayoutGrid, LoaderCircle, Plus, Search, Settings2, ShieldCheck, Sparkles, Trash2, Upload, UserRound, X, Pencil, Globe, LogOut, Orbit, Sun, Gamepad2, Moon, Triangle } from "lucide-react";
 import type { Brand, SiteSettings } from "../lib/directory";
+import { isSafeImageUrl } from "../lib/image-url";
 
 type Section = "brands" | "settings";
+type ImageField = "coverImageUrl" | "avatarImageUrl";
+const uploadTypes = ["image/jpeg", "image/png", "image/gif", "image/webp"];
+const imageFields: { key: ImageField; label: string; detail: string }[] = [
+  { key: "coverImageUrl", label: "首页封面", detail: "首页横幅使用，建议选用横向图片。" },
+  { key: "avatarImageUrl", label: "网站头像", detail: "网站标识使用，建议选用正方形图片。" },
+];
 class RequestError extends Error { constructor(message: string, public status: number) { super(message); } }
 function Reauthenticate() { return <a className="cms-reauth" href="/login?return_to=%2Fadmin" target="_top">重新登入 ↗</a>; }
 const categoryNames = { Gaming: "游戏", Lifestyle: "生活", Entertainment: "娱乐" };
@@ -15,11 +22,56 @@ function BrandIcon({ value }: { value: string }) {
   return <Icon size={24} strokeWidth={1.6} />;
 }
 
+function imagePreviewUrl(value: string): string {
+  const trimmed = value.trim();
+  return isSafeImageUrl(trimmed) ? trimmed : "";
+}
+
+function SettingsImageField({ field, label, detail, value, filename, uploading, onChange, onUpload }: {
+  field: ImageField;
+  label: string;
+  detail: string;
+  value: string;
+  filename?: string;
+  uploading: boolean;
+  onChange: (value: string) => void;
+  onUpload: (file: File) => void;
+}) {
+  const fileInput = useRef<HTMLInputElement>(null);
+  const [failedSrc, setFailedSrc] = useState("");
+  const previewSrc = imagePreviewUrl(value);
+  const invalid = Boolean(value.trim() && !previewSrc);
+  const avatar = field === "avatarImageUrl";
+  const PlaceholderIcon = avatar ? UserRound : ImageIcon;
+  return <div className="cms-image-field">
+    <div className="cms-image-field-heading"><h3>{label}</h3><p>{detail}</p></div>
+    <div className={`cms-image-preview${avatar ? " cms-avatar-preview" : ""}`}>
+      {previewSrc && failedSrc !== previewSrc ? <img src={previewSrc} alt={`${label}预览`} referrerPolicy="no-referrer" onError={() => setFailedSrc(previewSrc)} /> :
+        <div><PlaceholderIcon size={24} /><span>{previewSrc ? "图片无法加载" : "使用默认图片"}</span></div>}
+    </div>
+    <div className="cms-image-url">
+      <label htmlFor={field}>{label}地址<input id={field} type="text" inputMode="url" autoComplete="off" spellCheck={false} maxLength={2048} value={value} onChange={event => onChange(event.target.value)} placeholder="https://… 或 /images/…" aria-invalid={invalid || undefined} aria-describedby={`${field}-hint`} /></label>
+      <small id={`${field}-hint`} className={invalid ? "cms-image-invalid" : undefined}>{invalid ? "请输入 HTTPS 图片地址或以 / 开头的本站图片路径。" : "可粘贴图片地址，也可从设备上传。"}</small>
+    </div>
+    <div className="cms-image-actions">
+      <input ref={fileInput} type="file" hidden accept="image/jpeg,image/png,image/gif,image/webp,.jpg,.jpeg,.png,.gif,.webp" aria-label={`上传${label}`} onChange={event => {
+        const file = event.currentTarget.files?.[0];
+        event.currentTarget.value = "";
+        if (file) onUpload(file);
+      }} />
+      <button type="button" className="cms-secondary" onClick={() => fileInput.current?.click()}>{uploading ? <LoaderCircle size={15} className="cms-spin" /> : <Upload size={15} />}{uploading ? "正在上传…" : `上传${label}`}</button>
+      {value && <button type="button" className="cms-image-clear" onClick={() => { onChange(""); setFailedSrc(""); }}><X size={14} />恢复默认</button>}
+    </div>
+    {filename && <div className="cms-image-filename" title={filename}><Check size={14} />{filename}</div>}
+  </div>;
+}
+
 async function request<T>(path: string, method = "GET", body?: unknown): Promise<T> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 20000);
+  const file = body instanceof Blob ? body : null;
+  const timer = setTimeout(() => controller.abort(), file ? 60000 : 20000);
   try {
-    const response = await fetch(path, { method, headers: method === "GET" ? undefined : { "Content-Type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body), credentials: "same-origin", cache: "no-store", signal: controller.signal });
+    const response = await fetch(path, { method, headers: method === "GET" ? undefined : { "Content-Type": file ? file.type || "application/octet-stream" : "application/json" }, body: file ?? (body === undefined ? undefined : JSON.stringify(body)), credentials: "same-origin", cache: "no-store", signal: controller.signal });
     const result = await response.json().catch(() => ({ error: "服务器返回了无法读取的内容，请稍后重试。" })) as T & { error?: string };
     if (!response.ok) throw new RequestError(result.error || "操作失败，请重试。", response.status);
     return result;
@@ -40,6 +92,8 @@ export default function AdminClient({ displayName }: { displayName: string }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
+  const [uploading, setUploading] = useState<ImageField | null>(null);
+  const [imageNames, setImageNames] = useState<Partial<Record<ImageField, string>>>({});
   const [sessionExpired, setSessionExpired] = useState(false);
   const [editing, setEditing] = useState<Brand | null>(null);
   const [deleting, setDeleting] = useState<Brand | null>(null);
@@ -96,8 +150,34 @@ export default function AdminClient({ displayName }: { displayName: string }) {
     try { await request("/api/auth/logout", "POST", {}); window.location.assign("/login"); }
     catch (err) { fail(err, "退出失败，请重试。"); setBusy(false); }
   }
+  function changeImage(field: ImageField, value: string) {
+    setSettings(current => current ? { ...current, [field]: value } : current);
+    setImageNames(current => ({ ...current, [field]: undefined }));
+  }
+  async function uploadSettingsImage(field: ImageField, file: File) {
+    if (!settings || busy) return;
+    setError(""); setSuccess(""); setSessionExpired(false);
+    if (!(file.type && file.type !== "application/octet-stream" ? uploadTypes.includes(file.type) : /\.(jpe?g|png|gif|webp)$/i.test(file.name))) {
+      setError("请选择 JPG、PNG、GIF 或 WebP 图片。"); return;
+    }
+    if (!file.size || file.size > 5 * 1024 * 1024) {
+      setError("图片不能为空，每张最多 5 MB。"); return;
+    }
+    setBusy(true); setUploading(field);
+    try {
+      const { url } = await request<{ url: string }>("/api/admin/images", "POST", file);
+      if (typeof url !== "string" || !url.startsWith("/api/images/") || !imagePreviewUrl(url)) throw new Error("无法读取上传结果，请重试。");
+      setSettings(current => current ? { ...current, [field]: url } : current);
+      setImageNames(current => ({ ...current, [field]: file.name }));
+      notify("已上传，保存设置后生效。");
+    } catch (err) { fail(err, "上传图片失败，请重试。"); }
+    finally { setUploading(null); setBusy(false); }
+  }
   async function saveSettings(event: React.FormEvent) {
-    event.preventDefault(); if (!settings || busy) return; setBusy(true); setError("");
+    event.preventDefault(); if (!settings || busy) return;
+    const invalidImage = imageFields.find(({ key }) => settings[key]?.trim() && !imagePreviewUrl(settings[key]));
+    if (invalidImage) { setSuccess(""); setSessionExpired(false); setError(`${invalidImage.label}地址格式不正确，请输入 HTTPS 地址或本站图片路径。`); return; }
+    setBusy(true); setError("");
     try { const result = await request<{ settings: SiteSettings }>("/api/admin/settings", "PUT", settings); setSettings(result.settings); notify("网站设置已保存。"); }
     catch (err) { fail(err, "保存失败"); }
     finally { setBusy(false); }
@@ -132,7 +212,12 @@ export default function AdminClient({ displayName }: { displayName: string }) {
           {visibleBrands.length === 0 && <div className="cms-empty"><Search size={29} /><h3>{query || filter !== "all" ? "没有找到符合条件的品牌" : "你的第一个品牌，从这里开始"}</h3><p>{query || filter !== "all" ? "试试其他关键词或状态。" : "添加品牌，填写内容，再上架到前台。"}</p>{!query && filter === "all" && <button className="cms-primary" onClick={() => openEditor()}><Plus size={16} />添加品牌</button>}</div>}
           <div className="cms-panel-footer"><span>显示 {visibleBrands.length} / {brands.length} 个品牌</span><small><CircleHelp size={14} />排序数字越小，显示越靠前</small></div></section>
           <p className="cms-footnote">内容由你管理 · 演示品牌仅用于展示页面效果</p>
-        </> : settings ? <form className="cms-settings-form" onSubmit={saveSettings}><fieldset disabled={busy}><section className="cms-settings-panel"><div><h2>品牌与首页</h2><p>这里的内容会显示在前台首页。</p></div><div className="cms-settings-fields"><label>网站名称<input required maxLength={40} value={settings.name} onChange={event => setSettings({ ...settings, name: event.target.value })} /></label><label>首页小标题<input maxLength={100} value={settings.eyebrow} onChange={event => setSettings({ ...settings, eyebrow: event.target.value })} /><small>显示在首页主标题上方。</small></label><label>首页主标题<textarea required rows={3} maxLength={120} value={settings.headline} onChange={event => setSettings({ ...settings, headline: event.target.value })} /></label><label>首页介绍<textarea rows={4} maxLength={600} value={settings.description} onChange={event => setSettings({ ...settings, description: event.target.value })} /></label></div></section><section className="cms-settings-panel"><div><h2>公告与联系</h2><p>保持首页消息及时、清晰。</p></div><div className="cms-settings-fields"><label>顶部公告<input maxLength={250} value={settings.announcement} onChange={event => setSettings({ ...settings, announcement: event.target.value })} /><small>留空时不显示公告栏。</small></label><label>联系链接<input type="url" placeholder="https://..." maxLength={1000} value={settings.contactUrl} onChange={event => setSettings({ ...settings, contactUrl: event.target.value })} /><small>可填写你的官方联系页面，留空则隐藏。</small></label></div></section><div className="cms-settings-save"><span>保存后，刷新前台即可查看最新内容。</span><button disabled={busy} className="cms-primary" type="submit">{busy ? <LoaderCircle size={17} className="cms-spin" /> : <Check size={17} />}保存设置</button></div></fieldset></form> : <div className="cms-empty"><p>暂时无法加载网站设置。</p><button className="cms-secondary" onClick={load}>重新加载</button></div>}
+        </> : settings ? <form className="cms-settings-form" onSubmit={saveSettings}><fieldset disabled={busy}><section className="cms-settings-panel"><div><h2>品牌与首页</h2><p>这里的内容会显示在前台首页。</p></div><div className="cms-settings-fields"><label>网站名称<input required maxLength={40} value={settings.name} onChange={event => setSettings({ ...settings, name: event.target.value })} /></label><label>首页小标题<input maxLength={100} value={settings.eyebrow} onChange={event => setSettings({ ...settings, eyebrow: event.target.value })} /><small>显示在首页主标题上方。</small></label><label>首页主标题<textarea required rows={3} maxLength={120} value={settings.headline} onChange={event => setSettings({ ...settings, headline: event.target.value })} /></label><label>首页介绍<textarea rows={4} maxLength={600} value={settings.description} onChange={event => setSettings({ ...settings, description: event.target.value })} /></label></div></section>
+          <section className="cms-settings-panel"><div><h2>首页封面与头像</h2><p>上传图片或输入图片地址。保存后更新前台，留空则使用默认图片。</p></div><div className="cms-settings-fields cms-image-fields">
+            {imageFields.map(({ key, label, detail }) => <SettingsImageField key={key} field={key} label={label} detail={detail} value={settings[key] || ""} filename={imageNames[key]} uploading={uploading === key} onChange={value => changeImage(key, value)} onUpload={file => uploadSettingsImage(key, file)} />)}
+            <p className="cms-image-form-hint">支持 JPG、PNG、GIF、WebP，每张最多 5 MB。</p>
+          </div></section>
+          <section className="cms-settings-panel"><div><h2>公告与联系</h2><p>保持首页消息及时、清晰。</p></div><div className="cms-settings-fields"><label>顶部公告<input maxLength={250} value={settings.announcement} onChange={event => setSettings({ ...settings, announcement: event.target.value })} /><small>留空时不显示公告栏。</small></label><label>联系链接<input type="url" placeholder="https://..." maxLength={1000} value={settings.contactUrl} onChange={event => setSettings({ ...settings, contactUrl: event.target.value })} /><small>可填写你的官方联系页面，留空则隐藏。</small></label></div></section><div className="cms-settings-save"><span>保存后，刷新前台即可查看最新内容。</span><button disabled={busy} className="cms-primary" type="submit">{busy ? <LoaderCircle size={17} className="cms-spin" /> : <Check size={17} />}保存设置</button></div></fieldset></form> : <div className="cms-empty"><p>暂时无法加载网站设置。</p><button className="cms-secondary" onClick={load}>重新加载</button></div>}
       </div>
     </main>
 

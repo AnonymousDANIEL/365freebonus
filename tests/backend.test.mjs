@@ -1,18 +1,19 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import { scryptSync } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
+import { DatabaseSync } from 'node:sqlite';
 import ts from 'typescript';
 
 // Compile the actual server modules in an isolated fixture, so persistence and
 // auth checks can run without a Next request context or touching app data.
 const fixture = mkdtempSync(path.join(tmpdir(), 'directory-backend-'));
 writeFileSync(path.join(fixture, 'package.json'), '{"type":"commonjs"}');
-for (const name of ['sqlite', 'directory', 'server-directory', 'auth-core', 'session-store']) {
+for (const name of ['sqlite', 'directory', 'server-directory', 'auth-core', 'session-store', 'image-url', 'image-media']) {
   const source = readFileSync(new URL(`../app/lib/${name}.ts`, import.meta.url), 'utf8');
   const { outputText } = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, esModuleInterop: true } });
   writeFileSync(path.join(fixture, `${name}.js`), outputText);
@@ -23,6 +24,9 @@ process.env.DATA_DIR = path.join(fixture, 'data');
 const directory = require(path.join(fixture, 'server-directory.js'));
 const auth = require(path.join(fixture, 'auth-core.js'));
 const sessions = require(path.join(fixture, 'session-store.js'));
+const sqlite = require(path.join(fixture, 'sqlite.js'));
+const { isSafeImageUrl } = require(path.join(fixture, 'image-url.js'));
+const images = require(path.join(fixture, 'image-media.js'));
 const salt = '0123456789abcdef0123456789abcdef';
 const password = 'a-long-fixture-password';
 const config = { username: 'admin', passwordHash: `scrypt$${salt}$${scryptSync(password, Buffer.from(salt, 'hex'), 64).toString('hex')}`, secret: 'fixture-session-secret-with-more-than-32-characters' };
@@ -106,6 +110,77 @@ test('directory CRUD persists, excludes drafts and never resurrects deleted rows
   directory.deleteBrand(sample.id);
   directory.deleteBrand(initial.brands[0].id);
   assert.equal((await directory.readDirectory(true)).brands.some(brand => brand.id === sample.id || brand.id === initial.brands[0].id), false);
+});
+
+test('image settings migration preserves the v1 row and old updates do not clear image selections', async () => {
+  const legacyPath = path.join(fixture, 'legacy');
+  mkdirSync(legacyPath);
+  const legacy = new DatabaseSync(path.join(legacyPath, 'directory.sqlite'));
+  legacy.exec(`CREATE TABLE site_settings (
+    id TEXT PRIMARY KEY, name TEXT NOT NULL, eyebrow TEXT NOT NULL,
+    headline TEXT NOT NULL, description TEXT NOT NULL, announcement TEXT NOT NULL,
+    contact_url TEXT NOT NULL DEFAULT ''
+  );
+  INSERT INTO site_settings VALUES ('primary', 'Existing site', 'Tagline', 'Existing headline', 'Existing description', 'Existing notice', 'https://contact.example');
+  PRAGMA user_version = 1;`);
+  legacy.close();
+  const fixtureData = process.env.DATA_DIR;
+  try {
+    process.env.DATA_DIR = legacyPath;
+    const upgraded = sqlite.getSqlite();
+    const row = upgraded.prepare('SELECT * FROM site_settings').get();
+    assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version, 2);
+    assert.deepEqual({ ...row }, {
+      id: 'primary', name: 'Existing site', eyebrow: 'Tagline', headline: 'Existing headline',
+      description: 'Existing description', announcement: 'Existing notice', contact_url: 'https://contact.example',
+      cover_image_url: '', avatar_image_url: '',
+    });
+  } finally { process.env.DATA_DIR = fixtureData; }
+
+  const { coverImageUrl: _cover, avatarImageUrl: _avatar, ...oldSettings } = (await directory.readDirectory()).settings;
+  const cover = '/images/custom-cover.webp';
+  const avatar = 'https://cdn.example/avatar.png';
+  directory.updateSettings({ ...oldSettings, coverImageUrl: cover, avatarImageUrl: avatar });
+  const saved = directory.updateSettings({ ...oldSettings, name: 'Updated using old fields' });
+  assert.equal(saved.coverImageUrl, cover);
+  assert.equal(saved.avatarImageUrl, avatar);
+  assert.equal(saved.name, 'Updated using old fields');
+  directory.updateSettings({ ...oldSettings, avatarImageUrl: '' });
+  assert.equal((await directory.readDirectory()).settings.avatarImageUrl, '');
+  assert.equal((await directory.readDirectory()).settings.coverImageUrl, cover);
+});
+
+test('image setting addresses allow safe same-site paths and HTTPS URLs only', () => {
+  for (const value of ['', '/images/banner.webp?rev=2', '/api/images/7ab01f.png', 'https://cdn.example/photo.png']) assert.equal(isSafeImageUrl(value), true, value);
+  for (const value of ['//external.example/file.png', '/\\external.example/file.png', '/%2fexternal.example/file.png', '/%2e%2e/file.png', 'https://user:secret@cdn.example/file.png', 'https://cdn.example/"bad.png', 'http://cdn.example/photo.png', 'data:image/png;base64,abc', 'javascript:alert(1)']) assert.equal(isSafeImageUrl(value), false, value);
+});
+
+test('raster uploads persist and stream with detected type, and reject SVG, oversize and traversal', async () => {
+  // Real 2x2-pixel fixtures for each supported format.
+  const fixtures = {
+    png: ['image/png', 'iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAFklEQVR42mO8vKWcgYGBiYGBgYGBAQAYbgICgbNezwAAAABJRU5ErkJggg=='],
+    jpg: ['image/jpeg', '/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjL/wAARCAACAAIDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAb/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFQEBAQAAAAAAAAAAAAAAAAAABQb/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIRAxEAPwC2AT5J/9k='],
+    gif: ['image/gif', 'R0lGODdhAgACAIEAANO0dwAAAAAAAAAAACwAAAAAAgACAAAIBgABCAQQEAA7'],
+    webp: ['image/webp', 'UklGRjYAAABXRUJQVlA4ICoAAACQAQCdASoCAAIAAUAmJaACdLoAA5gA/vKIf/yDHkp6GtEv5I7z2XwAAAA='],
+  };
+  for (const [extension, [mime, base64]] of Object.entries(fixtures)) {
+    const bytes = Buffer.from(base64, 'base64');
+    const request = new Request('http://local/api/admin/images', { method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: bytes });
+    const url = await images.saveImage(await images.readImageUpload(request));
+    assert.match(url, new RegExp(`^/api/images/[0-9a-f]{32}\\.${extension}$`));
+    const filename = url.split('/').at(-1);
+    assert.deepEqual(readFileSync(path.join(process.env.DATA_DIR, 'media', filename)), bytes);
+    const opened = await images.openImage(filename);
+    assert.equal(opened.mime, mime);
+    assert.equal(opened.size, bytes.length);
+    assert.deepEqual(Buffer.from(await new Response(opened.stream).arrayBuffer()), bytes);
+  }
+  const disguisedSvg = new Request('http://local/api/admin/images', { method: 'POST', headers: { 'Content-Type': 'image/png' }, body: '<svg xmlns="http://www.w3.org/2000/svg" />' });
+  await assert.rejects(images.saveImage(await images.readImageUpload(disguisedSvg)), { status: 415 });
+  const oversized = new Request('http://local/api/admin/images', { method: 'POST', headers: { 'Content-Type': 'image/png' }, body: new Uint8Array(images.MAX_IMAGE_BYTES + 1) });
+  await assert.rejects(images.readImageUpload(oversized), { status: 413 });
+  assert.equal(await images.openImage('../directory.sqlite'), null);
+  assert.equal(await images.openImage(`${'0'.repeat(32)}.png`), null);
 });
 
 test.after(() => {
