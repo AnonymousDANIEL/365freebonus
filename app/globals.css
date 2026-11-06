@@ -8,7 +8,18 @@
 @media(max-width:1150px){.hero h1{font-size:52px;letter-spacing:-2px}.wordmark{font-size:24px}.hero-visual{margin-right:-20px}}@media(max-width:900px){.hero h1{font-size:45px}.hero{min-height:520px}.hero-visual{height:390px}.wordmark{font-size:23px}}@media(max-width:640px){.wordmark{font-size:21px;gap:7px;letter-spacing:-.7px}.site-logo-image{width:27px;height:27px}.hero{padding-top:36px;padding-bottom:14px;min-height:0}.hero h1{font-size:46px;letter-spacing:-2px;margin-top:23px}.hero-copy>p{font-size:12px;max-width:345px}.hero-visual{height:310px;margin-top:5px;margin-right:-21px;margin-left:-21px}.brand-scene-image{inset:-5px 0;mask-image:linear-gradient(90deg,transparent,black 9%,black 92%,transparent),linear-gradient(0deg,transparent,black 13%,black 85%,transparent)}.brand-scene-image img{object-position:88% center}.hero-footnote{margin-top:27px}.banner-art{right:0;scale:.6}.editorial-banner{min-height:270px}.nav-actions{gap:11px}.lang-switch{gap:7px}.lang-switch button{font-size:8px}.hero .primary-button{font-size:11px}.glint-one{right:18%;top:15%}}@media(max-width:370px){.wordmark{font-size:19px}.site-logo-image{width:24px;height:24px}.hero h1{font-size:41px}.nav-actions{gap:8px}}
 @media(prefers-reduced-motion:reduce){.brand-scene-image{transform:none!important}}
 
-/* The artwork includes the motion. Keep its full frame visible across layouts. */
+/* The hero keeps its readable content width while its orbit uses the full stage. */
+.hero-stage {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+}
+.hero-stage.has-gift-orbit {
+  background:
+    radial-gradient(ellipse at 0% 58%, #53214d38 0%, transparent 29%),
+    radial-gradient(ellipse at 100% 45%, #70285d35 0%, transparent 30%);
+}
+
 .brand-scene-image {
   inset: 0;
   display: block;
@@ -21,26 +32,4 @@
   object-fit: contain;
   object-position: center;
   filter: none;
-}
-.brand-motion-toggle {
-  position: absolute;
-  z-index: 1;
-  right: 18px;
-  bottom: 12px;
-  width: 36px;
-  height: 36px;
-  display: grid;
-  place-items: center;
-  border: 1px solid #d4b77966;
-  border-radius: 50%;
-  background: #170f1cdd;
-  color: #f5db9c;
-  cursor: pointer;
-}
-.brand-motion-toggle:focus-visible {
-  outline: 2px solid #f5db9c;
-  outline-offset: 3px;
-}
-@media (prefers-reduced-motion: reduce) {
-  .brand-motion-toggle { display: none; }
 }

@@ -3,7 +3,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowUpRight, ArrowRight, Search, X, Heart, Gamepad2, Sparkles, Orbit, Sun, Moon, Triangle, ChevronDown, SlidersHorizontal, LayoutGrid, Bookmark, Menu, Globe2, Compass, ExternalLink, Check, Zap, Layers, MoveUpRight, HelpCircle } from 'lucide-react';
 import BrandScene from './components/BrandScene';
-import { defaultAvatarImageUrl } from './lib/brand-media';
+import GiftOrbit from './components/GiftOrbit';
+import { defaultAvatarImageUrl, defaultCoverImageUrl, legacyDefaultCoverImageUrl } from './lib/brand-media';
 import type { Brand, DirectoryData } from './lib/directory';
 
 type Lang = 'EN' | 'BM' | '中文';
@@ -24,6 +25,9 @@ function BrandArtwork({brand,large=false}:{brand:Brand,large?:boolean}) {
 export default function DirectoryClient({initialData}:{initialData:DirectoryData}) {
  const {settings,brands}=initialData;
  const avatarImageUrl = settings.avatarImageUrl || defaultAvatarImageUrl;
+ const hasDefaultGift = !settings.coverImageUrl
+   || settings.coverImageUrl === defaultCoverImageUrl
+   || settings.coverImageUrl === legacyDefaultCoverImageUrl;
  const [lang,setLang]=useState<Lang>('EN'); const t=words[lang];
  const [query,setQuery]=useState(''); const [category,setCategory]=useState('All'); const [sort,setSort]=useState('featured');
  const [saved,setSaved]=useState<string[]>([]); const [savedReady,setSavedReady]=useState(false); const [onlySaved,setOnlySaved]=useState(false);
@@ -43,7 +47,33 @@ export default function DirectoryClient({initialData}:{initialData:DirectoryData
   {settings.announcement && <div className="announcement"><span className="live-dot"/>{settings.announcement}<ArrowUpRight size={13}/></div>}
   <header className="site-header"><div className="nav-shell"><a className="wordmark" href="/" aria-label={`${settings.name} home`}><img className="site-logo-image" src={avatarImageUrl} alt=""/>{settings.name}<span className="wordmark-point">®</span></a><nav className="desktop-nav" aria-label="Main navigation"><button className="nav-active" onClick={()=>{setOnlySaved(false);jump('collection');}}>{t.discover}<span/></button><button onClick={()=>jump('collection')}>{t.collection}</button><button onClick={()=>jump('how-it-works')}>{t.how}</button></nav><div className="nav-actions"><div className="lang-switch" aria-label="Language">{(['EN','BM','中文'] as Lang[]).map(l=><button key={l} aria-pressed={lang===l} className={lang===l?'selected':''} onClick={()=>setLang(l)}>{l}</button>)}</div><button className={`saved-nav ${onlySaved?'is-saved':''}`} onClick={showSaved}><Bookmark size={15}/><span>{t.saved}</span><span className="saved-count">{saved.length}</span></button><button className="mobile-menu icon-button" aria-label="Toggle menu" aria-expanded={menu} onClick={()=>setMenu(!menu)}>{menu?<X/>:<Menu/>}</button></div></div>{menu&&<nav className="mobile-nav"><button onClick={()=>jump('collection')}>{t.collection}</button><button onClick={()=>jump('how-it-works')}>{t.how}</button><button onClick={showSaved}>{t.saved} ({saved.length})</button><a href="/admin">{t.dashboard}</a></nav>}</header>
   <main>
-   <section className="hero section-shell"><div className="hero-copy"><div className="eyebrow"><span className="mini-star">✳</span>{settings.eyebrow}</div><h1>{settings.headline.split('\n').map((line,i)=><span key={i} className={i>0?'accent-line':''}>{line}</span>)}</h1><p>{settings.description}</p><div className="hero-actions"><button className="primary-button" onClick={()=>{setOnlySaved(false);jump('collection');}}>{t.explore}<ArrowUpRight size={19}/></button><button className="hero-secondary" onClick={()=>jump('how-it-works')}><span className="circle-arrow"><ArrowRight size={17}/></span>{t.how}</button></div><div className="hero-footnote"><span className="mini-avatars"><span><Orbit/></span><span><Sparkles/></span><span><Triangle/></span></span><div><strong>{brands.length} unique brands. Endless possibilities.</strong><span>{t.intro}</span></div></div></div><div className="hero-visual"><BrandScene coverImageUrl={settings.coverImageUrl} language={lang} /></div></section>
+   <section className={hasDefaultGift ? 'hero-stage has-gift-orbit' : 'hero-stage'}>
+    <div className="hero section-shell">
+     <div className="hero-copy">
+      <div className="eyebrow"><span className="mini-star">✳</span>{settings.eyebrow}</div>
+      <h1>{settings.headline.split('\n').map((line, index) => (
+        <span key={index} className={index > 0 ? 'accent-line' : ''}>{line}</span>
+      ))}</h1>
+      <p>{settings.description}</p>
+      <div className="hero-actions">
+       <button className="primary-button" onClick={() => { setOnlySaved(false); jump('collection'); }}>
+        {t.explore}<ArrowUpRight size={19} />
+       </button>
+       <button className="hero-secondary" onClick={() => jump('how-it-works')}>
+        <span className="circle-arrow"><ArrowRight size={17} /></span>{t.how}
+       </button>
+      </div>
+      <div className="hero-footnote">
+       <span className="mini-avatars"><span><Orbit /></span><span><Sparkles /></span><span><Triangle /></span></span>
+       <div><strong>{brands.length} unique brands. Endless possibilities.</strong><span>{t.intro}</span></div>
+      </div>
+     </div>
+     <div className="hero-visual">
+      <BrandScene coverImageUrl={hasDefaultGift ? defaultCoverImageUrl : settings.coverImageUrl} />
+     </div>
+    </div>
+    {hasDefaultGift && <GiftOrbit />}
+   </section>
    <div className="partner-strip"><div className="section-shell"><span>THE DISCOVERY<br/><strong>COLLECTION</strong></span><div>{brands.slice(0,5).map(b=>{const I=brandIcons[b.icon]||Sparkles;return <button key={b.id} onClick={()=>setActive(b)}><I size={23}/>{b.name}</button>;})}</div><span className="strip-star">✳</span></div></div>
    {featured.length>0&&!onlySaved&&<section className="spotlight section-shell"><div className="section-heading"><div><div className="eyebrow muted-eyebrow"><span className="tiny-square"/>{t.featured}</div><h2>{t.editor}</h2></div><button className="text-button" onClick={()=>jump('collection')}>{t.all}<ArrowUpRight size={17}/></button></div><div className="spotlight-grid">{featured.map((b,i)=><article className={`spotlight-card spotlight-${i}`} key={b.id} style={{'--brand-color':b.color} as React.CSSProperties}><button className="spotlight-open" onClick={()=>setActive(b)} aria-label={`${t.view} ${b.name}`}><BrandArtwork brand={b}/><div className="spotlight-overlay"><span className="spotlight-tag"><span/>{i===0?'EDITOR’S PICK':i===1?'A FRESH PERSPECTIVE':'ONE TO EXPLORE'}</span><div className="spotlight-text"><div><small>{b.category}</small><h3>{b.name}</h3><p>{b.tagline}</p></div><span className="round-link"><ArrowUpRight size={22}/></span></div></div></button><button className={`favorite-button ${saved.includes(b.id)?'is-saved':''}`} aria-label={saved.includes(b.id)?`Unsave ${b.name}`:`Save ${b.name}`} aria-pressed={saved.includes(b.id)} onClick={()=>toggleSaved(b.id)}><Heart size={17} fill={saved.includes(b.id)?'currentColor':'none'}/></button></article>)}</div></section>}
    <section className="collection section-shell" id="collection"><div className="section-heading collection-heading"><div><div className="eyebrow muted-eyebrow"><span className="tiny-square"/> {onlySaved?'YOUR PERSONAL EDIT':'EXPLORE THE DIRECTORY'}</div><h2>{onlySaved?t.favorite:t.browse}</h2><p>{onlySaved?t.noSaved:t.sub}</p></div><span className="collection-symbol">↗</span></div><div className="directory-tools"><div className="category-tabs" aria-label="Filter categories">{categories.map(([c,label,I])=><button key={c} className={category===c?'active':''} onClick={()=>setCategory(c)} aria-pressed={category===c}><I size={15}/>{label}{c==='All'&&<span>{brands.length}</span>}</button>)}</div><label className="search-input"><Search size={17}/><input type="search" value={query} onChange={e=>setQuery(e.target.value)} placeholder={t.search} aria-label={t.search}/>{query&&<button aria-label="Clear search" onClick={()=>setQuery('')}><X size={15}/></button>}</label></div><div className="results-toolbar"><span>{String(filtered.length).padStart(2,'0')} <span>{t.result}</span>{onlySaved&&<button className="filter-pill" onClick={()=>setOnlySaved(false)}>{t.saved}<X size={12}/></button>}</span><label><SlidersHorizontal size={13}/><select aria-label="Sort brands" value={sort} onChange={e=>setSort(e.target.value)}><option value="featured">{t.sort}</option><option value="az">{t.az}</option></select><ChevronDown size={12}/></label></div><div className="brand-grid">{filtered.map(b=>{const I=brandIcons[b.icon]||Sparkles;return <article key={b.id} className="directory-card" style={{'--brand-color':b.color} as React.CSSProperties}><div className="card-image"><button className="art-open" onClick={()=>setActive(b)} aria-label={`${t.view} ${b.name}`}><BrandArtwork brand={b}/></button><span className="category-tag">{categories.find(c=>c[0]===b.category)?.[1]||b.category}</span><button className={`favorite-button ${saved.includes(b.id)?'is-saved':''}`} aria-label={saved.includes(b.id)?`Unsave ${b.name}`:`Save ${b.name}`} aria-pressed={saved.includes(b.id)} onClick={()=>toggleSaved(b.id)}><Heart size={16} fill={saved.includes(b.id)?'currentColor':'none'}/></button></div><div className="card-content"><div className="card-brand"><span className="brand-mini"><I size={18}/></span><h3>{b.name}</h3>{b.featured&&<Sparkles className="featured-icon" size={14}/>}</div><p>{b.tagline}</p><button className="card-action" onClick={()=>setActive(b)}>{t.view}<ArrowUpRight size={16}/></button></div></article>;})}</div>{filtered.length===0&&<div className="empty-state"><Compass size={40}/><h3>{t.empty}</h3><p>{t.emptyText}</p><button className="primary-button" onClick={()=>{setCategory('All');setQuery('');setOnlySaved(false);}}>{t.clear}<ArrowRight size={16}/></button></div>}<div className="demo-note"><span className="live-dot"/><span>{t.demo}</span><span className="demo-divider">/</span>{t.demoText}</div></section>
