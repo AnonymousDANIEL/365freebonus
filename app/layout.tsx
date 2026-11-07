@@ -1,5 +1,7 @@
 import type { Metadata } from 'next';
 import './globals.css';
+import './public-light.css';
+import './brand-media.css';
 import { defaultAvatarImageUrl } from './lib/brand-media';
 
 export const metadata: Metadata = {

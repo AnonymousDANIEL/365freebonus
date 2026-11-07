@@ -13,3 +13,69 @@
 .cms-file-picker{position:relative}.cms-file-picker:focus-within{outline:2px solid var(--cms-green);outline-offset:2px}
 .cms-image-actions .cms-file-picker input{position:absolute;inset:0;width:100%;height:100%;margin:0;padding:0;opacity:0;cursor:pointer}
 .cms-file-picker:has(input:disabled){opacity:.55}.cms-file-picker input:disabled{cursor:not-allowed}
+
+/* Theme preferences are local to management pages; public site styles stay independent. */
+.cms-shell{--cms-bg:#120c1b;--cms-panel:#1b1326;--cms-sidebar:#160f20;--cms-inset:#21172e;--cms-input:#160f20;--cms-hover:#2b1e38;--cms-line:#3a2c45;--cms-text:#f4edf8;--cms-muted:#b0a0bc;--cms-subtle:#96849f;--cms-green:#d3b477;--cms-action:#d3b477;--cms-action-hover:#e3c894;--cms-accent-bg:#d3b47715;--cms-neutral-bg:#2a2035;--cms-image-mat:#21172e;--cms-error:#f2a7b0;--cms-error-bg:#742f4028;--cms-error-line:#9e536166;--cms-dialog-shadow:0 24px 100px #0009;color-scheme:dark}
+.cms-shell[data-admin-theme=light]{--cms-bg:#f6f3f9;--cms-panel:#fff;--cms-sidebar:#fff;--cms-inset:#f2edf6;--cms-input:#fcfaff;--cms-hover:#eee6f4;--cms-line:#e1d8e9;--cms-text:#302239;--cms-muted:#75617f;--cms-subtle:#81718c;--cms-green:#86632d;--cms-action:#d3b477;--cms-action-hover:#ddc18b;--cms-accent-bg:#f6eddd;--cms-neutral-bg:#ede6f3;--cms-image-mat:#f1edf6;--cms-error:#aa354b;--cms-error-bg:#fff1f3;--cms-error-line:#e7bcc5;--cms-dialog-shadow:0 24px 100px #3a23442e;color-scheme:light}
+.cms-shell .cms-sidebar{background:var(--cms-sidebar)}
+.cms-shell .cms-workspace-label,.cms-shell .cms-nav-arrow,.cms-shell .cms-user small,.cms-shell .cms-page-heading p,.cms-shell .cms-stats>div>span,.cms-shell .cms-stats small,.cms-shell .cms-brand-cell small,.cms-shell .cms-order,.cms-shell .cms-panel-footer,.cms-shell .cms-panel-footer small,.cms-shell .cms-footnote,.cms-shell .cms-loading,.cms-shell .cms-empty,.cms-shell .cms-settings-panel p,.cms-shell .cms-settings-form label small,.cms-shell .cms-form-grid label small,.cms-shell .cms-settings-save>span,.cms-shell .cms-editor-preview small,.cms-shell .cms-switches small,.cms-shell .cms-confirm p,.cms-shell .cms-settings-panel .cms-image-field-heading p,.cms-shell .cms-image-url small,.cms-shell .cms-settings-panel .cms-image-form-hint,.cms-shell .cms-photo-hint{color:var(--cms-muted)}
+.cms-shell .cms-sidebar nav button,.cms-shell .cms-sidebar nav a,.cms-shell .cms-user>button{color:var(--cms-muted)}
+.cms-shell .cms-sidebar nav button:hover,.cms-shell .cms-sidebar nav a:hover{background:var(--cms-hover);color:var(--cms-text)}
+.cms-shell .cms-sidebar nav button.active{background:var(--cms-accent-bg);color:var(--cms-green)}
+.cms-shell .cms-sidebar nav button span{background:var(--cms-accent-bg)}
+.cms-shell .cms-side-note{background:var(--cms-inset);border-color:var(--cms-line);color:var(--cms-muted)}
+.cms-shell .cms-side-note strong,.cms-shell .cms-user strong,.cms-shell .cms-brand-cell strong,.cms-shell .cms-empty h3,.cms-shell .cms-image-field-heading h3{color:var(--cms-text)}
+.cms-shell .cms-side-note svg,.cms-shell .cms-logo-symbol,.cms-shell .cms-logo-dot,.cms-shell .cms-eyebrow,.cms-shell .cms-image-preview>div svg{color:var(--cms-green)}
+.cms-shell .cms-user>span{background:var(--cms-action);color:#302417}
+.cms-shell .cms-topbar{color:var(--cms-muted);background:var(--cms-bg)}
+.cms-shell .cms-topbar>.cms-breadcrumb span{color:var(--cms-text)}
+.cms-shell .cms-topbar>.cms-breadcrumb .cms-breadcrumb-parent{color:var(--cms-muted)}
+.cms-shell .cms-topbar-actions{display:flex;align-items:center;gap:12px}
+.cms-shell .cms-preview-link{display:inline-flex;align-items:center;gap:8px;min-height:36px;padding:7px 11px;border:1px solid var(--cms-line);border-radius:7px;background:var(--cms-panel);color:var(--cms-muted);white-space:nowrap}
+.cms-shell .cms-preview-link:hover{background:var(--cms-hover);color:var(--cms-text)}
+.cms-shell .cms-page-heading h1>span,.cms-shell .cms-stats svg,.cms-shell .cms-empty>svg{color:var(--cms-subtle)}
+.cms-shell .cms-primary{background:var(--cms-action);border-color:var(--cms-action);color:#302417}
+.cms-shell .cms-primary:hover{background:var(--cms-action-hover);border-color:var(--cms-action-hover)}
+.cms-shell .cms-secondary{background:var(--cms-inset);border-color:var(--cms-line);color:var(--cms-text)}
+.cms-shell .cms-secondary:hover{background:var(--cms-hover)}
+.cms-shell .cms-brand-panel,.cms-shell .cms-settings-panel,.cms-shell .cms-stats>div{background:var(--cms-panel);border-color:var(--cms-line)}
+.cms-shell .cms-tabs{background:var(--cms-inset)}
+.cms-shell .cms-tabs button{color:var(--cms-muted)}
+.cms-shell .cms-tabs button.active{background:var(--cms-panel);color:var(--cms-text);box-shadow:0 1px 4px #341c4312}
+.cms-shell .cms-search{background:var(--cms-input);border-color:var(--cms-line);color:var(--cms-muted)}
+.cms-shell .cms-search:focus-within{border-color:var(--cms-green);box-shadow:0 0 0 2px var(--cms-accent-bg)}
+.cms-shell .cms-search input{color:var(--cms-text)}
+.cms-shell .cms-search input::placeholder,.cms-shell .cms-settings-form input::placeholder,.cms-shell .cms-form-grid input::placeholder,.cms-shell textarea::placeholder{color:var(--cms-subtle);opacity:1}
+.cms-shell .cms-table th{background:var(--cms-inset);color:var(--cms-muted)}
+.cms-shell .cms-table td{border-color:var(--cms-line);color:var(--cms-muted)}
+.cms-shell .cms-table tbody tr:hover{background:var(--cms-hover)}
+.cms-shell .cms-category{background:var(--cms-neutral-bg);color:var(--cms-muted)}
+.cms-shell .cms-status{border-color:var(--cms-line);background:var(--cms-inset);color:var(--cms-muted)}
+.cms-shell .cms-status.published{border-color:var(--cms-line);background:var(--cms-accent-bg);color:var(--cms-green)}
+.cms-shell .cms-status.draft{background:var(--cms-inset);color:var(--cms-muted)}
+.cms-shell .cms-feature{color:var(--cms-subtle)}
+.cms-shell .cms-feature.selected{color:var(--cms-green)}
+.cms-shell .cms-row-actions button{background:var(--cms-inset);border-color:var(--cms-line);color:var(--cms-muted)}
+.cms-shell .cms-row-actions button:hover{border-color:var(--cms-green);color:var(--cms-green)}
+.cms-shell .cms-row-actions button.cms-delete:hover{border-color:var(--cms-error);color:var(--cms-error)}
+.cms-shell .cms-error{background:var(--cms-error-bg);border-color:var(--cms-error-line);color:var(--cms-error)}
+.cms-shell .cms-success{background:var(--cms-accent-bg);border-color:var(--cms-line);color:var(--cms-green)}
+.cms-shell .cms-reauth:hover{color:var(--cms-text)}
+.cms-shell .cms-settings-form label,.cms-shell .cms-form-grid label{color:var(--cms-text)}
+.cms-shell .cms-settings-form input,.cms-shell .cms-settings-form textarea,.cms-shell .cms-form-grid input,.cms-shell .cms-form-grid textarea,.cms-shell .cms-form-grid select{background:var(--cms-input);border-color:var(--cms-line);color:var(--cms-text)}
+.cms-shell .cms-settings-form input:focus,.cms-shell .cms-settings-form textarea:focus,.cms-shell .cms-form-grid input:focus,.cms-shell .cms-form-grid textarea:focus,.cms-shell .cms-form-grid select:focus{border-color:var(--cms-green);outline-color:var(--cms-accent-bg)}
+.cms-shell .cms-form-grid em{color:var(--cms-green)}
+.cms-shell .cms-dialog,.cms-shell .cms-confirm{background:var(--cms-panel);color:var(--cms-text);border-color:var(--cms-line);box-shadow:var(--cms-dialog-shadow)}
+.cms-shell .cms-dialog-heading,.cms-shell .cms-switches,.cms-shell .cms-dialog-footer{border-color:var(--cms-line)}
+.cms-shell .cms-dialog-heading>button{background:var(--cms-inset);color:var(--cms-muted)}
+.cms-shell .cms-editor-preview,.cms-shell .cms-dialog-footer{background:var(--cms-inset);border-color:var(--cms-line)}
+.cms-shell .cms-image-field{background:var(--cms-input);border-color:var(--cms-line)}
+.cms-shell .cms-image-preview{background:var(--cms-image-mat);border-color:var(--cms-line);color:var(--cms-muted)}
+.cms-shell .cms-image-clear{color:var(--cms-muted)}
+.cms-shell .cms-image-clear:hover,.cms-shell .cms-image-filename{color:var(--cms-green)}
+.cms-shell .cms-image-url small.cms-image-invalid{color:var(--cms-error)}
+.cms-shell .cms-image-url input[aria-invalid=true]{border-color:var(--cms-error)}
+.cms-shell input:-webkit-autofill{-webkit-text-fill-color:var(--cms-text);box-shadow:0 0 0 1000px var(--cms-input) inset}
+.cms-shell :is(button,a,input,textarea,select):focus-visible{outline:2px solid var(--cms-green);outline-offset:3px}
+.cms-shell[data-admin-theme=light] .cms-dialog::backdrop,.cms-shell[data-admin-theme=light] .cms-delete-dialog::backdrop{background:#29173570}
+@media(max-width:600px){.cms-shell .cms-topbar-actions{gap:7px}.cms-shell .cms-preview-link{font-size:10px;gap:5px;padding:6px 8px;min-height:33px}.cms-shell .cms-preview-link svg{width:12px;height:12px}.cms-shell .cms-breadcrumb-parent,.cms-shell .cms-breadcrumb>svg{display:none}}

@@ -1,0 +1,11 @@
+.toggle{display:inline-flex;align-items:center;gap:3px;padding:3px;border:1px solid #4b3b58;border-radius:8px;background:#20162b;flex-shrink:0;color:#b4a4c1;color-scheme:dark}
+.toggle button{display:inline-flex;align-items:center;justify-content:center;gap:5px;min-height:30px;padding:5px 9px;border:1px solid transparent;border-radius:5px;background:transparent;color:inherit;font:inherit;font-size:11px;font-weight:500;line-height:1;cursor:pointer;white-space:nowrap}
+.toggle button span{color:inherit!important}
+.toggle button:hover{background:#31223e;color:#f7eefb}
+.toggle button[aria-pressed=true]{background:#42314e;border-color:#5e4770;color:#efd2a0;box-shadow:0 1px 3px #0002}
+.toggle button:focus-visible{outline:2px solid #d3b477;outline-offset:2px}
+.toggle[data-theme=light]{background:#f3eef6;border-color:#ded5e6;color:#786783;color-scheme:light}
+.toggle[data-theme=light] button:hover{background:#e9e0ef;color:#3a2847}
+.toggle[data-theme=light] button[aria-pressed=true]{background:#fff;border-color:#ded3e6;color:#765129;box-shadow:0 1px 4px #3a1f4c12}
+.toggle[data-theme=light] button:focus-visible{outline-color:#906a37}
+@media(max-width:600px){.toggle{gap:1px;padding:2px}.toggle button{min-height:29px;padding:5px 7px;font-size:10px;gap:4px}.toggle button svg{width:13px;height:13px}}

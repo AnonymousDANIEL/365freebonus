@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { ArrowUpRight, Check, ChevronRight, CircleHelp, ExternalLink, Eye, FileText, ImageIcon, LayoutGrid, LoaderCircle, Plus, Search, Settings2, ShieldCheck, Sparkles, Trash2, Upload, UserRound, X, Pencil, Globe, LogOut, Orbit, Sun, Gamepad2, Moon, Triangle } from "lucide-react";
 import type { Brand, SiteSettings } from "../lib/directory";
 import { isSafeImageUrl, isUploadedImageUrl } from "../lib/image-url";
+import { AdminThemeToggle, useAdminTheme } from "../components/AdminTheme";
 
 type Section = "brands" | "settings";
 type ImageField = "coverImageUrl" | "avatarImageUrl";
@@ -100,6 +101,7 @@ function imageUploadError(file: File): string {
 }
 
 export default function AdminClient({ displayName }: { displayName: string }) {
+  const { theme, setTheme } = useAdminTheme();
   const [section, setSection] = useState<Section>("brands");
   const [brands, setBrands] = useState<Brand[]>([]);
   const [settings, setSettings] = useState<SiteSettings | null>(null);
@@ -206,7 +208,7 @@ export default function AdminClient({ displayName }: { displayName: string }) {
   const visibleBrands = brands.filter(brand => `${brand.name} ${brand.tagline}`.toLowerCase().includes(query.toLowerCase()) && (filter === "all" || (filter === "published" ? brand.published : !brand.published))).sort((a, b) => a.sortOrder - b.sortOrder);
   const publishedCount = brands.filter(brand => brand.published).length;
 
-  return <div className="cms-shell">
+  return <div className="cms-shell" data-admin-theme={theme}>
     <aside className="cms-sidebar">
       <a href="/" className="cms-logo"><span className="cms-logo-symbol">✳</span>{settings?.name || "365freebonus"}<span className="cms-logo-dot">.</span></a>
       <span className="cms-workspace-label">CONTENT WORKSPACE</span>
@@ -220,7 +222,7 @@ export default function AdminClient({ displayName }: { displayName: string }) {
     </aside>
 
     <main className="cms-main">
-      <header className="cms-topbar"><div>工作空间<ChevronRight size={14} /><span>{section === "brands" ? "品牌管理" : "网站设置"}</span></div><a href="/" target="_blank" rel="noopener">预览网站<ExternalLink size={14} /></a></header>
+      <header className="cms-topbar"><div className="cms-breadcrumb"><span className="cms-breadcrumb-parent">工作空间</span><ChevronRight size={14} /><span>{section === "brands" ? "品牌管理" : "网站设置"}</span></div><div className="cms-topbar-actions"><AdminThemeToggle theme={theme} onChange={setTheme} /><a className="cms-preview-link" href="/" target="_blank" rel="noopener">预览网站<ExternalLink size={14} /></a></div></header>
       <div className="cms-content">
         <div className="cms-page-heading"><div><span className="cms-eyebrow">YOUR DIRECTORY, YOUR WAY</span><h1>{section === "brands" ? "品牌管理" : "网站设置"}<span>↗</span></h1><p>{section === "brands" ? "在一个地方，管理每个值得被发现的品牌。" : "让首页文字、站名和公告，都保持你的风格。"}</p></div>{section === "brands" && <button className="cms-primary" onClick={() => openEditor()} disabled={loading || !loaded || busy}><Plus size={18} />添加品牌</button>}</div>
         {error && !editing && !deleting && <div className="cms-alert cms-error" role="alert"><span>{error}</span>{sessionExpired && <Reauthenticate />}<button onClick={() => setError("")} aria-label="关闭错误"><X size={17} /></button></div>}

@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { ArrowLeft, ArrowUpRight, Eye, EyeOff, KeyRound, LoaderCircle, LockKeyhole, ShieldCheck, UserRound } from "lucide-react";
+import { AdminThemeToggle, useAdminTheme } from "../components/AdminTheme";
 
 function safeRedirect(value: unknown, fallback: string) {
   if (typeof value !== "string" || !value.startsWith("/") || value.startsWith("//") || value.includes("\\")) return fallback;
@@ -13,6 +14,7 @@ function safeRedirect(value: unknown, fallback: string) {
 }
 
 export default function LoginClient({ returnTo }: { returnTo: string }) {
+  const { theme, setTheme } = useAdminTheme();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
@@ -41,9 +43,9 @@ export default function LoginClient({ returnTo }: { returnTo: string }) {
     } finally { clearTimeout(timer); }
   }
 
-  return <main className="login-shell">
+  return <main className="login-shell" data-admin-theme={theme}>
     <a className="login-wordmark" href="/" aria-label="365freebonus 首页"><span>✳</span>365freebonus<i>.</i></a>
-    <a className="login-back" href="/"><ArrowLeft size={14} />返回首页</a>
+    <div className="login-top-actions"><AdminThemeToggle theme={theme} onChange={setTheme} /><a className="login-back" href="/"><ArrowLeft size={14} />返回首页</a></div>
     <div className="login-frame">
       <section className="login-visual" aria-hidden="true"><div className="login-grid" /><span className="login-visual-label">365FREEBONUS / CONTROL ROOM</span><div className="login-orbit"><i /><i /><i /><span>✳</span><b /></div><div className="login-visual-copy"><span>YOUR SPACE. YOUR VISION.</span><h2>把灵感，<br />变成每一次发现。</h2><p>一个专属空间，让品牌与内容井然有序。</p></div><span className="login-coordinate">01 / MANAGEMENT WORKSPACE</span></section>
       <section className="login-panel" aria-labelledby="login-title"><div className="login-lock"><KeyRound size={24} strokeWidth={1.5} /></div><span className="login-eyebrow">WELCOME BACK</span><h1 id="login-title">管理员登入</h1><p className="login-intro">登入管理后台，继续打造你的网站。</p>

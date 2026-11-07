@@ -1,0 +1,223 @@
+/* Public presentation only. Admin and login retain their independent theme. */
+.public-site {
+  --bg: #faf8fd;
+  --surface: #ffffff;
+  --line: #e4dcea;
+  --text: #34223f;
+  --muted: #776582;
+  --lime: #8f6630;
+  min-height: 100vh;
+  color-scheme: light;
+  color: var(--text);
+  background: linear-gradient(180deg, #fff 0%, #faf8fd 32%, #fff 72%);
+}
+
+.public-site ::selection { color: #fff; background: #75518d; }
+.public-site :is(button, a, input, select, textarea):focus-visible { outline-color: #8b659f; }
+
+.public-site .announcement {
+  color: #644776;
+  background: #eee7f5;
+  border-bottom-color: #dfd4e9;
+}
+.public-site .live-dot { background: #a37b3f; box-shadow: 0 0 7px #a37b3f22; }
+.public-site .site-header {
+  color: #493154;
+  background: #ffffffed;
+  border-bottom-color: #e9e1ef;
+  box-shadow: 0 5px 24px #43215404;
+}
+.public-site .wordmark { color: #3e254d; }
+.public-site .site-logo-image { border-color: #d9cbe4; }
+.public-site .desktop-nav button { color: #786384; }
+.public-site .desktop-nav :is(button:hover, .nav-active) { color: #40234f; }
+.public-site .nav-active span { background: #a1783d; }
+.public-site .lang-switch { border-color: #e5dbea; }
+.public-site .lang-switch button { color: #806a8e; }
+.public-site .lang-switch .selected { color: #835c2d; font-weight: 650; }
+.public-site .saved-nav { color: #614570; }
+.public-site .saved-count { color: #685174; background: #f2edf7; border-color: #ded3e7; }
+.public-site .mobile-menu { color: #50345f; }
+.public-site .mobile-nav {
+  color: #62456f;
+  background: #fff;
+  border-color: #e3d9eb;
+  box-shadow: 0 14px 25px #43215412;
+}
+.public-site .malaysia-clock { color: #97703a; }
+.public-site .malaysia-clock-label { color: #806a8b; }
+.public-site .malaysia-clock time { color: #462b56; }
+
+.public-site .hero-stage,
+.public-site .hero-stage.has-gift-orbit {
+  background:
+    radial-gradient(ellipse at 0% 58%, #eadff74d 0%, transparent 30%),
+    radial-gradient(ellipse at 100% 44%, #eee0f65c 0%, transparent 34%),
+    linear-gradient(180deg, #fff 0%, #faf7fd 100%);
+}
+.public-site .hero h1 { color: #35203f; }
+.public-site .accent-line {
+  background: linear-gradient(112deg, #89602e, #a2773c 65%, #86582a);
+  color: transparent;
+  background-clip: text;
+}
+.public-site .eyebrow { color: #7a6287; }
+.public-site .muted-eyebrow { color: #7a6287; }
+.public-site .mini-star { color: #9e783e; }
+.public-site .hero-copy > p { color: #7a6585; }
+.public-site .hero-secondary { color: #6e527e; }
+.public-site .hero-secondary:hover { color: #452651; }
+.public-site .circle-arrow { color: #78598a; background: #fff; border-color: #dacde4; }
+.public-site .primary-button {
+  color: #3d2946;
+  background: linear-gradient(115deg, #eddbb8, #d9bc83);
+  border-color: #d5b67d;
+  box-shadow: inset 0 1px 0 #fff9, 0 4px 12px #ad884f0d;
+}
+.public-site .primary-button:hover {
+  color: #34203e;
+  background: #e7cca0;
+  border-color: #c9a568;
+  box-shadow: 0 8px 22px #a87b3820;
+}
+.public-site .hero-footnote strong { color: #5c4568; }
+.public-site .hero-footnote div > span { color: #7e6589; }
+.public-site .mini-avatars > span { color: #96703c; background: #eee7f4; border-color: #faf8fd; }
+.public-site .mini-avatars > span:nth-child(2) { color: #9276ab; background: #e9e0f3; }
+.public-site .mini-avatars > span:nth-child(3) { color: #69839e; background: #e7edf5; }
+
+/* Keep the original purple artwork and opening layers on their own dark mat. */
+.public-site .hero-visual {
+  background: #200b20;
+  border-radius: 22px;
+  overflow: hidden;
+  box-shadow: 0 18px 48px #4c2c5c17, inset 0 0 0 1px #fff8;
+}
+
+.public-site .partner-strip { background: #fff; border-color: #e5ddeb; }
+.public-site .partner-strip > .section-shell > span:first-child { color: #7e698b; border-color: #e3d8eb; }
+.public-site .partner-strip strong { color: #61476f; }
+.public-site .partner-strip button { color: #7b6488; }
+.public-site .partner-strip button:hover { color: #492c59; }
+.public-site .strip-star { color: #a1783e !important; }
+.public-site :is(.section-heading h2, .how-section h2, .faq-section h2) { color: #3b2649; }
+.public-site .text-button { color: #745781; }
+.public-site .text-button:hover { color: #8b612e; }
+
+.public-site .spotlight-card {
+  color: #3f2b4c;
+  background: #fff;
+  border-color: #e1d6ea;
+  box-shadow: 0 3px 13px #56346405;
+}
+.public-site .spotlight-overlay { color: #3f2b4c; background: #fff; }
+.public-site .spotlight-tag { color: #78558c; background: #f6f0fa; border-color: #e5d9ed; }
+.public-site .spotlight-text small { color: #7c6488; }
+.public-site .spotlight-text h3 { color: #42294f; }
+.public-site .spotlight-text p { color: #7d6589; }
+.public-site .round-link { color: #725184; background: #f7f1fb; border-color: #dfd1e8; }
+.public-site .spotlight-open:hover .round-link { color: #41284e; background: #e0c38d; border-color: #d5b47b; }
+.public-site .favorite-button { color: #775986; background: #fffffff0; border-color: #e4dbea; }
+.public-site .favorite-button:hover { color: #8f6630; background: #fbf6ed; border-color: #d8bd8e; }
+
+.public-site .collection-heading p { color: #806b8c; }
+.public-site .collection-symbol { color: #a17940; border-color: #ddd0e6; background: #fff; }
+.public-site .directory-tools { border-color: #e2d9e9; }
+.public-site .category-tabs button { color: #7a6188; }
+.public-site .category-tabs button:hover { color: #533462; background: #f0e9f6; }
+.public-site .category-tabs .active,
+.public-site .category-tabs .active:hover { color: #fff; background: #57366a; }
+.public-site .category-tabs button > span { background: #e3d7ed; }
+.public-site .category-tabs .active > span { color: #fff; background: #ffffff28; }
+.public-site .search-input { color: #8b729b; background: #fff; border-color: #ded3e8; }
+.public-site .search-input:focus-within { border-color: #ae91c0; box-shadow: 0 0 0 3px #b59bc71c; }
+.public-site .search-input input { color: #4c305e; }
+.public-site .search-input input::placeholder { color: #80668f; opacity: 1; }
+.public-site .results-toolbar { color: #654a77; }
+.public-site .results-toolbar > span > span:not(.filter-pill) { color: #7c6689; }
+.public-site .results-toolbar > label { color: #7d668c; }
+.public-site .results-toolbar option { color: #5b3e6f; background: #fff; }
+.public-site .filter-pill { color: #765186; background: #f7f1fb; border-color: #decee9; }
+.public-site .directory-card {
+  background: #fff;
+  border-color: #e4dcea;
+  box-shadow: 0 3px 12px #40215504;
+}
+.public-site .directory-card:hover { border-color: #c7b3d6; box-shadow: 0 10px 28px #4a2b5b12; }
+.public-site .category-tag { color: #71532f; background: #fffcf4f2; border-color: #ecdfc9; }
+.public-site .brand-mini {
+  color: color-mix(in srgb, var(--brand-color), #40284e 48%);
+  background: color-mix(in srgb, var(--brand-color), white 88%);
+  border-color: color-mix(in srgb, var(--brand-color), #eee8f4 70%);
+}
+.public-site .card-brand h3 { color: #453052; }
+.public-site .featured-icon { color: #9f773e; }
+.public-site .card-content > p { color: #7d6789; }
+.public-site .card-content .card-action { color: #674c77; border-color: #e9e0ef; }
+.public-site .card-action > svg { color: #9a7239; }
+.public-site .card-content .card-action:hover { color: #8f6630; }
+.public-site .demo-note { color: #7d6687; }
+.public-site .demo-note > span:nth-child(2) { color: #745c82; }
+.public-site .demo-divider { color: #c7b7d2; }
+.public-site .empty-state > svg { color: #a17b42; }
+.public-site .empty-state h3 { color: #4b315c; }
+.public-site .empty-state p { color: #7c6589; }
+
+.public-site .how-section > .section-heading,
+.public-site .steps-grid article { border-color: #e4dbea; }
+.public-site .how-section > .section-heading > svg { color: #9a80ac; }
+.public-site .step-top { color: #a17a40; }
+.public-site .step-top > span { color: #7c648a; }
+.public-site .steps-grid h3 { color: #523760; }
+.public-site .steps-grid p { color: #7b6587; }
+.public-site .editorial-banner {
+  color: #4c305d;
+  background: linear-gradient(115deg, #efe7f7, #f8f4fc);
+  border-color: #e0d2eb;
+  box-shadow: inset 0 1px 0 #fff;
+}
+.public-site .banner-copy .eyebrow { color: #826092; }
+.public-site .banner-copy .mini-star { color: #ab8549; }
+.public-site .banner-copy h2 { color: #4c305d; }
+.public-site .banner-copy p { color: #80658f; }
+.public-site .banner-copy button { color: #745180; border-color: #baa0c8; }
+.public-site .banner-grid {
+  background-image: linear-gradient(#7e53990a 1px, transparent 1px), linear-gradient(90deg, #7e53990a 1px, transparent 1px);
+}
+.public-site .banner-art > i { color: #b39462; text-shadow: 1px 1px #f9eedc, 3px 3px #c6ac83, 5px 5px #b49a73, 9px 12px 20px #795b8d1c; }
+.public-site .banner-art > span { border-color: #af93bf55; }
+.public-site .faq-section > div > p { color: #7f678e; }
+.public-site .faq-list article { border-color: #e3d9eb; }
+.public-site .faq-list button { color: #573c67; }
+.public-site .faq-list button span { color: #a17a43; }
+.public-site .faq-list article > p { color: #7c658a; }
+
+.public-site footer { background: #f3eef8; border-color: #e4d9ed; }
+.public-site .footer-main p { color: #78617f; }
+.public-site .footer-links { color: #745981; }
+.public-site .footer-links :is(button:hover, a:hover) { color: #8f6630; }
+.public-site .back-top { color: #785787; background: #fff; border-color: #d9c9e4; }
+.public-site .back-top:hover { color: #fff; background: #634175; border-color: #634175; }
+.public-site .footer-bottom { color: #78617f; border-color: #dfd3e8; }
+.public-site .footer-bottom > a { color: #6e4c80; }
+.public-site .footer-demo > span { background: #a17d43; }
+
+.public-site .modal-backdrop { background: #2913375c; }
+.public-site .detail-modal {
+  color: #483153;
+  background: #fff;
+  border-color: #eee6f5;
+  box-shadow: 0 32px 100px #2f163b38;
+}
+.public-site .modal-close { color: #715183; background: #fffffff2; border-color: #e0d2e9; }
+.public-site .modal-close:hover { color: #422b50; background: #eedbb5; border-color: #dec291; }
+.public-site .detail-kicker { color: #997039; }
+.public-site .detail-kicker > span { color: #7c628b; }
+.public-site .detail-content h2 { color: #43284f; }
+.public-site .detail-tagline { color: #7c628b; }
+.public-site .detail-content h3 { color: #5f4270; }
+.public-site .detail-description { color: #786184; }
+.public-site .detail-save { color: #745480; background: #fff; border-color: #dfd1e9; }
+.public-site .detail-demo { color: #7d668a; }
+.public-site .info-modal .detail-content > svg { color: #9470a5; }
+.public-site .site-error p { color: #7c6689; }
