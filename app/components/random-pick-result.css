@@ -1,0 +1,10 @@
+.public-site .brand-grid .directory-card.is-random-pick {
+  border-color: #e7c98d;
+  box-shadow: 0 0 0 2px #d4b77977, 0 12px 36px #d4b7791a;
+  scroll-margin-block: 110px;
+}
+
+.public-site .brand-grid .directory-card.is-random-pick:focus {
+  outline: 2px solid #efdbad;
+  outline-offset: 5px;
+}
