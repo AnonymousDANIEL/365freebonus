@@ -24,6 +24,10 @@ function GiftOpening({ coverImageUrl, openingPlateUrl }: { coverImageUrl: string
         <clipPath id={id('lid')}><path d={LID} /></clipPath>
         <clipPath id={id('wordmark')}><path d={WORDMARK} /></clipPath>
         <clipPath id={id('above-rim')}><path d={ABOVE_FRONT_RIM} /></clipPath>
+        <filter id={id('intro-gold-matte')} x="0%" y="0%" width="100%" height="100%" colorInterpolationFilters="sRGB">
+          <feColorMatrix type="matrix" values="0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 3.6 0 0 -.99" result="matte" />
+          <feComposite in="SourceGraphic" in2="matte" operator="in" />
+        </filter>
         <radialGradient id={id('bloom')} cx="50%" cy="80%" r="57%">
           <stop stopColor="#ffebad" stopOpacity=".72" />
           <stop offset=".45" stopColor="#ffb34d" stopOpacity=".30" />
@@ -36,7 +40,7 @@ function GiftOpening({ coverImageUrl, openingPlateUrl }: { coverImageUrl: string
         <ellipse data-gift-bloom cx="724" cy="678" rx="338" ry="141" fill={url('bloom')} opacity="0" />
         <g data-gift-wordmark opacity="0" transform="translate(0 310)">
           <g clipPath={url('wordmark')}>
-            <use href={ref('original')} />
+            <use href={ref('original')} filter={url('intro-gold-matte')} />
           </g>
         </g>
       </g>
