@@ -22,19 +22,24 @@ type OpeningScene = {
   lid: SVGGElement;
   lidShade: SVGPathElement;
   interior: SVGPathElement;
-  bloom: SVGEllipseElement;
+  bloom: SVGGraphicsElement;
+  rays: SVGGraphicsElement | null;
+  core: SVGGraphicsElement | null;
   wordmark: SVGGElement;
+  digits: SVGGElement | null;
+  subtitle: SVGGElement | null;
   plateUrl: string;
 };
 
-const OPENING_LAUNCH_TIME = 2.18;
-const POSTER_REVEAL_START = 1.96;
-const POSTER_REVEAL_END = 2.15;
+const OPENING_LAUNCH_TIME = 1.25;
+const POSTER_REVEAL_START = 3.02;
+const POSTER_REVEAL_END = 3.22;
 const FULL_TURN = Math.PI * 2;
 const LAUNCH_INTERVAL = 0.65;
-const LIFTOFF = 0.68;
-const ORBIT_TIME = 5.70;
-const END_FADE = 0.26;
+const LIFTOFF = 0.76;
+// Ten equally spaced slots keep the visible ring in coin / gem order.
+const ORBIT_TIME = LAUNCH_INTERVAL * 10;
+const END_FADE = 0.12;
 const LIFETIME = LIFTOFF + ORBIT_TIME + END_FADE;
 const ANGULAR_SPEED = FULL_TURN / ORBIT_TIME;
 const GEMS = [
@@ -56,38 +61,56 @@ function getOpening(stage: Element): OpeningScene | null {
   const lid = view?.querySelector<SVGGElement>('[data-gift-lid]');
   const lidShade = view?.querySelector<SVGPathElement>('[data-gift-lid-shade]');
   const interior = view?.querySelector<SVGPathElement>('[data-gift-interior]');
-  const bloom = view?.querySelector<SVGEllipseElement>('[data-gift-bloom]');
+  const bloom = view?.querySelector<SVGGraphicsElement>('[data-gift-bloom]');
+  const rays = view?.querySelector<SVGGraphicsElement>('[data-gift-rays]') ?? null;
+  const core = view?.querySelector<SVGGraphicsElement>('[data-gift-core]') ?? null;
   const wordmark = view?.querySelector<SVGGElement>('[data-gift-wordmark]');
+  const digits = view?.querySelector<SVGGElement>('[data-gift-digits]') ?? null;
+  const subtitle = view?.querySelector<SVGGElement>('[data-gift-subtitle]') ?? null;
   const plateUrl = view?.querySelector('[data-gift-plate]')?.getAttribute('href');
   return view && lid && lidShade && interior && bloom && wordmark && plateUrl
-    ? { view, lid, lidShade, interior, bloom, wordmark, plateUrl }
+    ? { view, lid, lidShade, interior, bloom, rays, core, wordmark, digits, subtitle, plateUrl }
     : null;
 }
 
 function showOpenPoster(scene: OpeningScene) {
   scene.view.parentElement?.style.setProperty('--gift-poster-opacity', '1');
+  scene.view.style.opacity = '0';
   scene.view.style.visibility = 'hidden';
 }
 
 function paintOpening(scene: OpeningScene, elapsed: number) {
-  const rise = ease((elapsed - 0.18) / 0.86);
+  const rise = ease((elapsed - 0.25) / 1.0);
   const tilt = Math.sin(Math.PI * rise);
-  scene.lid.setAttribute('transform', `translate(${-13 * tilt} ${411 * (1 - rise)}) rotate(${-4 * tilt} 724 255)`);
+  scene.lid.setAttribute('transform', `translate(${-19 * tilt} ${411 * (1 - rise)}) rotate(${-11 * tilt} 724 255)`);
 
-  const light = ease((elapsed - 0.48) / 0.64);
-  const lightSettle = ease((elapsed - 1.20) / 0.42);
+  const light = ease((elapsed - 0.30) / 0.65);
+  const lightSettle = ease((elapsed - 1.15) / 1.90);
   scene.interior.setAttribute('opacity', String(0.94 * (1 - light)));
   scene.lidShade.setAttribute('opacity', String(0.92 * (1 - light)));
-  scene.bloom.setAttribute('opacity', String(light * (0.76 - 0.42 * lightSettle)));
+  scene.bloom.setAttribute('opacity', String(light * (0.98 - 0.64 * lightSettle)));
+  scene.rays?.setAttribute('opacity', String(light * (0.88 - 0.64 * lightSettle)));
+  scene.core?.setAttribute('opacity', String(light * (0.96 - 0.41 * lightSettle)));
 
-  const emerge = ease((elapsed - 1.18) / 0.78);
-  const wordmarkScale = 0.84 + 0.16 * emerge;
-  scene.wordmark.setAttribute('transform', `translate(0 ${310 * (1 - emerge)}) translate(724 744) scale(${wordmarkScale}) translate(-724 -744)`);
-  scene.wordmark.setAttribute('opacity', String(ease((elapsed - 1.18) / 0.31)));
+  if (scene.digits && scene.subtitle) {
+    scene.wordmark.setAttribute('opacity', '1');
+    scene.wordmark.removeAttribute('transform');
+    const digits = ease((elapsed - 1.85) / 0.75);
+    scene.digits.setAttribute('transform', `translate(0 ${360 * (1 - digits)}) translate(724 744) scale(${0.85 + 0.15 * digits}) translate(-724 -744)`);
+    scene.digits.setAttribute('opacity', String(ease((elapsed - 1.85) / 0.23)));
+    const subtitle = ease((elapsed - 2.42) / 0.60);
+    scene.subtitle.setAttribute('transform', `translate(0 ${150 * (1 - subtitle)}) translate(724 744) scale(${0.90 + 0.10 * subtitle}) translate(-724 -744)`);
+    scene.subtitle.setAttribute('opacity', String(ease((elapsed - 2.42) / 0.21)));
+  } else {
+    const emerge = ease((elapsed - 1.85) / 1.17);
+    scene.wordmark.setAttribute('transform', `translate(0 ${310 * (1 - emerge)})`);
+    scene.wordmark.setAttribute('opacity', String(ease((elapsed - 1.85) / 0.31)));
+  }
 
   if (elapsed >= POSTER_REVEAL_START) {
     const reveal = ease((elapsed - POSTER_REVEAL_START) / (POSTER_REVEAL_END - POSTER_REVEAL_START));
     scene.view.parentElement?.style.setProperty('--gift-poster-opacity', String(reveal));
+    scene.view.style.opacity = String(1 - reveal);
   }
 }
 
@@ -111,7 +134,7 @@ function measureLayout(canvas: HTMLCanvasElement, artwork: HTMLImageElement, cop
     y: stacked ? artTop + artHeight / 2 : viewport.height * 0.50,
   };
   const radiusX = Math.min(center.x - inset, viewport.width - center.x - inset, stacked ? artWidth * 0.53 : Infinity);
-  const radiusY = Math.min(center.y - inset, viewport.height - center.y - inset, stacked ? artHeight * 0.43 : viewport.height * 0.36);
+  const radiusY = Math.min(center.y - inset, viewport.height - center.y - inset, stacked ? artHeight * 0.43 : viewport.height * 0.435);
   if (radiusX < 24 || radiusY < 24) return null;
 
   // This point is the illuminated interior, just behind the gold front rim.
@@ -124,19 +147,19 @@ function measureLayout(canvas: HTMLCanvasElement, artwork: HTMLImageElement, cop
     radiusY,
     mouth,
     joinAngle: clamp(Math.asin(clamp((mouth.y - center.y) / radiusY, -0.75, 0.75)) - 0.11, 0.17, 0.64),
-    launchBend: { x: mouth.x + artWidth * 0.19, y: mouth.y - artHeight * 0.06 },
+    launchBend: { x: mouth.x + artWidth * 0.09, y: mouth.y - artHeight * 0.23 },
     radius,
     copy: copyRect && !stacked ? {
-      left: copyRect.left - viewport.left,
-      top: copyRect.top - viewport.top,
-      right: copyRect.right - viewport.left,
-      bottom: copyRect.bottom - viewport.top,
+      left: copyRect.left - viewport.left - 12,
+      top: copyRect.top - viewport.top - 12,
+      right: copyRect.right - viewport.left + 12,
+      bottom: copyRect.bottom - viewport.top + 12,
     } : null,
   };
 }
 
-function position(layout: OrbitLayout, age: number, offset: number): Point {
-  const angle = layout.joinAngle + offset - ANGULAR_SPEED * Math.max(0, age - LIFTOFF);
+function position(layout: OrbitLayout, age: number): Point {
+  const angle = layout.joinAngle - ANGULAR_SPEED * clamp(age - LIFTOFF, 0, ORBIT_TIME);
   const end = {
     x: layout.center.x + layout.radiusX * Math.cos(angle),
     y: layout.center.y + layout.radiusY * Math.sin(angle),
@@ -233,6 +256,14 @@ function drawGem(ctx: CanvasRenderingContext2D, r: number, turn: number, palette
 
 function paint(ctx: CanvasRenderingContext2D, layout: OrbitLayout, elapsed: number) {
   ctx.clearRect(0, 0, layout.width, layout.height);
+  ctx.save();
+  if (layout.copy) {
+    // Passing behind the copy keeps the full orbit clear of the headline and actions.
+    ctx.beginPath();
+    ctx.rect(0, 0, layout.width, layout.height);
+    ctx.rect(layout.copy.left, layout.copy.top, layout.copy.right - layout.copy.left, layout.copy.bottom - layout.copy.top);
+    ctx.clip('evenodd');
+  }
   const latest = Math.floor(elapsed / LAUNCH_INTERVAL);
   const oldest = Math.max(0, Math.floor((elapsed - LIFETIME) / LAUNCH_INTERVAL) + 1);
   const phase = elapsed - latest * LAUNCH_INTERVAL;
@@ -252,25 +283,35 @@ function paint(ctx: CanvasRenderingContext2D, layout: OrbitLayout, elapsed: numb
     const age = elapsed - index * LAUNCH_INTERVAL;
     const coin = index % 2 === 0;
     const variation = index * 2.3999632;
-    const offset = Math.sin(variation) * 0.042;
-    const point = position(layout, age, offset);
+    const point = position(layout, age);
     const depth = clamp((point.y - layout.center.y) / layout.radiusY, -1, 1);
     const radius = layout.radius * (0.88 + depth * 0.18) * (0.28 + 0.72 * ease(age / (LIFTOFF * 0.82)));
-    const fade = ease(age / 0.16) * (1 - ease((age - (LIFTOFF + ORBIT_TIME - 0.14)) / (END_FADE + 0.14)));
-    const underCopy = layout.copy && point.x > layout.copy.left && point.x < layout.copy.right && point.y > layout.copy.top && point.y < layout.copy.bottom;
-    const alpha = fade * (underCopy ? 0.56 : 0.84 + depth * 0.14);
+    // A particle finishes its complete turn before its brief dissolve at the join.
+    const fade = ease(age / 0.13) * (1 - ease((age - (LIFTOFF + ORBIT_TIME)) / END_FADE));
+    const alpha = fade * (0.84 + depth * 0.14);
     const gem = GEMS[Math.floor(index / 2) % GEMS.length];
 
     ctx.save();
-    ctx.fillStyle = coin ? '#f0ce85' : gem[0];
-    for (let i = 4; i > 0; i -= 1) {
-      const trailingAge = age - i * 0.031;
-      if (trailingAge <= 0) continue;
-      const trailing = position(layout, trailingAge, offset);
-      const dot = radius * (0.22 - i * 0.031);
-      ctx.globalAlpha = alpha * (0.30 - i * 0.052);
-      ellipse(ctx, trailing.x, trailing.y, dot, dot);
-      ctx.fill();
+    const trailSpan = Math.min(age, coin ? 0.32 : 0.22);
+    if (trailSpan > 0.03) {
+      const tail = position(layout, age - trailSpan);
+      const trail = ctx.createLinearGradient(tail.x, tail.y, point.x, point.y);
+      trail.addColorStop(0, coin ? '#e3a95500' : `${gem[1]}00`);
+      trail.addColorStop(1, coin ? '#f8ce8799' : `${gem[1]}66`);
+      ctx.beginPath();
+      ctx.moveTo(tail.x, tail.y);
+      for (let sample = 1; sample <= 12; sample += 1) {
+        const segment = position(layout, age - trailSpan + trailSpan * sample / 12);
+        ctx.lineTo(segment.x, segment.y);
+      }
+      ctx.globalAlpha = alpha * (coin ? 0.68 : 0.40);
+      ctx.strokeStyle = trail;
+      ctx.lineWidth = coin ? 1.15 : 0.85;
+      ctx.lineCap = 'round';
+      ctx.shadowColor = coin ? '#f4bc70' : gem[1];
+      ctx.shadowBlur = coin ? 3 : 2;
+      ctx.stroke();
+      ctx.shadowBlur = 0;
     }
     ctx.globalAlpha = alpha;
     ctx.translate(point.x, point.y);
@@ -280,6 +321,7 @@ function paint(ctx: CanvasRenderingContext2D, layout: OrbitLayout, elapsed: numb
     else drawGem(ctx, radius, turn, gem);
     ctx.restore();
   }
+  ctx.restore();
 }
 
 /** A decorative layer measured against the full hero, independent of its content column. */
@@ -324,12 +366,19 @@ export default function GiftOrbit() {
           paintOpening(opening, elapsed);
         }
       }
-      // The first emission is always a coin. No particles exist until the logo has settled.
+      // The first coin precedes the rising digits. This clock continues through the poster handoff.
       if (elapsed >= launchTime) paint(ctx, layout, elapsed - launchTime);
       frame = window.requestAnimationFrame(tick);
     };
 
     const sync = () => {
+      if (reducedMotion.matches) {
+        if (opening && openingActive) {
+          showOpenPoster(opening);
+          launchTime = Math.min(launchTime, elapsed);
+        }
+        openingActive = false;
+      }
       if (canAnimate()) {
         if (!frame) frame = window.requestAnimationFrame(tick);
       } else {
@@ -359,7 +408,7 @@ export default function GiftOrbit() {
       if (opening) showOpenPoster(opening);
       openingActive = false;
       openingReady = true;
-      launchTime = 0;
+      launchTime = elapsed;
       sync();
     };
 
