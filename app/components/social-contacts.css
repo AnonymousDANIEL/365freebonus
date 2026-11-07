@@ -1,0 +1,91 @@
+.public-site .social-contacts {
+  padding-top: 35px;
+  padding-bottom: 58px;
+  scroll-margin-top: 30px;
+}
+.public-site .social-contacts-heading { border-top: 1px solid #e6ddeb; padding-top: 32px; }
+.public-site .social-contacts-kicker {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #8a6b99;
+  font-size: 8px;
+  letter-spacing: 1.5px;
+  font-weight: 600;
+}
+.public-site .social-contacts-kicker > span { width: 5px; height: 5px; border: 1px solid #ad884a; transform: rotate(45deg); }
+.public-site .social-contacts-heading h2 {
+  margin: 13px 0 10px;
+  color: #40294e;
+  font: 500 31px/1.2 Georgia, 'Times New Roman', serif;
+  letter-spacing: -.8px;
+}
+.public-site .social-contacts-heading p { margin: 0; color: #7b6587; font-size: 11px; line-height: 1.8; }
+.public-site .social-contacts-grid { display: grid; grid-template-columns: repeat(var(--social-count, 3), minmax(0, 1fr)); gap: 17px; margin-top: 28px; }
+.public-site .social-contact-card {
+  --social-color: #387e68;
+  --social-tint: #edf6f2;
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-width: 0;
+  min-height: 118px;
+  padding: 25px 22px;
+  border: 1px solid #e6dceb;
+  border-radius: 11px;
+  background: linear-gradient(125deg, #fff, #fcf9fd);
+  box-shadow: 0 4px 18px #4d2a6204;
+  animation: social-contact-enter .7s cubic-bezier(.22,.7,.25,1) both;
+  animation-delay: calc(var(--social-index, 0) * .12s);
+  transition: border-color .2s, box-shadow .2s, background .2s;
+}
+.public-site .social-contact-telegram { --social-color: #387eaa; --social-tint: #eef5fa; }
+.public-site .social-contact-facebook { --social-color: #4867a2; --social-tint: #eff2fa; }
+.public-site .social-contact-card:hover { border-color: #c8b0d8; background: #fff; box-shadow: 0 8px 26px #5a38600d; }
+.public-site .social-contact-card:focus-visible { outline: 2px solid #8c629f; outline-offset: 4px; }
+.public-site .social-contact-icon {
+  width: 49px;
+  height: 49px;
+  flex: 0 0 49px;
+  display: grid;
+  place-items: center;
+  border-radius: 14px;
+  border: 1px solid color-mix(in srgb, var(--social-color), transparent 82%);
+  color: var(--social-color);
+  background: var(--social-tint);
+  animation: social-contact-float 5.2s ease-in-out infinite;
+  animation-delay: calc(var(--social-index, 0) * -.8s);
+}
+.public-site .social-contact-icon svg { width: 30px; height: 30px; }
+.public-site .social-contact-copy { display: flex; flex-direction: column; gap: 7px; min-width: 0; }
+.public-site .social-contact-copy strong { color: #50325f; font: 600 17px/1.2 'Space Grotesk', Arial, sans-serif; letter-spacing: -.4px; }
+.public-site .social-contact-copy > span { color: #866f92; font-size: 10px; line-height: 1.5; overflow-wrap: anywhere; }
+.public-site .social-contact-arrow { display: grid; place-items: center; width: 27px; height: 27px; flex: 0 0 27px; margin-left: auto; border-radius: 50%; border: 1px solid #e7ddec; color: #a5844e; background: #fff; transition: color .2s, border-color .2s; }
+.public-site .social-contact-card:hover .social-contact-arrow { color: #76502c; border-color: #d8c29c; }
+@keyframes social-contact-enter { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: none; } }
+@keyframes social-contact-float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-3px); } }
+@media (max-width: 1000px) {
+  .public-site .social-contact-card { padding: 23px 17px; gap: 11px; }
+  .public-site .social-contact-icon { width: 41px; height: 41px; flex-basis: 41px; border-radius: 12px; }
+  .public-site .social-contact-icon svg { width: 27px; height: 27px; }
+  .public-site .social-contact-copy strong { font-size: 15px; }
+  .public-site .social-contact-arrow { width: 23px; height: 23px; flex-basis: 23px; }
+}
+@media (max-width: 740px) {
+  .public-site .social-contacts { padding-top: 20px; padding-bottom: 40px; }
+  .public-site .social-contacts-heading { padding-top: 28px; }
+  .public-site .social-contacts-heading h2 { font-size: 28px; }
+  .public-site .social-contacts-heading p { font-size: 10px; }
+  .public-site .social-contacts-grid { grid-template-columns: 1fr; gap: 11px; margin-top: 23px; }
+  .public-site .social-contact-card { min-height: 95px; padding: 20px; gap: 15px; }
+  .public-site .social-contact-icon { width: 45px; height: 45px; flex-basis: 45px; }
+  .public-site .social-contact-copy strong { font-size: 17px; }
+  .public-site .social-contact-copy > span { font-size: 10px; }
+  .public-site .social-contact-arrow { width: 27px; height: 27px; flex-basis: 27px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .public-site .social-contact-card,
+  .public-site .social-contact-icon { animation: none; }
+  .public-site .social-contact-card { transition: none; }
+}

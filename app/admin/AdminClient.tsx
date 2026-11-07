@@ -2,9 +2,10 @@
 
 import { useEffect, useRef, useState } from "react";
 import { ArrowUpRight, Check, ChevronRight, CircleHelp, ExternalLink, Eye, FileText, ImageIcon, LayoutGrid, LoaderCircle, Plus, Search, Settings2, ShieldCheck, Sparkles, Trash2, Upload, UserRound, X, Pencil, Globe, LogOut, Orbit, Sun, Gamepad2, Moon, Triangle } from "lucide-react";
-import { effectiveBrandCategory, type Brand, type SiteSettings } from "../lib/directory";
+import { effectiveBrandCategory, isSafeSocialUrl, type Brand, type SiteSettings } from "../lib/directory";
 import { isSafeImageUrl, isUploadedImageUrl } from "../lib/image-url";
 import { AdminThemeToggle, useAdminTheme } from "../components/AdminTheme";
+import "./social-contacts-admin.css";
 
 type Section = "brands" | "settings";
 type ImageField = "coverImageUrl" | "avatarImageUrl";
@@ -14,6 +15,17 @@ const imageFields: { key: ImageField; label: string; detail: string }[] = [
   { key: "coverImageUrl", label: "首页封面", detail: "首页横幅使用，建议选用横向图片。" },
   { key: "avatarImageUrl", label: "网站头像", detail: "网站标识使用，建议选用正方形图片。" },
 ];
+const socialContacts = [
+  { label: "WhatsApp", urlField: "whatsappUrl", enabledField: "whatsappEnabled" },
+  { label: "Telegram", urlField: "telegramUrl", enabledField: "telegramEnabled" },
+  { label: "Facebook", urlField: "facebookUrl", enabledField: "facebookEnabled" },
+] as const;
+
+function socialContactError(value: string, enabled: boolean): string {
+  const url = value.trim();
+  if (!url) return enabled ? "请先填写联系链接，再开启前台显示。" : "";
+  return isSafeSocialUrl(url) ? "" : "请输入完整的 https:// 或 http:// 联系链接。";
+}
 class RequestError extends Error { constructor(message: string, public status: number) { super(message); } }
 function Reauthenticate() { return <a className="cms-reauth" href="/login?return_to=%2Fadmin" target="_top">重新登入 ↗</a>; }
 const categoryNames = { All: "All", Update: "Update", New: "New" };
@@ -220,6 +232,12 @@ export default function AdminClient({ displayName }: { displayName: string }) {
     event.preventDefault(); if (!settings || busy) return;
     const invalidImage = imageFields.find(({ key }) => settings[key]?.trim() && !imagePreviewUrl(settings[key]));
     if (invalidImage) { setSuccess(""); setSessionExpired(false); setError(`${invalidImage.label}地址格式不正确，请输入 HTTPS 地址或本站图片路径。`); return; }
+    const invalidContact = socialContacts.find(({ urlField, enabledField }) => socialContactError(settings[urlField] || "", Boolean(settings[enabledField])));
+    if (invalidContact) {
+      setSuccess(""); setSessionExpired(false);
+      setError(`${invalidContact.label} ${socialContactError(settings[invalidContact.urlField] || "", Boolean(settings[invalidContact.enabledField]))}`);
+      return;
+    }
     setBusy(true); setError("");
     try { const result = await request<{ settings: SiteSettings }>("/api/admin/settings", "PUT", settings); setSettings(result.settings); notify("网站设置已保存。"); }
     catch (err) { fail(err, "保存失败"); }
@@ -262,7 +280,7 @@ export default function AdminClient({ displayName }: { displayName: string }) {
           {visibleBrands.length === 0 && <div className="cms-empty"><Search size={29} /><h3>{query || filter !== "all" ? "没有找到符合条件的品牌" : "你的第一个品牌，从这里开始"}</h3><p>{query || filter !== "all" ? "试试其他关键词或状态。" : "添加品牌，填写内容，再上架到前台。"}</p>{!query && filter === "all" && <button className="cms-primary" onClick={() => openEditor()}><Plus size={16} />添加品牌</button>}</div>}
           <div className="cms-panel-footer"><span>显示 {visibleBrands.length} / {brands.length} 个品牌</span><small><CircleHelp size={14} />排序数字越小，显示越靠前</small></div></section>
           <p className="cms-footnote">内容由你管理 · 演示品牌仅用于展示页面效果</p>
-        </> : settings ? <form className="cms-settings-form" onSubmit={saveSettings}><fieldset disabled={busy}><section className="cms-settings-panel"><div><h2>品牌与首页</h2><p>这里的内容会显示在前台首页。</p></div><div className="cms-settings-fields"><label>网站名称<input required maxLength={40} value={settings.name} onChange={event => setSettings({ ...settings, name: event.target.value })} /></label><label>首页小标题<input maxLength={100} value={settings.eyebrow} onChange={event => setSettings({ ...settings, eyebrow: event.target.value })} /><small>显示在首页主标题上方。</small></label><label>首页主标题<textarea required rows={3} maxLength={120} value={settings.headline} onChange={event => setSettings({ ...settings, headline: event.target.value })} /></label><label>首页介绍<textarea rows={4} maxLength={600} value={settings.description} onChange={event => setSettings({ ...settings, description: event.target.value })} /></label></div></section>
+        </> : settings ? <form className="cms-settings-form" onSubmit={saveSettings}><fieldset disabled={busy}><section className="cms-settings-panel"><div><h2>品牌与首页</h2><p>这里的内容会显示在前台首页。</p></div><div className="cms-settings-fields"><label>网站名称<input required maxLength={40} value={settings.name} onChange={event => setSettings({ ...settings, name: event.target.value })} /></label><label>首页主标题<textarea required rows={3} maxLength={120} value={settings.headline} onChange={event => setSettings({ ...settings, headline: event.target.value })} /><small>每行显示一段标题，换行后会依次播放标题动画。</small></label><label>首页介绍<textarea rows={4} maxLength={600} value={settings.description} onChange={event => setSettings({ ...settings, description: event.target.value })} /></label></div></section>
           <section className="cms-settings-panel"><div><h2>首页封面与头像</h2><p>上传图片或输入图片地址。保存后更新前台，留空则使用默认图片。</p></div><div className="cms-settings-fields cms-image-fields">
             {imageFields.map(({ key, label, detail }) => <SettingsImageField key={key} field={key} label={label} detail={detail} value={settings[key] || ""} filename={imageNames[key]} uploading={uploading === key} onChange={value => changeImage(key, value)} onUpload={file => uploadPhoto(key, file)} />)}
             <p className="cms-image-form-hint">支持 JPG、PNG、GIF、WebP，每张最多 5 MB。</p>
@@ -276,7 +294,38 @@ export default function AdminClient({ displayName }: { displayName: string }) {
               </label>
               <label>联系链接<input type="url" placeholder="https://..." maxLength={1000} value={settings.contactUrl} onChange={event => setSettings({ ...settings, contactUrl: event.target.value })} /><small>可填写你的官方联系页面，留空则隐藏。</small></label>
             </div>
-          </section><div className="cms-settings-save"><span>保存后，刷新前台即可查看最新内容。</span><button disabled={busy} className="cms-primary" type="submit">{busy ? <LoaderCircle size={17} className="cms-spin" /> : <Check size={17} />}保存设置</button></div></fieldset></form> : <div className="cms-empty"><p>暂时无法加载网站设置。</p><button className="cms-secondary" onClick={load}>重新加载</button></div>}
+          </section>
+          <section className="cms-settings-panel">
+            <div><h2>社交联系</h2><p>填写联系链接，开启后在首页显示对应入口。</p></div>
+            <div className="cms-settings-fields cms-social-contacts">
+              {socialContacts.map(({ label, urlField, enabledField }) => {
+                const enabled = Boolean(settings[enabledField]);
+                const value = settings[urlField] || "";
+                const validationError = socialContactError(value, enabled);
+                const hintId = `${urlField}-hint`;
+                return <div className="cms-social-contact" key={urlField}>
+                  <div className="cms-social-heading">
+                    <h3>{label}</h3>
+                    <label className="cms-social-switch">
+                      <input type="checkbox" role="switch" aria-label={`${label} 前台显示`} checked={enabled}
+                        onChange={event => setSettings({ ...settings, [enabledField]: event.target.checked })} />
+                      <span aria-hidden="true">{enabled ? "开启" : "关闭"}</span>
+                    </label>
+                  </div>
+                  <label htmlFor={urlField}>{label} 联系链接
+                    <input id={urlField} type="url" inputMode="url" autoComplete="off" spellCheck={false}
+                      placeholder="https://..." maxLength={2048} required={enabled} value={value}
+                      aria-invalid={Boolean(validationError) || undefined} aria-describedby={hintId}
+                      onChange={event => setSettings({ ...settings, [urlField]: event.target.value })} />
+                  </label>
+                  <p id={hintId} className={validationError ? "cms-social-error" : "cms-social-hint"}>
+                    {validationError || (enabled ? "保存设置后，前台将显示这个联系入口。" : "已关闭，前台隐藏这个联系入口。")}
+                  </p>
+                </div>;
+              })}
+            </div>
+          </section>
+          <div className="cms-settings-save"><span>保存后，刷新前台即可查看最新内容。</span><button disabled={busy} className="cms-primary" type="submit">{busy ? <LoaderCircle size={17} className="cms-spin" /> : <Check size={17} />}保存设置</button></div></fieldset></form> : <div className="cms-empty"><p>暂时无法加载网站设置。</p><button className="cms-secondary" onClick={load}>重新加载</button></div>}
       </div>
     </main>
 

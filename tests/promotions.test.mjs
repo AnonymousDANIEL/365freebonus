@@ -67,7 +67,7 @@ test('v1/v2 migrations retain brand assets, text, ordering and status while mapp
       legacy.close();
       process.env.DATA_DIR = legacyPath;
       const saved = await repository.readDirectory(true, now);
-      assert.equal(sqlite.getSqlite().prepare('PRAGMA user_version').get().user_version, 3);
+      assert.equal(sqlite.getSqlite().prepare('PRAGMA user_version').get().user_version, 4);
       assert.equal(saved.brands.length, 1, 'migration must not add demo brands to an existing site');
       assert.deepEqual(saved.brands[0], {
         id: 'original', name: 'Existing brand', slug: 'original', category: 'All',

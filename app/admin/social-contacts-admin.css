@@ -1,0 +1,100 @@
+.cms-shell .cms-social-contacts {
+  gap: 14px;
+}
+
+.cms-shell .cms-social-contact {
+  display: grid;
+  gap: 14px;
+  padding: 18px;
+  border: 1px solid var(--cms-line);
+  border-radius: 9px;
+  background: var(--cms-input);
+}
+
+.cms-shell .cms-social-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.cms-shell .cms-social-heading h3 {
+  margin: 0;
+  color: var(--cms-text);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.cms-shell .cms-social-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  cursor: pointer;
+}
+
+.cms-shell .cms-settings-form .cms-social-switch input {
+  appearance: none;
+  position: relative;
+  flex: 0 0 44px;
+  width: 44px;
+  height: 24px;
+  min-height: 24px;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--cms-line);
+  border-radius: 14px;
+  background: var(--cms-neutral-bg);
+  cursor: pointer;
+  transition: background-color .15s ease, border-color .15s ease;
+}
+
+.cms-shell .cms-settings-form .cms-social-switch input::before {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px #1b102e33;
+  transition: transform .15s ease;
+}
+
+.cms-shell .cms-settings-form .cms-social-switch input:checked {
+  border-color: var(--cms-green);
+  background: var(--cms-green);
+}
+
+.cms-shell .cms-settings-form .cms-social-switch input:checked::before {
+  transform: translateX(20px);
+}
+
+.cms-shell .cms-social-switch span {
+  min-width: 2em;
+  color: var(--cms-muted);
+  font-size: 11px;
+}
+
+.cms-shell .cms-social-contact .cms-social-hint,
+.cms-shell .cms-social-contact .cms-social-error {
+  max-width: none;
+  margin: -5px 0 0;
+  font-size: 11px;
+  line-height: 1.7;
+}
+
+.cms-shell .cms-social-contact .cms-social-error {
+  color: var(--cms-error);
+}
+
+.cms-shell .cms-social-contact input[aria-invalid=true] {
+  border-color: var(--cms-error);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cms-shell .cms-settings-form .cms-social-switch input,
+  .cms-shell .cms-settings-form .cms-social-switch input::before {
+    transition: none;
+  }
+}

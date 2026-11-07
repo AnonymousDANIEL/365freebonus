@@ -136,11 +136,13 @@ test('image settings migration preserves the v1 row and old updates do not clear
     process.env.DATA_DIR = legacyPath;
     const upgraded = sqlite.getSqlite();
     const row = upgraded.prepare('SELECT * FROM site_settings').get();
-    assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version, 3);
+    assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version, 4);
     assert.deepEqual({ ...row }, {
       id: 'primary', name: 'Existing site', eyebrow: 'Tagline', headline: 'Existing headline',
       description: 'Existing description', announcement: 'Existing notice', contact_url: 'https://contact.example',
       cover_image_url: '', avatar_image_url: '',
+      whatsapp_url: '', whatsapp_enabled: 0, telegram_url: '', telegram_enabled: 0,
+      facebook_url: '', facebook_enabled: 0,
     });
   } finally { process.env.DATA_DIR = fixtureData; }
 

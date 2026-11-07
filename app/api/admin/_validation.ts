@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { ApiError } from "./_security";
 import { isSafeImageUrl, isUploadedImageUrl } from "../../lib/image-url";
-import { normalizeBrandCategory } from "../../lib/directory";
+import { normalizeBrandCategory, isSafeSocialUrl } from "../../lib/directory";
 
 function isHttpUrl(value: string): boolean {
   if (!value) return true;
@@ -9,6 +9,7 @@ function isHttpUrl(value: string): boolean {
 }
 
 const safeUrl = z.string().trim().max(2048).refine(isHttpUrl, "请输入完整的 https:// 或 http:// 链接。");
+const socialUrl = z.string().trim().max(2048).refine(value => value === "" || isSafeSocialUrl(value), "请输入完整的 http:// 或 https:// 联系链接。");
 
 export const brandInput = z.object({
   name: z.string().trim().min(1).max(80),
@@ -38,7 +39,21 @@ export const settingsInput = z.object({
   contactUrl: safeUrl,
   coverImageUrl: z.string().trim().max(2048).refine(isSafeImageUrl, "请输入 HTTPS 图片网址或以 / 开始的站内图片路径。").optional(),
   avatarImageUrl: z.string().trim().max(2048).refine(isSafeImageUrl, "请输入 HTTPS 图片网址或以 / 开始的站内图片路径。").optional(),
-}).strict();
+  whatsappUrl: socialUrl.optional(),
+  whatsappEnabled: z.boolean().optional(),
+  telegramUrl: socialUrl.optional(),
+  telegramEnabled: z.boolean().optional(),
+  facebookUrl: socialUrl.optional(),
+  facebookEnabled: z.boolean().optional(),
+}).strict().superRefine((settings, context) => {
+  for (const [name, urlKey, enabledKey] of [
+    ["WhatsApp", "whatsappUrl", "whatsappEnabled"],
+    ["Telegram", "telegramUrl", "telegramEnabled"],
+    ["Facebook", "facebookUrl", "facebookEnabled"],
+  ] as const) {
+    if (settings[enabledKey] && settings[urlKey] === "") context.addIssue({ code: "custom", path: [urlKey], message: `请填写 ${name} 链接后再显示。` });
+  }
+});
 
 export function validate<TSchema extends z.ZodTypeAny>(schema: TSchema, input: unknown): z.output<TSchema> {
   const result = schema.safeParse(input);

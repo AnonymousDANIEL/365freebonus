@@ -12,7 +12,7 @@ export function getDataDirectory(): string {
 function migrate(db: DatabaseSync) {
   if (migrated.has(db)) return;
   const readVersion = () => (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
-  if (readVersion() < 3) {
+  if (readVersion() < 4) {
     db.exec("BEGIN IMMEDIATE");
     try {
       // Read again inside the write lock, so concurrent process starts cannot
@@ -54,6 +54,26 @@ function migrate(db: DatabaseSync) {
           WHERE category = 'All';
         PRAGMA user_version = 3;
       `);
+      if (version < 4) {
+        db.exec(`
+          ALTER TABLE site_settings ADD COLUMN whatsapp_url TEXT NOT NULL DEFAULT '';
+          ALTER TABLE site_settings ADD COLUMN whatsapp_enabled INTEGER NOT NULL DEFAULT 0 CHECK (whatsapp_enabled IN (0, 1));
+          ALTER TABLE site_settings ADD COLUMN telegram_url TEXT NOT NULL DEFAULT '';
+          ALTER TABLE site_settings ADD COLUMN telegram_enabled INTEGER NOT NULL DEFAULT 0 CHECK (telegram_enabled IN (0, 1));
+          ALTER TABLE site_settings ADD COLUMN facebook_url TEXT NOT NULL DEFAULT '';
+          ALTER TABLE site_settings ADD COLUMN facebook_enabled INTEGER NOT NULL DEFAULT 0 CHECK (facebook_enabled IN (0, 1));
+        `);
+        // Replace only the exact former defaults, once. Later CMS edits and
+        // custom headlines/descriptions remain the owner's content.
+        db.prepare("UPDATE site_settings SET headline = ? WHERE headline = ?").run(
+          "365 Free Bonus\nFind your favourite.", "Discover more.\nFind your favourite.",
+        );
+        db.prepare("UPDATE site_settings SET description = ? WHERE description = ?").run(
+          "Free bonus offers.\nFind your next favourite at 365 FreeBonus.",
+          "Thoughtfully chosen brands and fresh ideas, all in one elegant space. Take a look around — your next favourite could be here.",
+        );
+        db.exec("PRAGMA user_version = 4;");
+      }
       db.exec("COMMIT");
     } catch (error) { db.exec("ROLLBACK"); throw error; }
   }

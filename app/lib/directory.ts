@@ -29,6 +29,18 @@ export function effectiveBrandCategory(brand: Pick<Brand, "category" | "promotio
   return category !== "All" && typeof brand.promotionExpiresAt === "number" && Number.isFinite(brand.promotionExpiresAt) && brand.promotionExpiresAt > now ? category : "All";
 }
 
+export function isSafeSocialUrl(value: unknown): value is string {
+  if (typeof value !== "string" || !value || value.length > 2048 || /[\u0000-\u0020\u007f]/.test(value)) return false;
+  try {
+    const url = new URL(value);
+    return (url.protocol === "https:" || url.protocol === "http:") && Boolean(url.hostname) && !url.username && !url.password;
+  } catch { return false; }
+}
+
+export class SettingsValidationError extends Error {
+  constructor(message: string) { super(message); this.name = "SettingsValidationError"; }
+}
+
 export type SiteSettings = {
   name: string;
   eyebrow: string;
@@ -38,6 +50,12 @@ export type SiteSettings = {
   contactUrl: string;
   coverImageUrl: string;
   avatarImageUrl: string;
+  whatsappUrl: string;
+  whatsappEnabled: boolean;
+  telegramUrl: string;
+  telegramEnabled: boolean;
+  facebookUrl: string;
+  facebookEnabled: boolean;
 };
 
 export type DirectoryData = { settings: SiteSettings; brands: Brand[] };
@@ -45,12 +63,18 @@ export type DirectoryData = { settings: SiteSettings; brands: Brand[] };
 export const defaultSettings: SiteSettings = {
   name: "365freebonus",
   eyebrow: "A LITTLE CURIOSITY GOES A LONG WAY",
-  headline: "Discover more.\nFind your favourite.",
-  description: "Thoughtfully chosen brands and fresh ideas, all in one elegant space. Take a look around — your next favourite could be here.",
+  headline: "365 Free Bonus\nFind your favourite.",
+  description: "Free bonus offers.\nFind your next favourite at 365 FreeBonus.",
   announcement: "Welcome to 365freebonus · A space for discovery.",
   contactUrl: "",
   coverImageUrl: "",
   avatarImageUrl: "",
+  whatsappUrl: "",
+  whatsappEnabled: false,
+  telegramUrl: "",
+  telegramEnabled: false,
+  facebookUrl: "",
+  facebookEnabled: false,
 };
 
 // Fictional demonstration content. These entries make no real-world claims.
