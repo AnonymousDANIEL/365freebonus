@@ -121,7 +121,6 @@ export default function DirectoryClient({initialData}:{initialData:DirectoryData
    <section className={hasDefaultGift ? 'hero-stage has-gift-orbit' : 'hero-stage'}>
     <div className="hero section-shell">
      <div className="hero-copy">
-      <div className="eyebrow"><span className="mini-star">✳</span>{settings.eyebrow}</div>
       <h1>{settings.headline.split('\n').map((line, index) => (
         <span key={index} className={index > 0 ? 'accent-line' : ''}>{line}</span>
       ))}</h1>
@@ -130,13 +129,6 @@ export default function DirectoryClient({initialData}:{initialData:DirectoryData
        <button className="primary-button" onClick={() => { setOnlySaved(false); jump('collection'); }}>
         {t.explore}<ArrowUpRight size={19} />
        </button>
-       <button className="hero-secondary" onClick={() => jump('how-it-works')}>
-        <span className="circle-arrow"><ArrowRight size={17} /></span>{t.how}
-       </button>
-      </div>
-      <div className="hero-footnote">
-       <span className="mini-avatars"><span><Orbit /></span><span><Sparkles /></span><span><Triangle /></span></span>
-       <div><strong>{brands.length} unique brands. Endless possibilities.</strong><span>{t.intro}</span></div>
       </div>
      </div>
      <div className="hero-visual">
