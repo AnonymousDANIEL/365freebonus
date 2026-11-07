@@ -122,6 +122,13 @@ test('image settings migration preserves the v1 row and old updates do not clear
     contact_url TEXT NOT NULL DEFAULT ''
   );
   INSERT INTO site_settings VALUES ('primary', 'Existing site', 'Tagline', 'Existing headline', 'Existing description', 'Existing notice', 'https://contact.example');
+  CREATE TABLE brands (
+    id TEXT PRIMARY KEY, name TEXT NOT NULL, slug TEXT NOT NULL UNIQUE,
+    category TEXT NOT NULL, tagline TEXT NOT NULL, description TEXT NOT NULL,
+    color TEXT NOT NULL, icon TEXT NOT NULL, image_url TEXT NOT NULL DEFAULT '',
+    featured INTEGER NOT NULL DEFAULT 0, published INTEGER NOT NULL DEFAULT 0,
+    sort_order INTEGER NOT NULL DEFAULT 0, link TEXT NOT NULL DEFAULT ''
+  );
   PRAGMA user_version = 1;`);
   legacy.close();
   const fixtureData = process.env.DATA_DIR;
@@ -129,7 +136,7 @@ test('image settings migration preserves the v1 row and old updates do not clear
     process.env.DATA_DIR = legacyPath;
     const upgraded = sqlite.getSqlite();
     const row = upgraded.prepare('SELECT * FROM site_settings').get();
-    assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version, 2);
+    assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version, 3);
     assert.deepEqual({ ...row }, {
       id: 'primary', name: 'Existing site', eyebrow: 'Tagline', headline: 'Existing headline',
       description: 'Existing description', announcement: 'Existing notice', contact_url: 'https://contact.example',
@@ -187,3 +194,4 @@ test.after(() => {
   if (previousDataDir === undefined) delete process.env.DATA_DIR; else process.env.DATA_DIR = previousDataDir;
   rmSync(fixture, { recursive: true, force: true });
 });
+

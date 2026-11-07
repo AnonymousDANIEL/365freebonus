@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { ApiError } from "./_security";
 import { isSafeImageUrl, isUploadedImageUrl } from "../../lib/image-url";
+import { normalizeBrandCategory } from "../../lib/directory";
 
 function isHttpUrl(value: string): boolean {
   if (!value) return true;
@@ -12,7 +13,11 @@ const safeUrl = z.string().trim().max(2048).refine(isHttpUrl, "请输入完整�
 export const brandInput = z.object({
   name: z.string().trim().min(1).max(80),
   slug: z.string().trim().min(1).max(100).regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/),
-  category: z.enum(["Gaming", "Lifestyle", "Entertainment"]),
+  category: z.enum(["All", "Update", "New", "Gaming", "Lifestyle", "Entertainment"]).optional().transform(normalizeBrandCategory),
+  promotionDays: z.number().int().min(1).max(365).nullable().optional(),
+  // Accepted for compatibility with full-object saves, but always ignored by
+  // the repository: only the server can create a promotion deadline.
+  promotionExpiresAt: z.number().int().safe().nullable().optional(),
   tagline: z.string().trim().max(180),
   description: z.string().trim().max(4000),
   color: z.string().regex(/^#[a-fA-F0-9]{6}$/),
@@ -35,7 +40,7 @@ export const settingsInput = z.object({
   avatarImageUrl: z.string().trim().max(2048).refine(isSafeImageUrl, "请输入 HTTPS 图片网址或以 / 开始的站内图片路径。").optional(),
 }).strict();
 
-export function validate<T>(schema: z.ZodType<T>, input: unknown): T {
+export function validate<TSchema extends z.ZodTypeAny>(schema: TSchema, input: unknown): z.output<TSchema> {
   const result = schema.safeParse(input);
   if (!result.success) throw new ApiError(400, `请检查填写内容：${result.error.issues.map(i => `${i.path.join(".")} ${i.message}`).join("；")}`);
   return result.data;

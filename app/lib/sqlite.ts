@@ -12,7 +12,7 @@ export function getDataDirectory(): string {
 function migrate(db: DatabaseSync) {
   if (migrated.has(db)) return;
   const readVersion = () => (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
-  if (readVersion() < 2) {
+  if (readVersion() < 3) {
     db.exec("BEGIN IMMEDIATE");
     try {
       // Read again inside the write lock, so concurrent process starts cannot
@@ -44,6 +44,15 @@ function migrate(db: DatabaseSync) {
         ALTER TABLE site_settings ADD COLUMN cover_image_url TEXT NOT NULL DEFAULT '';
         ALTER TABLE site_settings ADD COLUMN avatar_image_url TEXT NOT NULL DEFAULT '';
         PRAGMA user_version = 2;
+      `);
+      if (version < 3) db.exec(`
+        ALTER TABLE brands ADD COLUMN promotion_days INTEGER DEFAULT NULL;
+        ALTER TABLE brands ADD COLUMN promotion_expires_at INTEGER DEFAULT NULL;
+        UPDATE brands SET category = 'All'
+          WHERE category NOT IN ('All', 'Update', 'New');
+        UPDATE brands SET promotion_days = NULL, promotion_expires_at = NULL
+          WHERE category = 'All';
+        PRAGMA user_version = 3;
       `);
       db.exec("COMMIT");
     } catch (error) { db.exec("ROLLBACK"); throw error; }
