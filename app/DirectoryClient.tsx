@@ -3,7 +3,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowUpRight, ArrowRight, Search, X, Heart, Gamepad2, Sparkles, Orbit, Sun, Moon, Triangle, ChevronDown, SlidersHorizontal, LayoutGrid, Bookmark, Globe2, Compass, ExternalLink, Check, Zap, Layers, MoveUpRight, HelpCircle } from 'lucide-react';
 import AnnouncementTicker from './components/AnnouncementTicker';
-import BrandScene from './components/BrandScene';
 import GiftOrbit from './components/GiftOrbit';
 import MalaysiaClock from './components/MalaysiaClock';
 import RandomBrandPicker from './components/RandomBrandPicker';
@@ -11,7 +10,7 @@ import AcceptedMethods from './components/AcceptedMethods';
 import SocialContacts from './components/SocialContacts';
 import './components/hero-entrance.css';
 import './components/random-pick-result.css';
-import { defaultAvatarImageUrl, defaultCoverImageUrl, defaultGiftOpeningPlateUrl, isDefaultGiftCover } from './lib/brand-media';
+import { defaultAvatarImageUrl } from './lib/brand-media';
 import { effectiveBrandCategory } from './lib/directory';
 import type { Brand, DirectoryData } from './lib/directory';
 
@@ -38,7 +37,6 @@ function BrandArtwork({brand,large=false}:{brand:Brand,large?:boolean}) {
 export default function DirectoryClient({initialData}:{initialData:DirectoryData}) {
  const {settings,brands}=initialData;
  const avatarImageUrl = settings.avatarImageUrl || defaultAvatarImageUrl;
- const hasDefaultGift = isDefaultGiftCover(settings.coverImageUrl);
  const [lang,setLang]=useState<Lang>('EN'); const t=words[lang];
  const [query,setQuery]=useState(''); const [category,setCategory]=useState('All'); const [sort,setSort]=useState('featured');
  const [promotionNow, setPromotionNow] = useState(0);
@@ -121,7 +119,7 @@ export default function DirectoryClient({initialData}:{initialData:DirectoryData
    </div>
   </header>
   <main>
-   <section className={hasDefaultGift ? 'hero-stage has-gift-orbit' : 'hero-stage'}>
+   <section className="hero-stage has-gift-orbit particles-only">
     <div className="hero section-shell">
      <div className="hero-copy has-hero-entrance" style={{ '--hero-line-count': settings.headline.split('\n').length } as React.CSSProperties}>
       <h1>{settings.headline.split('\n').map((line, index) => (
@@ -134,14 +132,8 @@ export default function DirectoryClient({initialData}:{initialData:DirectoryData
        </button>
       </div>
      </div>
-     <div className="hero-visual">
-      <BrandScene
-       coverImageUrl={hasDefaultGift ? defaultCoverImageUrl : settings.coverImageUrl}
-       openingPlateUrl={hasDefaultGift ? defaultGiftOpeningPlateUrl : undefined}
-      />
-     </div>
     </div>
-    {hasDefaultGift && <GiftOrbit />}
+    <GiftOrbit standalone />
    </section>
    <RandomBrandPicker brands={brands} lang={lang} onPick={revealRandomPick} />
    {featured.length>0&&!onlySaved&&<section className="spotlight section-shell"><div className="section-heading"><div><div className="eyebrow muted-eyebrow"><span className="tiny-square"/>{t.featured}</div><h2>{t.editor}</h2></div><button className="text-button" onClick={()=>jump('collection')}>{t.all}<ArrowUpRight size={17}/></button></div><div className="spotlight-grid">{featured.map((b,i)=><article className={`spotlight-card spotlight-${i}${b.imageUrl?' has-brand-image':''}`} key={b.id} style={{'--brand-color':b.color} as React.CSSProperties}><button className="spotlight-open" onClick={()=>setActive(b)} aria-label={`${t.view} ${b.name}`}><BrandArtwork brand={b}/><div className="spotlight-overlay"><span className="spotlight-tag"><span/>{i===0?'EDITOR’S PICK':i===1?'A FRESH PERSPECTIVE':'ONE TO EXPLORE'}</span><div className="spotlight-text"><div><small>{effectiveBrandCategory(b, promotionNow)}</small><h3>{b.name}</h3><p>{b.tagline}</p></div><span className="round-link"><ArrowUpRight size={22}/></span></div></div></button><button className={`favorite-button ${saved.includes(b.id)?'is-saved':''}`} aria-label={saved.includes(b.id)?`Unsave ${b.name}`:`Save ${b.name}`} aria-pressed={saved.includes(b.id)} onClick={()=>toggleSaved(b.id)}><Heart size={17} fill={saved.includes(b.id)?'currentColor':'none'}/></button></article>)}</div></section>}

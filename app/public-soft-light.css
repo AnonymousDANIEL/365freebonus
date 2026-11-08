@@ -222,20 +222,21 @@
 .public-site.public-site .social-contact-arrow { color: #7c5b30; background: #eee1f6; border-color: #b8a0c7; }
 .public-site.public-site .social-contact-card:hover .social-contact-arrow { color: #654522; border-color: #ae8b55; }
 
-/* Keep the copy and animated gift on the same centered axis. */
+/* Center the copy inside the standalone coin and gem orbit. */
 .public-site.public-site .hero {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 24px;
-  min-height: 0;
-  padding-top: 36px;
-  padding-bottom: 24px;
+  justify-content: center;
+  gap: 0;
+  min-height: 520px;
+  padding-top: 64px;
+  padding-bottom: 72px;
   overflow: visible;
 }
 .public-site.public-site .hero-copy {
   width: 100%;
-  max-width: 900px;
+  max-width: 760px;
   text-align: center;
 }
 .public-site.public-site .hero h1 {
@@ -252,21 +253,14 @@
   justify-content: center;
   margin-top: 22px;
 }
-.public-site.public-site .hero-visual {
-  flex: 0 0 auto;
-  width: min(100%, 560px);
-  height: auto;
-  aspect-ratio: 4 / 3;
-  margin: 0;
-  scale: 1;
-}
 @media (max-width: 640px) {
   .public-site.public-site .hero {
-    padding-top: 32px;
-    padding-bottom: 16px;
-    gap: 24px;
+    min-height: 430px;
+    padding-top: 60px;
+    padding-bottom: 60px;
   }
-  .public-site.public-site .hero h1 { font-size: clamp(32px, 8.7vw, 46px); }
-  .public-site.public-site .hero-copy > p { max-width: 340px; }
+  .public-site.public-site .hero-copy { max-width: 320px; }
+  .public-site.public-site .hero h1 { font-size: clamp(30px, 8.2vw, 40px); }
+  .public-site.public-site .hero-copy > p { max-width: 320px; }
   .public-site.public-site .hero-actions { margin-top: 20px; }
 }

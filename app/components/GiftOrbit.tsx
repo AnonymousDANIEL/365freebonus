@@ -160,6 +160,67 @@ function measureLayout(canvas: HTMLCanvasElement, artwork: HTMLImageElement, cop
   };
 }
 
+function measureCopyInk(copy: HTMLElement | null, viewport: DOMRect, margin: number): Bounds | null {
+  if (!copy) return null;
+  let bounds: Bounds | null = null;
+  const include = (rect: DOMRect) => {
+    if (!rect.width || !rect.height) return;
+    bounds = bounds ? {
+      left: Math.min(bounds.left, rect.left),
+      top: Math.min(bounds.top, rect.top),
+      right: Math.max(bounds.right, rect.right),
+      bottom: Math.max(bounds.bottom, rect.bottom),
+    } : { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom };
+  };
+  const range = copy.ownerDocument.createRange();
+  const text = copy.ownerDocument.createTreeWalker(copy, NodeFilter.SHOW_TEXT);
+  let node: Node | null;
+  while ((node = text.nextNode())) {
+    if (!node.textContent?.trim()) continue;
+    range.selectNodeContents(node);
+    for (const rect of Array.from(range.getClientRects())) include(rect);
+  }
+  for (const control of copy.querySelectorAll('a, button, .mini-avatars')) include(control.getBoundingClientRect());
+  // Text-node ranges avoid protecting the empty width of a centered block.
+  if (!bounds) return null;
+  const ink = bounds as Bounds;
+  return {
+    left: ink.left - viewport.left - margin,
+    top: ink.top - viewport.top - margin,
+    right: ink.right - viewport.left + margin,
+    bottom: ink.bottom - viewport.top + margin,
+  };
+}
+
+function measureStandaloneLayout(canvas: HTMLCanvasElement, copy: HTMLElement | null): OrbitLayout | null {
+  const viewport = canvas.getBoundingClientRect();
+  if (viewport.width < 100 || viewport.height < 100) return null;
+  const compact = viewport.width <= 640;
+  const radius = compact ? clamp(viewport.width * 0.03, 10, 12) : clamp(viewport.width * 0.014, 16, 24);
+  const inset = Math.ceil(radius * 1.35 + 6);
+  const center = { x: viewport.width / 2, y: viewport.height / 2 };
+  const radiusX = center.x - inset;
+  const radiusY = Math.min(center.y - inset, viewport.height * 0.43);
+  if (radiusX < 24 || radiusY < 24) return null;
+  const ink = measureCopyInk(copy, viewport, compact ? 4 : 8);
+  const mouth = {
+    x: center.x,
+    y: clamp((ink?.bottom ?? viewport.height * 0.67) + radius * 2.25, center.y + radiusY * 0.68, center.y + radiusY),
+  };
+  return {
+    width: viewport.width,
+    height: viewport.height,
+    center,
+    radiusX,
+    radiusY,
+    mouth,
+    joinAngle: 0.92,
+    launchBend: { x: mouth.x + Math.min(radiusX * 0.15, 72), y: mouth.y - Math.min(radiusY * 0.10, 28) },
+    radius,
+    copy: ink,
+  };
+}
+
 function position(layout: OrbitLayout, age: number): Point {
   const angle = layout.joinAngle - ANGULAR_SPEED * clamp(age - LIFTOFF, 0, ORBIT_TIME);
   const end = {
@@ -327,15 +388,15 @@ function paint(ctx: CanvasRenderingContext2D, layout: OrbitLayout, elapsed: numb
 }
 
 /** A decorative layer measured against the full hero, independent of its content column. */
-export default function GiftOrbit() {
+export default function GiftOrbit({ standalone = false }: { standalone?: boolean }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   useEffect(() => {
     const canvas = canvasRef.current;
     const stage = canvas?.closest('.hero-stage');
-    const artwork = stage?.querySelector<HTMLImageElement>('.hero-visual .brand-scene-image img');
-    if (!canvas || !stage || !artwork) return;
-    const opening = getOpening(stage);
+    const artwork = standalone ? null : stage?.querySelector<HTMLImageElement>('.hero-visual .brand-scene-image img');
+    if (!canvas || !stage || (!standalone && !artwork)) return;
+    const opening = standalone ? null : getOpening(stage);
     const ctx = canvas.getContext('2d');
     if (!ctx) {
       if (opening) showOpenPoster(opening);
@@ -368,7 +429,7 @@ export default function GiftOrbit() {
           paintOpening(opening, elapsed);
         }
       }
-      // The first coin precedes the rising digits. This clock continues through the poster handoff.
+      // The index starts with a coin and keeps alternating on this uninterrupted clock.
       if (elapsed >= launchTime) paint(ctx, layout, elapsed - launchTime);
       frame = window.requestAnimationFrame(tick);
     };
@@ -392,7 +453,7 @@ export default function GiftOrbit() {
     };
 
     const measure = () => {
-      layout = measureLayout(canvas, artwork, copy);
+      layout = standalone ? measureStandaloneLayout(canvas, copy) : artwork ? measureLayout(canvas, artwork, copy) : null;
       if (layout) {
         // Cap bitmap pixels on large monitors while retaining sharp sprites on mobile.
         const ratio = Math.min(window.devicePixelRatio || 1, 1.7, Math.sqrt(2_600_000 / (layout.width * layout.height)));
@@ -425,31 +486,33 @@ export default function GiftOrbit() {
 
     const resize = new ResizeObserver(measure);
     resize.observe(stage);
-    resize.observe(artwork);
+    if (artwork) resize.observe(artwork);
     if (copy) resize.observe(copy);
     const visibility = new IntersectionObserver(([entry]) => {
       inView = entry.isIntersecting;
       sync();
     });
     visibility.observe(stage);
-    artwork.addEventListener('load', measure);
-    artwork.addEventListener('error', skipOpening);
+    artwork?.addEventListener('load', measure);
+    artwork?.addEventListener('error', skipOpening);
+    if (standalone) copy?.addEventListener('animationend', measure);
     document.addEventListener('visibilitychange', sync);
     reducedMotion.addEventListener('change', sync);
-    if (artwork.complete && !artwork.naturalWidth) skipOpening();
+    if (artwork?.complete && !artwork.naturalWidth) skipOpening();
     measure();
 
     return () => {
       if (frame) window.cancelAnimationFrame(frame);
       resize.disconnect();
       visibility.disconnect();
-      artwork.removeEventListener('load', measure);
-      artwork.removeEventListener('error', skipOpening);
+      artwork?.removeEventListener('load', measure);
+      artwork?.removeEventListener('error', skipOpening);
+      if (standalone) copy?.removeEventListener('animationend', measure);
       if (plate) { plate.onload = null; plate.onerror = null; }
       document.removeEventListener('visibilitychange', sync);
       reducedMotion.removeEventListener('change', sync);
     };
-  }, []);
+  }, [standalone]);
 
   return <canvas ref={canvasRef} className="gift-orbit" aria-hidden="true" />;
 }
