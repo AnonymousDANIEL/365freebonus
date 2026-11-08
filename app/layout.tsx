@@ -6,7 +6,7 @@ import './brand-media.css';
 import { defaultAvatarImageUrl } from './lib/brand-media';
 
 export const metadata: Metadata = {
-  title: '365freebonus — A space for discovery',
+  title: '365 Free Bonus',
   description: 'Explore a curated collection of gaming, lifestyle and digital entertainment brands in one immersive space.',
   icons: { icon: defaultAvatarImageUrl, apple: defaultAvatarImageUrl },
 };

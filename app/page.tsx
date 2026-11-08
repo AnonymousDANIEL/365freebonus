@@ -8,7 +8,7 @@ export async function generateMetadata(): Promise<Metadata> {
     const { settings } = await readDirectory();
     const avatar = settings.avatarImageUrl;
     return {
-      title: `${settings.name} — A space for discovery`,
+      title: '365 Free Bonus',
       ...(avatar && { icons: { icon: avatar, apple: avatar } }),
     };
   } catch {
