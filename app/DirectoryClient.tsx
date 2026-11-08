@@ -12,7 +12,7 @@ import SocialContacts from './components/SocialContacts';
 import './components/hero-entrance.css';
 import './components/random-pick-result.css';
 import { defaultAvatarImageUrl, defaultCoverImageUrl, defaultGiftOpeningPlateUrl, isDefaultGiftCover } from './lib/brand-media';
-import { effectiveBrandCategory, isSafeSocialUrl } from './lib/directory';
+import { effectiveBrandCategory } from './lib/directory';
 import type { Brand, DirectoryData } from './lib/directory';
 
 type Lang = 'EN' | 'BM' | '中文';
@@ -97,7 +97,6 @@ export default function DirectoryClient({initialData}:{initialData:DirectoryData
      block: 'center',
    });
  }, [randomPick]);
- const hasSocialContacts = (settings.whatsappEnabled && isSafeSocialUrl(settings.whatsappUrl)) || (settings.telegramEnabled && isSafeSocialUrl(settings.telegramUrl)) || (settings.facebookEnabled && isSafeSocialUrl(settings.facebookUrl));
  const categories=[['All','All',LayoutGrid],['Update','Update',Layers],['New','New',Sparkles]] as const;
  return <div className="public-site" id="top">
   <AnnouncementTicker text={settings.announcement} />
@@ -150,7 +149,7 @@ export default function DirectoryClient({initialData}:{initialData:DirectoryData
    <SocialContacts settings={settings} lang={lang} />
    <AcceptedMethods lang={lang} />
    <section className="faq-section section-shell"><div><div className="eyebrow muted-eyebrow"><span className="tiny-square"/> {t.faqKicker}</div><h2>{t.faq}</h2><p>{t.intro}</p></div><div className="faq-list">{[[t.faq1,t.answer1],[t.faq2,t.answer2],[t.faq3,t.answer3]].map(([q,a],i)=><article key={i}><button onClick={()=>setFaq(faq===i?null:i)} aria-expanded={faq===i} aria-controls={`faq-${i}`}>{q}<span>{faq===i?'−':'+'}</span></button>{faq===i&&<p id={`faq-${i}`}>{a}</p>}</article>)}</div></section>
-  </main><footer><div className="section-shell footer-main"><div><a className="wordmark" href="/"><img className="site-logo-image" src={avatarImageUrl} alt=""/>{settings.name}<span className="wordmark-point">®</span></a><p>{t.footer}</p></div><div className="footer-links"><button onClick={()=>jump('collection')}>{t.collection}</button>{hasSocialContacts&&<button onClick={()=>jump('contact')}>{t.contact}</button>}{!hasSocialContacts&&settings.contactUrl&&<a href={settings.contactUrl} target="_blank" rel="noopener noreferrer">{t.contact}<ArrowUpRight size={12}/></a>}</div><button className="back-top" aria-label={t.back} onClick={()=>jump('top')}><ArrowRight size={19}/></button></div><div className="section-shell footer-bottom"><span>© {new Date().getFullYear()} {settings.name}. A space for discovery.</span><span className="footer-demo">DEMO EDITION <span/></span></div></footer>
+  </main>
   {(active||info)&&<div className="modal-backdrop" onClick={e=>{if(e.target===e.currentTarget){setActive(null);setInfo(false);}}}><section className={`detail-modal ${info?'info-modal':''}`} role="dialog" aria-modal="true" aria-labelledby="modal-title"><button ref={closeRef} className="modal-close" aria-label="Close" onClick={()=>{setActive(null);setInfo(false);}}><X size={21}/></button>{active?<><BrandArtwork brand={active} large/><div className="detail-content"><span className="detail-kicker">{t.details} <span>/ {effectiveBrandCategory(active, promotionNow)}</span></span><h2 id="modal-title">{active.name}</h2><p className="detail-tagline">{active.tagline}</p><h3>{t.about}</h3><p className="detail-description">{active.description}</p><div className="detail-actions">{active.link?<a className="primary-button" href={active.link} target="_blank" rel="noopener noreferrer">{t.visit}<ExternalLink size={16}/></a>:<button className="primary-button" onClick={()=>setActive(null)}>{t.close}<ArrowRight size={16}/></button>}<button className={`detail-save ${saved.includes(active.id)?'is-saved':''}`} aria-pressed={saved.includes(active.id)} onClick={()=>toggleSaved(active.id)}><Heart size={18} fill={saved.includes(active.id)?'currentColor':'none'}/>{t.saved}{saved.includes(active.id)&&<Check size={15}/>}</button></div><span className="detail-demo">{t.demoText}</span></div></>:<div className="detail-content"><HelpCircle size={36}/><h2 id="modal-title">{t.contact}</h2><p className="detail-description">{t.contactText}</p><button className="primary-button" onClick={()=>setInfo(false)}>{t.close}<ArrowRight size={16}/></button></div>}</section></div>}
  </div>;
 }
