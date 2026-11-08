@@ -1,17 +1,17 @@
 .header-search {
   display: flex;
   align-items: center;
-  gap: 14px;
-  flex: 0 1 500px;
-  min-width: 410px;
-  max-width: 540px;
+  gap: 10px;
+  flex: 0 1 420px;
+  min-width: 354px;
+  max-width: 440px;
   border-radius: 10px;
   color: #202124;
 }
 
 .header-search-wordmark {
   display: block;
-  width: 84px;
+  width: 72px;
   height: auto;
   flex-shrink: 0;
 }
@@ -19,11 +19,11 @@
 .header-search-field {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   flex: 1;
   min-width: 0;
-  min-height: 52px;
-  padding: 10px 12px;
+  min-height: 44px;
+  padding: 8px 10px;
   border: 1px solid #dadce0;
   border-radius: 999px;
   background: #f2f2f2;
@@ -35,9 +35,9 @@
   flex-shrink: 0;
 }
 
-.header-search-google { width: 26px; height: 26px; }
-.header-search-voice { width: 18px; height: 26px; margin-left: auto; }
-.header-search-lens { width: 26px; height: 26px; }
+.header-search-google { width: 22px; height: 22px; }
+.header-search-voice { width: 15px; height: 22px; margin-left: auto; }
+.header-search-lens { width: 22px; height: 22px; }
 
 .header-search-reserved {
   position: relative;
@@ -46,7 +46,7 @@
   width: max-content;
   padding-right: 2px;
   color: #202124;
-  font: 700 20px/1.3 Arial, sans-serif;
+  font: 700 17px/1.3 Arial, sans-serif;
   letter-spacing: 0;
 }
 
@@ -108,16 +108,16 @@
 @media (max-width: 480px) {
   .header-search {
     min-width: 0;
-    max-width: none;
+    max-width: 360px;
     gap: 8px;
   }
 
-  .header-search-wordmark { width: 60px; }
-  .header-search-field { min-height: 44px; gap: 4px; padding: 8px 6px; }
-  .header-search-google { width: 20px; height: 20px; }
-  .header-search-voice { width: 12px; height: 20px; }
-  .header-search-lens { width: 18px; height: 18px; }
-  .header-search-reserved { font-size: clamp(16px, 5vw, 18px); }
+  .header-search-wordmark { width: 52px; }
+  .header-search-field { min-height: 40px; gap: 4px; padding: 7px 6px; }
+  .header-search-google { width: 18px; height: 18px; }
+  .header-search-voice { width: 11px; height: 18px; }
+  .header-search-lens { width: 16px; height: 16px; }
+  .header-search-reserved { font-size: 16px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
