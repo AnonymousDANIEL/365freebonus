@@ -1,45 +1,41 @@
 .header-search {
   display: flex;
-  flex: 0 1 250px;
+  flex: 0 1 300px;
   flex-direction: column;
   gap: 5px;
-  min-width: 0;
-  max-width: 280px;
+  min-width: 260px;
+  max-width: 320px;
   border-radius: 10px;
   color: #55485f;
 }
 
-.header-search-label {
-  width: max-content;
-  padding-left: 2px;
-  font-size: 11px;
-  font-weight: 600;
-  line-height: 1.2;
-  letter-spacing: .01em;
+.header-search-wordmark {
+  display: block;
+  width: 70px;
+  height: auto;
+  flex-shrink: 0;
 }
 
 .header-search-field {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: max-content;
-  min-height: 35px;
-  padding: 8px 12px;
-  border: 1px solid #c7bfd0;
-  border-radius: 18px;
-  background: #ffffffd6;
-  box-shadow: 0 2px 6px #49355705;
-  transition: border-color .2s, box-shadow .2s;
+  position: relative;
+  display: block;
+  width: 100%;
 }
 
-.header-search:hover .header-search-field {
-  border-color: #a88db6;
-  box-shadow: 0 3px 12px #49355710;
+.header-search-art {
+  display: block;
+  width: 100%;
+  height: auto;
 }
 
-.header-search-icon {
-  flex-shrink: 0;
-  color: #8b7d97;
+.header-search-text-window {
+  position: absolute;
+  top: 46.3%;
+  left: 14%;
+  right: 27%;
+  transform: translateY(-50%);
+  overflow: hidden;
+  color: #3c4043;
 }
 
 .header-search-reserved {
@@ -53,7 +49,7 @@
   box-sizing: content-box;
   width: 16ch;
   overflow: hidden;
-  border-right: 2px solid #8b659f;
+  border-right: 2px solid #4285f4;
   white-space: nowrap;
   animation: header-search-type 6s steps(16, end) infinite,
     header-search-caret .8s step-end infinite;
@@ -69,7 +65,13 @@
   50% { border-right-color: transparent; }
 }
 
-@media (max-width: 480px) {
+@media (min-width: 761px) {
+  .public-site .site-header {
+    min-height: 86px;
+  }
+}
+
+@media (max-width: 760px) {
   .public-site .site-header {
     height: auto;
   }
@@ -79,21 +81,14 @@
     grid-template-columns: 1fr auto;
     gap: 10px 8px;
     height: auto;
-    min-height: 96px;
+    min-height: 128px;
     padding-block: 11px;
     align-content: center;
   }
 
   .header-search {
     grid-column: 1 / -1;
-    flex-direction: row;
-    align-items: center;
-    gap: 10px;
-    max-width: none;
-  }
-
-  .header-search-field {
-    flex: 1;
+    width: 100%;
   }
 
   .public-site .site-header .malaysia-clock {
@@ -103,6 +98,12 @@
 
   .public-site .site-header .nav-actions {
     justify-self: end;
+  }
+}
+
+@media (max-width: 480px) {
+  .header-search {
+    max-width: none;
   }
 }
 
