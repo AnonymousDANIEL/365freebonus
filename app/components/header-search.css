@@ -62,13 +62,13 @@
   overflow: hidden;
   border-right: 2px solid #4285f4;
   white-space: nowrap;
-  animation: header-search-type 1s steps(16, end) both,
+  animation: header-search-type 4s steps(16, end) infinite,
     header-search-caret .8s step-end infinite;
 }
 
 @keyframes header-search-type {
-  from { width: 0; }
-  to { width: calc(100% - 2px); }
+  0% { width: 0; }
+  25%, 100% { width: calc(100% - 2px); }
 }
 
 @keyframes header-search-caret {
