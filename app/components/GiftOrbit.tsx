@@ -126,15 +126,17 @@ function measureLayout(canvas: HTMLCanvasElement, artwork: HTMLImageElement, cop
   const artLeft = image.left - viewport.left + (image.width - artWidth) / 2;
   const artTop = image.top - viewport.top + (image.height - artHeight) / 2;
   const copyRect = copy?.getBoundingClientRect();
-  const stacked = viewport.width <= 640 || !!(copyRect && image.top >= copyRect.bottom - 8);
-  const radius = stacked ? clamp(artWidth * 0.041, 11, 16) : clamp(viewport.width * 0.014, 16, 24);
+  const compact = viewport.width <= 640;
+  const stacked = compact || !!(copyRect && image.top >= copyRect.bottom - 8);
+  const radius = compact ? clamp(artWidth * 0.041, 11, 16) : clamp(viewport.width * 0.014, 16, 24);
   const inset = Math.ceil(radius * 1.35 + 6);
   const center = {
     x: stacked ? artLeft + artWidth / 2 : viewport.width / 2,
     y: stacked ? artTop + artHeight / 2 : viewport.height * 0.50,
   };
-  const radiusX = Math.min(center.x - inset, viewport.width - center.x - inset, stacked ? artWidth * 0.53 : Infinity);
-  const radiusY = Math.min(center.y - inset, viewport.height - center.y - inset, stacked ? artHeight * 0.43 : viewport.height * 0.435);
+  const topInset = stacked && copyRect ? Math.max(inset, copyRect.bottom - viewport.top + inset + 8) : inset;
+  const radiusX = Math.min(center.x - inset, viewport.width - center.x - inset, compact ? artWidth * 0.53 : Infinity);
+  const radiusY = Math.min(center.y - topInset, viewport.height - center.y - inset, stacked ? artHeight * 0.43 : viewport.height * 0.435);
   if (radiusX < 24 || radiusY < 24) return null;
 
   // This point is the illuminated interior, just behind the gold front rim.
@@ -149,7 +151,7 @@ function measureLayout(canvas: HTMLCanvasElement, artwork: HTMLImageElement, cop
     joinAngle: clamp(Math.asin(clamp((mouth.y - center.y) / radiusY, -0.75, 0.75)) - 0.11, 0.17, 0.64),
     launchBend: { x: mouth.x + artWidth * 0.09, y: mouth.y - artHeight * 0.23 },
     radius,
-    copy: copyRect && !stacked ? {
+    copy: copyRect ? {
       left: copyRect.left - viewport.left - 12,
       top: copyRect.top - viewport.top - 12,
       right: copyRect.right - viewport.left + 12,

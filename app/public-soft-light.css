@@ -221,3 +221,52 @@
 .public-site.public-site .social-contact-copy > span { color: #6c527a; }
 .public-site.public-site .social-contact-arrow { color: #7c5b30; background: #eee1f6; border-color: #b8a0c7; }
 .public-site.public-site .social-contact-card:hover .social-contact-arrow { color: #654522; border-color: #ae8b55; }
+
+/* Keep the copy and animated gift on the same centered axis. */
+.public-site.public-site .hero {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 24px;
+  min-height: 0;
+  padding-top: 36px;
+  padding-bottom: 24px;
+  overflow: visible;
+}
+.public-site.public-site .hero-copy {
+  width: 100%;
+  max-width: 900px;
+  text-align: center;
+}
+.public-site.public-site .hero h1 {
+  font-size: clamp(40px, 4.8vw, 60px);
+  line-height: 1.1;
+  letter-spacing: -.04em;
+  margin: 0 0 16px;
+}
+.public-site.public-site .hero-copy > p {
+  max-width: 620px;
+  margin-inline: auto;
+}
+.public-site.public-site .hero-actions {
+  justify-content: center;
+  margin-top: 22px;
+}
+.public-site.public-site .hero-visual {
+  flex: 0 0 auto;
+  width: min(100%, 560px);
+  height: auto;
+  aspect-ratio: 4 / 3;
+  margin: 0;
+  scale: 1;
+}
+@media (max-width: 640px) {
+  .public-site.public-site .hero {
+    padding-top: 32px;
+    padding-bottom: 16px;
+    gap: 24px;
+  }
+  .public-site.public-site .hero h1 { font-size: clamp(32px, 8.7vw, 46px); }
+  .public-site.public-site .hero-copy > p { max-width: 340px; }
+  .public-site.public-site .hero-actions { margin-top: 20px; }
+}
