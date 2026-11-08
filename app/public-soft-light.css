@@ -177,21 +177,22 @@
 .public-site.public-site .site-error p { color: #65516f; }
 .public-site.public-site .site-error a { color: #3e3247; background: #c7ab73; }
 
-/* Softer reel surfaces retain the same full-pool selection and motion. */
-.public-site.public-site .random-brand-picker { border-color: #d0bbdf; background: linear-gradient(105deg, #eee7f3, #f6f0f9 60%, #eee7f3); }
-.public-site.public-site .random-picker-kicker { color: #684920; }
+/* Centered discovery card; the selection clock and pool stay unchanged. */
+.public-site.public-site .random-brand-picker { border: 0; background: transparent; }
+.public-site.public-site .random-picker-shell { border-color: #d9c9e3; background: radial-gradient(ellipse at 50% 0, #ecddf43d, transparent 65%), linear-gradient(145deg, #faf7fb, #f3ebf8); box-shadow: 0 12px 40px #60416b09, inset 0 1px 0 #faf5fd; }
+.public-site.public-site .random-picker-kicker { color: #79592f; }
 .public-site.public-site .random-picker-intro h2 { color: #483052; }
 .public-site.public-site .random-picker-intro p { color: #604a6a; }
-.public-site.public-site .random-picker-reel { border-color: #d7c7e3; }
-.public-site.public-site .random-picker-item { color: #5e3f71; }
-.public-site.public-site .random-picker-brand-icon { color: #725088; border-color: #ceb5e0; background: #e9daf4; }
-.public-site.public-site .random-picker-marker { border-color: #aa8b575c; background: linear-gradient(120deg, #e2d3ed8c, #ead8b780); }
+.public-site.public-site .random-picker-reel { border-color: transparent; background: #e8deef24; }
+.public-site.public-site .random-picker-item { color: #60416f; }
+.public-site.public-site .random-picker-brand-icon { color: #7a548e; border-color: #d4c0e1; background: #ecdef4; }
+.public-site.public-site .random-picker-marker { border-color: #b99a61; background: linear-gradient(145deg, #f8edd6, #f1e4d0); box-shadow: 0 0 0 5px #c9a96912, inset 0 0 0 1px #fbf1db, 0 5px 18px #aa854b0d; }
 .public-site.public-site .random-picker-marker::before,
-.public-site.public-site .random-picker-marker::after { background: #846132; }
+.public-site.public-site .random-picker-marker::after { background: #aa8147; }
 .public-site.public-site .random-picker-caption,
 .public-site.public-site .random-picker-empty { color: #604a6a; }
-.public-site.public-site .random-picker-button { color: #3e3247; border-color: #aa8c54; background: #c7ab73; box-shadow: inset 0 1px 0 #ead9b844, 0 4px 12px #63475412; }
-.public-site.public-site .random-picker-button:hover:not(:disabled) { color: #382a41; background: #d3ba87; border-color: #b0955e; }
+.public-site.public-site .random-picker-button { color: #403046; border-color: #ad8c54; background: linear-gradient(115deg, #d6bd8c, #c7a970); box-shadow: inset 0 1px 0 #f2dfb988, 0 5px 14px #96723c12; }
+.public-site.public-site .random-picker-button:hover:not(:disabled) { color: #382a41; background: #ddc596; border-color: #a4844b; box-shadow: 0 7px 18px #96723c1c; }
 .public-site.public-site .random-picker-button:focus-visible { outline-color: #755685; }
 
 .public-site.public-site .accepted-methods-panel { border-color: #cfb4e1; background: radial-gradient(ellipse at 0 0, #c2aacf1a, transparent 58%), linear-gradient(120deg, #eee4f4, #f6f0f5); box-shadow: 0 12px 35px #62466f0d; }
