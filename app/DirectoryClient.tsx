@@ -5,11 +5,11 @@ import { ArrowUpRight, ArrowRight, Search, X, Heart, Gamepad2, Sparkles, Orbit, 
 import AnnouncementTicker from './components/AnnouncementTicker';
 import GiftOrbit from './components/GiftOrbit';
 import MalaysiaClock from './components/MalaysiaClock';
+import HeaderSearch from './components/HeaderSearch';
 import RandomBrandPicker from './components/RandomBrandPicker';
 import AcceptedMethods from './components/AcceptedMethods';
 import SocialContacts from './components/SocialContacts';
 import './components/hero-entrance.css';
-import { defaultAvatarImageUrl } from './lib/brand-media';
 import { effectiveBrandCategory } from './lib/directory';
 import type { Brand, DirectoryData } from './lib/directory';
 
@@ -35,7 +35,6 @@ function BrandArtwork({brand,large=false}:{brand:Brand,large?:boolean}) {
 
 export default function DirectoryClient({initialData}:{initialData:DirectoryData}) {
  const {settings,brands}=initialData;
- const avatarImageUrl = settings.avatarImageUrl || defaultAvatarImageUrl;
  const [lang,setLang]=useState<Lang>('EN'); const t=words[lang];
  const [query,setQuery]=useState(''); const [category,setCategory]=useState('All'); const [sort,setSort]=useState('featured');
  const [promotionNow, setPromotionNow] = useState(0);
@@ -89,11 +88,7 @@ export default function DirectoryClient({initialData}:{initialData:DirectoryData
   <AnnouncementTicker text={settings.announcement} />
   <header className="site-header">
    <div className="nav-shell">
-    <a className="wordmark" href="/" aria-label={`${settings.name} home`}>
-     <img className="site-logo-image" src={avatarImageUrl} alt="" />
-     <span className="header-brand-name">{settings.name}</span>
-     <span className="wordmark-point">®</span>
-    </a>
+    <HeaderSearch />
     <MalaysiaClock label={clockLabels[lang]} />
     <div className="nav-actions">
      <div className="lang-switch" aria-label="Language">
