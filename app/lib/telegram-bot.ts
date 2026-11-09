@@ -1,8 +1,8 @@
 import { randomBytes } from "node:crypto";
 import { request } from "node:https";
 
-type TelegramMethod = "getMe" | "getChat" | "getChatMember" | "sendMessage" | "sendPhoto" | "sendAnimation";
-export type TelegramUpload = { field: "photo" | "animation"; fileName: string; mime: string; bytes: Buffer };
+type TelegramMethod = "getMe" | "getChat" | "getChatMember" | "sendMessage" | "sendPhoto" | "sendAnimation" | "sendDocument";
+export type TelegramUpload = { field: "photo" | "animation" | "document"; fileName: string; mime: string; bytes: Buffer };
 type TelegramReply =
   | { ok: true; result: Record<string, unknown> }
   | { ok: false; code: number; retryAfter: number }

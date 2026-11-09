@@ -1,9 +1,12 @@
 import { createCipheriv, createDecipheriv, createHmac, randomBytes } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
+import { getAdminPath } from "./auth-core";
+import { brandAnnouncementPath } from "./brand-links";
 import { isSafeSocialUrl } from "./directory";
 import { MAX_IMAGE_BYTES, openImage } from "./image-media";
 import { isSafeImageUrl, isUploadedImageUrl } from "./image-url";
 import { getSqlite } from "./sqlite";
+import { cleanTelegramBackground } from "./telegram-background";
 import { telegramRequest, type TelegramUpload } from "./telegram-bot";
 
 type StoredSettings = { enabled: number; chat_id: string; token_ciphertext: string };
@@ -14,11 +17,13 @@ type Delivery = {
   revision: string;
   attempts: number;
   name: string;
+  slug: string;
   tagline: string;
   category: "Update" | "New";
   image_url: string;
 };
-type PromotionMedia = TelegramUpload | { field: TelegramUpload["field"]; url: string };
+type PromotionMedia = TelegramUpload | { field: "photo" | "animation"; url: string };
+const mediaMethods = { photo: "sendPhoto", animation: "sendAnimation", document: "sendDocument" } as const;
 
 const TOKEN_FORMAT = /^[1-9]\d{0,15}:[A-Za-z0-9_-]{20,128}$/;
 const USERNAME_FORMAT = /^@[A-Za-z0-9_]{1,32}$/;
@@ -204,7 +209,7 @@ function claimDelivery(db: DatabaseSync) {
     const blocked = db.prepare(`SELECT 1 FROM telegram_promotion_outbox WHERE next_attempt_at > ?
       AND (status = 'sending' OR last_error = ?) LIMIT 1`).get(now, RATE_LIMIT_ERROR);
     if (blocked) return null;
-    const row = db.prepare(`SELECT o.brand_id, o.revision, o.attempts, b.name, b.tagline, b.category, b.image_url
+    const row = db.prepare(`SELECT o.brand_id, o.revision, o.attempts, b.name, b.slug, b.tagline, b.category, b.image_url
       FROM telegram_promotion_outbox o JOIN brands b ON b.id = o.brand_id
       WHERE o.status = 'pending' AND o.next_attempt_at <= ? AND b.published = 1 AND b.category IN ('Update', 'New')
         AND (b.publish_at IS NULL OR b.publish_at <= ?)
@@ -217,7 +222,7 @@ function claimDelivery(db: DatabaseSync) {
   });
 }
 
-async function promotionMedia(imageUrl: string, origin: string): Promise<PromotionMedia | null> {
+async function promotionMedia(imageUrl: string, origin: string, slug: string): Promise<PromotionMedia | null> {
   const value = imageUrl.trim();
   if (!value) return null;
   const relative = value.startsWith("/");
@@ -235,6 +240,8 @@ async function promotionMedia(imageUrl: string, origin: string): Promise<Promoti
     // openImage bounds the stream to the size of the validated upload.
     const bytes = Buffer.from(await new Response(image.stream).arrayBuffer());
     if (bytes.length !== image.size) return null;
+    const clean = await cleanTelegramBackground(bytes, image.mime).catch(() => null);
+    if (clean) return { field: "document", fileName: `${slug}.${clean.extension}`, mime: clean.mime, bytes: clean.bytes };
     if (image.mime === "image/webp") {
       const { default: sharp } = await import("sharp");
       const converted = await sharp(bytes, { limitInputPixels: 24_000_000 })
@@ -264,20 +271,22 @@ async function deliverPromotion() {
   const db = getSqlite();
   const delivery = claimDelivery(db);
   if (!delivery) return;
-  const url = new URL(`/#brand-card-${encodeURIComponent(delivery.brand_id)}`, delivery.origin);
+  const url = new URL(brandAnnouncementPath(delivery.slug, delivery.brand_id, getAdminPath()), delivery.origin);
   const title = `${delivery.category} · ${delivery.name}`;
   const tagline = delivery.tagline.trim();
   const text = [title, tagline, url.href].filter(Boolean).join("\n\n");
   const sendText = () => telegramRequest(delivery.token, "sendMessage", { chat_id: delivery.chatId, text, link_preview_options: { is_disabled: true } });
   const caption = promotionCaption(title, tagline, url.href);
-  const media = caption ? await promotionMedia(delivery.image_url, delivery.origin) : null;
+  const media = caption ? await promotionMedia(delivery.image_url, delivery.origin, delivery.slug) : null;
   let response;
   if (media && caption) {
-    const method = media.field === "animation" ? "sendAnimation" : "sendPhoto";
+    const method = mediaMethods[media.field];
     const parameters = { chat_id: delivery.chatId, caption };
     response = "url" in media
       ? await telegramRequest(delivery.token, method, { ...parameters, [media.field]: media.url })
-      : await telegramRequest(delivery.token, method, parameters, media);
+      : await telegramRequest(delivery.token, method, media.field === "document"
+        ? { ...parameters, disable_content_type_detection: true }
+        : parameters, media);
     if (response && !response.ok && [400, 403].includes(response.code)) response = await sendText();
   } else response = await sendText();
   const now = Date.now();

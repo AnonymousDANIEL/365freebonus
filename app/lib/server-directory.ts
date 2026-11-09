@@ -3,6 +3,7 @@ import { getSqlite } from "./sqlite";
 import { defaultSettings, seedBrands, DEFAULT_PROMOTION_DAYS, PROMOTION_DAY_MS, effectiveBrandCategory, isBrandPublished, normalizeBrandCategory, isSafeSocialUrl, isValidPromotionStart, PromotionValidationError, SettingsValidationError, type Brand, type BrandCategory, type SiteSettings, type DirectoryData } from "./directory";
 
 const brandColumns = "id, name, slug, category, tagline, description, color, icon, image_url AS imageUrl, featured, published, sort_order AS sortOrder, link, promotion_days AS promotionDays, promotion_expires_at AS promotionExpiresAt, promotion_starts_at AS promotionStartsAt, publish_at AS publishAt";
+const publicBrandVisibility = "published = 1 AND (publish_at IS NULL OR publish_at <= ?)";
 const settingsColumns = "name, eyebrow, headline, description, announcement, contact_url AS contactUrl, cover_image_url AS coverImageUrl, avatar_image_url AS avatarImageUrl, whatsapp_url AS whatsappUrl, whatsapp_enabled AS whatsappEnabled, telegram_url AS telegramUrl, telegram_enabled AS telegramEnabled, facebook_url AS facebookUrl, facebook_enabled AS facebookEnabled";
 function asSettings(row: Record<string, unknown>): SiteSettings {
   return { ...row, whatsappEnabled: row.whatsappEnabled === 1, telegramEnabled: row.telegramEnabled === 1, facebookEnabled: row.facebookEnabled === 1 } as SiteSettings;
@@ -48,7 +49,7 @@ export async function readDirectory(includeDrafts = false, now = Date.now()): Pr
   const db = initializeDirectory();
   const settings = db.prepare(`SELECT ${settingsColumns} FROM site_settings WHERE id = 'primary'`).get();
   if (!settings) throw new Error("Website settings could not be loaded.");
-  const where = includeDrafts ? "" : "WHERE published = 1 AND (publish_at IS NULL OR publish_at <= ?)";
+  const where = includeDrafts ? "" : `WHERE ${publicBrandVisibility}`;
   const rows = db.prepare(`SELECT ${brandColumns} FROM brands ${where} ORDER BY sort_order, name`).all(...(includeDrafts ? [] : [now]));
   const brands = rows.map(asBrand);
   const savedSettings = asSettings(settings);
@@ -64,6 +65,11 @@ export async function readDirectory(includeDrafts = false, now = Date.now()): Pr
     if (isValidPromotionStart(next?.nextPublishAt)) data.nextPublishAt = next.nextPublishAt;
   }
   return data;
+}
+
+export function readPublicBrandIdBySlug(slug: string, now = Date.now()): string | null {
+  const row = initializeDirectory().prepare(`SELECT id FROM brands WHERE slug = ? AND ${publicBrandVisibility}`).get(slug, now);
+  return typeof row?.id === "string" ? row.id : null;
 }
 
 export type BrandWriteInput = Omit<Brand, "id" | "category" | "promotionDays" | "promotionExpiresAt" | "scheduledCategory" | "publishAt"> & {

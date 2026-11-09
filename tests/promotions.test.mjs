@@ -14,7 +14,7 @@ const fixture = mkdtempSync(path.join(tmpdir(), 'directory-promotions-'));
 writeFileSync(path.join(fixture, 'package.json'), '{"type":"commonjs"}');
 symlinkSync(path.join(project, 'node_modules'), path.join(fixture, 'node_modules'), 'dir');
 for (const source of [
-  'app/lib/sqlite.ts', 'app/lib/directory.ts', 'app/lib/server-directory.ts',
+  'app/lib/sqlite.ts', 'app/lib/directory.ts', 'app/lib/server-directory.ts', 'app/lib/brand-links.ts',
   'app/lib/image-url.ts', 'app/lib/auth-core.ts', 'app/lib/session-store.ts',
   'app/chatgpt-auth.ts', 'app/api/admin/_security.ts', 'app/api/admin/_validation.ts',
 ]) {
@@ -28,6 +28,7 @@ for (const source of [
 const require = createRequire(import.meta.url);
 const repository = require(path.join(fixture, 'app/lib/server-directory.js'));
 const directory = require(path.join(fixture, 'app/lib/directory.js'));
+const { brandAnnouncementPath, brandAnchorPath, isBrandShortSlug } = require(path.join(fixture, 'app/lib/brand-links.js'));
 const sqlite = require(path.join(fixture, 'app/lib/sqlite.js'));
 const { brandInput } = require(path.join(fixture, 'app/api/admin/_validation.js'));
 const previousDataDir = process.env.DATA_DIR;
@@ -436,6 +437,32 @@ test('extending an expired promotion that becomes active queues one new notifica
     repository.updateBrand(id, input, afterExpiry + 1);
     assert.deepEqual(readJob.get(id), queued, 'retry must keep the first reactivation revision');
   }
+});
+
+test('brand short links use the saved slug and respect the publication gate', () => {
+  const adminPath = '/secret-admin';
+  const brand = repository.createBrand(example('short-link-id', { name: 'Unrelated Brand Name', slug: 'custom-public-slug' }), now);
+  const anchor = '/#brand-card-short-link-id';
+  assert.equal(brandAnchorPath(brand.id), anchor);
+  assert.equal(brandAnnouncementPath(brand.slug, brand.id, adminPath), '/custom-public-slug');
+  assert.equal(repository.readPublicBrandIdBySlug(brand.slug, now), brand.id);
+  assert.equal(repository.readPublicBrandIdBySlug('unrelated-brand-name', now), null);
+  assert.equal(repository.readPublicBrandIdBySlug('unknown-short-link', now), null);
+
+  for (const slug of ['admin', 'login', 'api', 'secret-admin', '', 'Uppercase', 'a--b', 'a/b', 'a%2Fb', 'a'.repeat(101)]) {
+    assert.equal(isBrandShortSlug(slug, adminPath), false, slug);
+    assert.equal(brandAnnouncementPath(slug, brand.id, adminPath), anchor);
+  }
+  assert.equal(isBrandShortSlug('a'.repeat(100), adminPath), true);
+
+  const draft = repository.createBrand(example('short-link-draft', { published: false }), now);
+  const start = now + day;
+  const scheduled = repository.createBrand(example('short-link-scheduled', {
+    category: 'New', promotionStartsAt: start, published: false, autoPublishAtStart: true,
+  }), now);
+  assert.equal(repository.readPublicBrandIdBySlug(draft.slug, start), null);
+  assert.equal(repository.readPublicBrandIdBySlug(scheduled.slug, start - 1), null);
+  assert.equal(repository.readPublicBrandIdBySlug(scheduled.slug, start), scheduled.id);
 });
 
 test.after(() => {
