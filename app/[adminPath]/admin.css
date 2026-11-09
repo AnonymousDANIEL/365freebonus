@@ -52,6 +52,11 @@
 .cms-shell .cms-category{background:var(--cms-neutral-bg);color:var(--cms-muted)}
 .cms-shell .cms-status{border-color:var(--cms-line);background:var(--cms-inset);color:var(--cms-muted)}
 .cms-shell .cms-status.published{border-color:var(--cms-line);background:var(--cms-accent-bg);color:var(--cms-green)}
+.cms-shell .cms-status.scheduled {
+  border-style: dashed;
+  background: var(--cms-accent-bg);
+  color: var(--cms-green);
+}
 .cms-shell .cms-status.draft{background:var(--cms-inset);color:var(--cms-muted)}
 .cms-shell .cms-feature{color:var(--cms-subtle)}
 .cms-shell .cms-feature.selected{color:var(--cms-green)}

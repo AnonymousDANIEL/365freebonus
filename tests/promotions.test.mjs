@@ -35,7 +35,7 @@ process.env.DATA_DIR = path.join(fixture, 'data');
 const now = 1_800_000_000_000;
 const day = 86_400_000;
 
-function fields(brand) { const { id: _id, ...input } = brand; return input; }
+function fields(brand) { const { id: _id, publishAt: _publishAt, ...input } = brand; return input; }
 function example(id, extra = {}) {
   return { ...directory.seedBrands[0], id, slug: id, name: id, ...extra };
 }
@@ -43,7 +43,7 @@ function example(id, extra = {}) {
 test('migrations preserve brand data and existing expiry without creating Telegram notifications for legacy brands', async () => {
   const currentDataDir = process.env.DATA_DIR;
   try {
-    for (const version of [1, 2, 4]) {
+    for (const version of [1, 2, 4, 5]) {
       const legacyPath = path.join(fixture, `legacy-${version}`);
       mkdirSync(legacyPath);
       const legacy = new DatabaseSync(path.join(legacyPath, 'directory.sqlite'));
@@ -64,7 +64,7 @@ test('migrations preserve brand data and existing expiry without creating Telegr
       if (version >= 2) legacy.exec(`ALTER TABLE site_settings ADD COLUMN cover_image_url TEXT NOT NULL DEFAULT '';
         ALTER TABLE site_settings ADD COLUMN avatar_image_url TEXT NOT NULL DEFAULT '';
         UPDATE site_settings SET cover_image_url='/cover.png', avatar_image_url='/avatar.png';`);
-      if (version === 4) {
+      if (version >= 4) {
         legacy.exec(`ALTER TABLE brands ADD COLUMN promotion_days INTEGER DEFAULT NULL;
           ALTER TABLE brands ADD COLUMN promotion_expires_at INTEGER DEFAULT NULL;
           ALTER TABLE site_settings ADD COLUMN whatsapp_url TEXT NOT NULL DEFAULT '';
@@ -75,23 +75,50 @@ test('migrations preserve brand data and existing expiry without creating Telegr
           ALTER TABLE site_settings ADD COLUMN facebook_enabled INTEGER NOT NULL DEFAULT 0;`);
         legacy.prepare("UPDATE brands SET category='New', promotion_days=7, promotion_expires_at=?").run(now + 7 * day);
       }
+      if (version === 5) {
+        legacy.exec(`ALTER TABLE brands ADD COLUMN promotion_starts_at INTEGER DEFAULT NULL;
+          CREATE TABLE telegram_promotion_outbox (
+            brand_id TEXT PRIMARY KEY REFERENCES brands(id) ON DELETE CASCADE,
+            revision TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
+            attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at INTEGER NOT NULL DEFAULT 0,
+            last_error TEXT NOT NULL DEFAULT '', sent_at INTEGER, message_id INTEGER
+          );
+          CREATE TABLE telegram_promotion_settings (
+            id TEXT PRIMARY KEY, enabled INTEGER NOT NULL, chat_id TEXT NOT NULL, token_ciphertext TEXT NOT NULL
+          );
+          INSERT INTO telegram_promotion_outbox (brand_id, revision, attempts) VALUES ('original', 'legacy-revision', 2);`);
+        legacy.prepare('UPDATE brands SET promotion_starts_at=?, promotion_expires_at=?').run(now + day, now + 8 * day);
+        legacy.prepare(`INSERT INTO brands VALUES ('legacy-draft', 'Old draft', 'legacy-draft', 'Update', 'Draft', 'Draft',
+          '#aabbcc', 'sparkles', '', 0, 0, 80, '', 1, ?, ?)`).run(now + 2 * day, now + day);
+      }
       legacy.close();
       process.env.DATA_DIR = legacyPath;
       const saved = await repository.readDirectory(true, now);
       const upgraded = sqlite.getSqlite();
-      assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version, 5);
-      assert.equal(upgraded.prepare('SELECT COUNT(*) AS count FROM telegram_promotion_outbox').get().count, 0);
-      assert.equal(saved.brands.length, 1, 'migration must not add demo brands to an existing site');
+      assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version, 6);
+      assert.equal(upgraded.prepare('SELECT COUNT(*) AS count FROM telegram_promotion_outbox').get().count, version === 5 ? 1 : 0);
+      assert.equal(saved.brands.length, version === 5 ? 2 : 1, 'migration must not add demo brands to an existing site');
       assert.deepEqual(saved.brands[0], {
-        id: 'original', name: 'Existing brand', slug: 'original', category: version === 4 ? 'New' : 'All',
+        id: 'original', name: 'Existing brand', slug: 'original', category: version >= 4 ? 'New' : 'All',
         tagline: 'Original tagline', description: 'Original description', color: '#aabbcc', icon: 'sparkles',
         imageUrl: '/api/images/original.gif', featured: true, published: true, sortOrder: 73,
-        link: 'https://brand.example', promotionDays: version === 4 ? 7 : null,
-        promotionStartsAt: null, promotionExpiresAt: version === 4 ? now + 7 * day : null,
+        link: 'https://brand.example', promotionDays: version >= 4 ? 7 : null,
+        promotionStartsAt: version === 5 ? now + day : null,
+        promotionExpiresAt: version >= 4 ? now + (version === 5 ? 8 : 7) * day : null, publishAt: null,
       });
       assert.equal(saved.settings.name, 'Existing site');
       assert.equal(saved.settings.coverImageUrl, version >= 2 ? '/cover.png' : '');
       assert.equal(saved.settings.avatarImageUrl, version >= 2 ? '/avatar.png' : '');
+      if (version === 5) {
+        assert.equal(saved.brands[1].published, false);
+        assert.equal(saved.brands[1].publishAt, null);
+        const { brands, nextPublishAt } = await repository.readDirectory(false, now);
+        assert.deepEqual(brands.map(brand => [brand.id, brand.category]), [['original', 'All']]);
+        assert.equal(nextPublishAt, undefined);
+        const afterStart = await repository.readDirectory(false, now + day);
+        assert.deepEqual(afterStart.brands.map(brand => [brand.id, brand.category]), [['original', 'New']]);
+        assert.deepEqual({ ...upgraded.prepare('SELECT revision, attempts FROM telegram_promotion_outbox').get() }, { revision: 'legacy-revision', attempts: 2 });
+      }
     }
   } finally { process.env.DATA_DIR = currentDataDir; }
 });
@@ -165,12 +192,14 @@ test('drafts stay unpublished at and after expiry and returned props keep a norm
   }
 });
 
-test('scheduled promotions appear in their category at start and return to All at expiry', async () => {
+test('an already public brand stays visible while its scheduled promotion starts and expires', async () => {
   const start = now + 3 * day;
   const expiry = start + 2 * day;
-  const saved = repository.createBrand(example('scheduled', { category: 'Update', promotionDays: 2, promotionStartsAt: start, promotionExpiresAt: now + 100 * day }), now);
+  const existing = repository.createBrand(example('scheduled'), now);
+  const saved = repository.updateBrand(existing.id, { ...fields(existing), category: 'Update', promotionDays: 2, promotionStartsAt: start, promotionExpiresAt: now + 100 * day, autoPublishAtStart: true }, now);
   assert.equal(saved.promotionStartsAt, start);
   assert.equal(saved.promotionExpiresAt, expiry);
+  assert.equal(saved.publishAt, null);
 
   const getBrand = async (time, admin = false) => (await repository.readDirectory(admin, time)).brands.find(brand => brand.id === saved.id);
   const pending = await getBrand(start - 1);
@@ -196,6 +225,98 @@ test('scheduled promotions appear in their category at start and return to All a
   assert.equal(expired.scheduledCategory, undefined);
   assert.equal(expired.published, true);
   assert.equal(directory.effectiveBrandCategory(saved, expiry), 'All');
+});
+
+test('scheduled publication exposes only the earliest deadline until each brand becomes public', async () => {
+  const currentDataDir = process.env.DATA_DIR;
+  process.env.DATA_DIR = path.join(fixture, 'scheduled-publication');
+  try {
+    const earlyStart = now + day;
+    const lateStart = now + 2 * day;
+    for (const [id, start, published] of [['later-hidden-brand', lateStart, false], ['earlier-hidden-brand', earlyStart, true]]) {
+      const input = brandInput.parse({ ...fields(example(id, {
+        category: 'New', promotionDays: 2, promotionStartsAt: start, published, featured: true,
+        description: `Private description for ${id}`, link: `https://brand.example/${id}`,
+      })), autoPublishAtStart: true });
+      const saved = repository.createBrand({ ...input, id }, now);
+      assert.equal(saved.publishAt, start);
+      assert.equal(saved.published, true);
+      assert.equal(Object.hasOwn(saved, 'autoPublishAtStart'), false);
+    }
+
+    const pending = await repository.readDirectory(false, earlyStart - 1);
+    assert.equal(pending.nextPublishAt, earlyStart);
+    assert.deepEqual(Object.keys(pending).sort(), ['brands', 'nextPublishAt', 'settings']);
+    const publicPayload = JSON.stringify(pending);
+    assert.equal(publicPayload.includes('hidden-brand'), false, 'unreleased brands must not leak content or featured cards');
+    assert.equal(publicPayload.includes(String(lateStart)), false, 'only the earliest deadline is disclosed');
+    const admin = await repository.readDirectory(true, earlyStart - 1);
+    assert.equal(admin.brands.find(brand => brand.id === 'later-hidden-brand').publishAt, lateStart);
+    assert.equal(admin.brands.find(brand => brand.id === 'earlier-hidden-brand').publishAt, earlyStart);
+
+    const firstRelease = await repository.readDirectory(false, earlyStart);
+    assert.equal(firstRelease.nextPublishAt, lateStart);
+    assert.equal(firstRelease.brands.some(brand => brand.id === 'later-hidden-brand'), false);
+    const released = firstRelease.brands.find(brand => brand.id === 'earlier-hidden-brand');
+    assert.equal(released.category, 'New');
+    assert.equal(released.featured, true);
+    assert.equal(Object.hasOwn(released, 'publishAt'), false);
+    const secondRelease = await repository.readDirectory(false, lateStart);
+    assert.equal(secondRelease.brands.find(brand => brand.id === 'later-hidden-brand').category, 'New');
+    assert.equal(Object.hasOwn(secondRelease, 'nextPublishAt'), false);
+    const originalLater = admin.brands.find(brand => brand.id === 'later-hidden-brand');
+    const replayed = repository.updateBrand(originalLater.id, {
+      ...fields(originalLater), published: false, autoPublishAtStart: true,
+    }, lateStart + 1);
+    assert.equal(replayed.published, true, 'a retry of scheduling intent after release must not hide the brand');
+    assert.equal(replayed.publishAt, lateStart);
+
+    const afterExpiry = await repository.readDirectory(false, lateStart + 2 * day);
+    assert.equal(afterExpiry.brands.find(brand => brand.id === 'earlier-hidden-brand').category, 'All');
+    assert.equal(afterExpiry.brands.find(brand => brand.id === 'later-hidden-brand').category, 'All');
+  } finally { process.env.DATA_DIR = currentDataDir; }
+});
+
+test('draft scheduling intent is explicit and a pending publication can be retried, moved, or unpublished', async () => {
+  const start = now + day;
+  const draft = repository.createBrand(example('pending-draft', { category: 'Update', promotionStartsAt: start, published: false }), now);
+  assert.equal(draft.publishAt, null);
+  const ordinary = repository.updateBrand(draft.id, { ...fields(draft), tagline: 'Draft edit' }, now + 1);
+  assert.equal(ordinary.published, false);
+  assert.equal(ordinary.publishAt, null);
+
+  const input = brandInput.parse({ ...fields(ordinary), promotionStartsAt: start + day, autoPublishAtStart: true });
+  const scheduled = repository.updateBrand(draft.id, input, now + 2);
+  assert.equal(scheduled.published, true);
+  assert.equal(scheduled.publishAt, start + day);
+  assert.equal(Object.hasOwn(scheduled, 'autoPublishAtStart'), false);
+  const retry = repository.updateBrand(draft.id, input, now + 3);
+  assert.deepEqual(retry, scheduled);
+
+  const moved = repository.updateBrand(draft.id, { ...fields(retry), promotionStartsAt: start + 2 * day }, now + 4);
+  assert.equal(moved.publishAt, start + 2 * day);
+  assert.equal((await repository.readDirectory(false, start + day)).brands.some(brand => brand.id === draft.id), false);
+
+  const unpublished = repository.updateBrand(draft.id, { ...fields(moved), published: false }, now + 5);
+  assert.equal(unpublished.publishAt, null);
+  assert.equal(unpublished.promotionStartsAt, moved.promotionStartsAt);
+  assert.equal(unpublished.published, false);
+  assert.equal((await repository.readDirectory(false, moved.publishAt)).brands.some(brand => brand.id === draft.id), false);
+});
+
+test('clearing the schedule of a pending published brand releases it immediately', async () => {
+  const start = now + 6 * day;
+  const scheduled = repository.createBrand(example('released-early', {
+    category: 'Update', promotionStartsAt: start, promotionDays: 2, published: false, autoPublishAtStart: true,
+  }), now);
+  assert.equal(scheduled.publishAt, start);
+  const releaseTime = now + 1;
+  const released = repository.updateBrand(scheduled.id, { ...fields(scheduled), promotionStartsAt: null }, releaseTime);
+  assert.equal(released.published, true);
+  assert.equal(released.publishAt, null);
+  assert.equal(released.promotionExpiresAt, releaseTime + 2 * day);
+  const visible = (await repository.readDirectory(false, releaseTime)).brands.find(brand => brand.id === released.id);
+  assert.equal(visible.category, 'Update');
 });
 
 test('scheduled saves preserve omitted and unchanged starts while explicit null makes a promotion immediate', () => {

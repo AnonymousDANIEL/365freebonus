@@ -17,6 +17,7 @@ export const brandInput = z.object({
   category: z.enum(["All", "Update", "New", "Gaming", "Lifestyle", "Entertainment"]).optional().transform(normalizeBrandCategory),
   promotionDays: z.number().int().min(1).max(365).nullable().optional(),
   promotionStartsAt: z.number().refine(isValidPromotionStart, "请输入有效的推广开始时间。").nullable().optional(),
+  autoPublishAtStart: z.boolean().optional(),
   // Accepted for compatibility with full-object saves, but always ignored by
   // the repository: only the server can create a promotion deadline.
   promotionExpiresAt: z.number().int().safe().nullable().optional(),

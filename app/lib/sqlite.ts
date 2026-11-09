@@ -12,7 +12,7 @@ export function getDataDirectory(): string {
 function migrate(db: DatabaseSync) {
   if (migrated.has(db)) return;
   const readVersion = () => (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
-  if (readVersion() < 5) {
+  if (readVersion() < 6) {
     db.exec("BEGIN IMMEDIATE");
     try {
       // Read again inside the write lock, so concurrent process starts cannot
@@ -87,6 +87,10 @@ function migrate(db: DatabaseSync) {
           chat_id TEXT NOT NULL, token_ciphertext TEXT NOT NULL
         );
         PRAGMA user_version = 5;
+      `);
+      if (version < 6) db.exec(`
+        ALTER TABLE brands ADD COLUMN publish_at INTEGER DEFAULT NULL;
+        PRAGMA user_version = 6;
       `);
       db.exec("COMMIT");
     } catch (error) { db.exec("ROLLBACK"); throw error; }

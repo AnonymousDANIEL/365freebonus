@@ -1,4 +1,5 @@
 import type { Metadata } from 'next';
+import Script from 'next/script';
 import DirectoryClient from './DirectoryClient';
 import { readDirectory } from './lib/server-directory';
 export const dynamic = 'force-dynamic';
@@ -20,7 +21,10 @@ export default async function Home() {
   try {
     const now = Date.now();
     const data = await readDirectory(false, now);
-    return <DirectoryClient initialData={data} initialTime={now} />;
+    return <>
+      <DirectoryClient initialData={data} initialTime={now} />
+      <Script src="/front-pause.js" strategy="afterInteractive" />
+    </>;
   } catch {
     return <main className="site-error"><span className="brandmark">N</span><h1>We couldn’t load the collection.</h1><p>Please refresh in a moment. Your saved content has not been changed.</p><a href="/">Try again ↗</a></main>;
   }

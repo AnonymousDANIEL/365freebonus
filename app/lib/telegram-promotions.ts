@@ -207,8 +207,9 @@ function claimDelivery(db: DatabaseSync) {
     const row = db.prepare(`SELECT o.brand_id, o.revision, o.attempts, b.name, b.tagline, b.category, b.image_url
       FROM telegram_promotion_outbox o JOIN brands b ON b.id = o.brand_id
       WHERE o.status = 'pending' AND o.next_attempt_at <= ? AND b.published = 1 AND b.category IN ('Update', 'New')
+        AND (b.publish_at IS NULL OR b.publish_at <= ?)
         AND (b.promotion_starts_at IS NULL OR b.promotion_starts_at <= ?) AND b.promotion_expires_at > ?
-      ORDER BY o.next_attempt_at, o.rowid LIMIT 1`).get(now, now, now) as Delivery | undefined;
+      ORDER BY o.next_attempt_at, o.rowid LIMIT 1`).get(now, now, now, now) as Delivery | undefined;
     if (!row) return null;
     db.prepare(`UPDATE telegram_promotion_outbox SET status = 'sending', attempts = attempts + 1, next_attempt_at = ?, last_error = ''
       WHERE brand_id = ? AND revision = ?`).run(now + LEASE_MS, row.brand_id, row.revision);

@@ -22,6 +22,7 @@ export type Brand = {
   imageUrl: string;
   featured: boolean;
   published: boolean;
+  publishAt?: number | null;
   sortOrder: number;
   link: string;
 };
@@ -40,6 +41,10 @@ export function effectiveBrandCategory(brand: Pick<Brand, "category" | "promotio
   if (start != null && (!isValidPromotionStart(start) || start > now)) return "All";
   if (typeof brand.promotionExpiresAt !== "number" || !Number.isSafeInteger(brand.promotionExpiresAt) || brand.promotionExpiresAt <= now) return "All";
   return normalizeBrandCategory(brand.category === "All" && start != null ? brand.scheduledCategory : brand.category);
+}
+
+export function isBrandPublished(brand: Pick<Brand, "published" | "publishAt">, now = Date.now()): boolean {
+  return brand.published && (brand.publishAt == null || brand.publishAt <= now);
 }
 
 export function isSafeSocialUrl(value: unknown): value is string {
@@ -71,7 +76,7 @@ export type SiteSettings = {
   facebookEnabled: boolean;
 };
 
-export type DirectoryData = { settings: SiteSettings; brands: Brand[] };
+export type DirectoryData = { settings: SiteSettings; brands: Brand[]; nextPublishAt?: number };
 
 export const defaultSettings: SiteSettings = {
   name: "365freebonus",

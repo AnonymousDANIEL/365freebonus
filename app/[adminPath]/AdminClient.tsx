@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { ArrowUpRight, Check, ChevronRight, CircleHelp, ExternalLink, Eye, FileText, ImageIcon, LayoutGrid, LoaderCircle, Plus, Search, Settings2, ShieldCheck, Sparkles, Trash2, Upload, UserRound, X, Pencil, Globe, LogOut, Orbit, Sun, Gamepad2, Moon, Triangle } from "lucide-react";
-import { DEFAULT_PROMOTION_DAYS, effectiveBrandCategory, isSafeSocialUrl, isValidPromotionStart, type Brand, type SiteSettings } from "../lib/directory";
+import { DEFAULT_PROMOTION_DAYS, effectiveBrandCategory, isBrandPublished, isSafeSocialUrl, isValidPromotionStart, type Brand, type SiteSettings } from "../lib/directory";
 import { isSafeImageUrl, isUploadedImageUrl } from "../lib/image-url";
 import { AdminThemeToggle, useAdminTheme } from "../components/AdminTheme";
 import TelegramGroupSettings from "./TelegramGroupSettings";
@@ -30,6 +30,8 @@ function socialContactError(value: string, enabled: boolean): string {
 class RequestError extends Error { constructor(message: string, public status: number) { super(message); } }
 function Reauthenticate({ signInPath }: { signInPath: string }) { return <a className="cms-reauth" href={signInPath} target="_top">重新登入 ↗</a>; }
 const categoryNames = { All: "All", Update: "Update", New: "New" };
+const publicationLabels = { published: "已上架", scheduled: "待上线", draft: "草稿" } as const;
+type PublicationStatus = keyof typeof publicationLabels;
 const expiryFormat = new Intl.DateTimeFormat("zh-CN", {
   timeZone: "Asia/Kuala_Lumpur", year: "numeric", month: "2-digit", day: "2-digit",
   hour: "2-digit", minute: "2-digit", hourCycle: "h23",
@@ -45,10 +47,21 @@ function BrandIcon({ value }: { value: string }) {
   return <Icon size={24} strokeWidth={1.6} />;
 }
 
+function publicationStatus(brand: Brand, now = Date.now()): PublicationStatus {
+  if (!brand.published) return "draft";
+  return isBrandPublished(brand, now) ? "published" : "scheduled";
+}
+
+function scheduledPublicationMessage(brand: Brand): string {
+  return typeof brand.publishAt === "number"
+    ? `已安排 ${expiryFormat.format(brand.publishAt)}（马来西亚时间）自动上线。`
+    : "已安排自动上线。";
+}
+
 function BrandPromotionCell({ brand, now }: { brand: Brand; now: number }) {
   const start = brand.promotionStartsAt;
   const expiry = brand.promotionExpiresAt;
-  const scheduled = typeof start === "number" && start > now;
+  const scheduled = brand.published && typeof start === "number" && start > now;
   return <div className="cms-category-cell">
     <span className="cms-category">{categoryNames[effectiveBrandCategory(brand, now)]}</span>
     {brand.category !== "All" && <>
@@ -141,7 +154,7 @@ export default function AdminClient({ displayName, signInPath }: { displayName: 
   const [brands, setBrands] = useState<Brand[]>([]);
   const [settings, setSettings] = useState<SiteSettings | null>(null);
   const [query, setQuery] = useState("");
-  const [filter, setFilter] = useState("all");
+  const [filter, setFilter] = useState<"all" | PublicationStatus>("all");
   const [loading, setLoading] = useState(true);
   const [loaded, setLoaded] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -157,6 +170,17 @@ export default function AdminClient({ displayName, signInPath }: { displayName: 
   const [deleting, setDeleting] = useState<Brand | null>(null);
   const dialog = useRef<HTMLDialogElement>(null);
   const deleteDialog = useRef<HTMLDialogElement>(null);
+  const originalEditing = editing ? brands.find(brand => brand.id === editing.id) : undefined;
+  const startChanged = Boolean(editing && editing.category !== "All" && promotionStartInput !== malaysiaDateTimeInput(originalEditing?.promotionStartsAt));
+  const autoPublishesOnSave = startChanged && Boolean(promotionStartInput) && !originalEditing?.published;
+  let publicationHint = "允许品牌显示在前台。";
+  if (autoPublishesOnSave) {
+    publicationHint = "保存后进入待上线状态，到时首次显示在前台。";
+  } else if (editing?.published && originalEditing && publicationStatus(originalEditing, now) === "scheduled") {
+    publicationHint = editing.category === "All" || !promotionStartInput
+      ? "保存后立即上架。取消勾选可移至草稿。"
+      : "等待定时上线。取消勾选并保存可移至草稿。";
+  }
 
   function fail(err: unknown, fallback: string) { setError(err instanceof Error ? err.message : fallback); setSessionExpired(err instanceof RequestError && err.status === 401); }
   async function load() {
@@ -172,7 +196,7 @@ export default function AdminClient({ displayName, signInPath }: { displayName: 
   useEffect(() => { if (deleting) deleteDialog.current?.showModal(); else deleteDialog.current?.close(); }, [deleting]);
   useEffect(() => { if (success) { const timer = setTimeout(() => setSuccess(""), 4500); return () => clearTimeout(timer); } }, [success]);
   useEffect(() => {
-    const upcoming = brands.flatMap(brand => [brand.promotionStartsAt, brand.promotionExpiresAt])
+    const upcoming = brands.flatMap(brand => [brand.publishAt, brand.promotionStartsAt, brand.promotionExpiresAt])
       .filter((boundary): boundary is number => typeof boundary === "number" && boundary > now);
     if (!upcoming.length) return;
     const delay = Math.min(2_147_483_647, Math.max(0, Math.min(...upcoming) - Date.now() + 1));
@@ -192,8 +216,6 @@ export default function AdminClient({ displayName, signInPath }: { displayName: 
     if (editing.category !== "All" && (!Number.isInteger(editing.promotionDays) || (editing.promotionDays ?? 0) < 1 || (editing.promotionDays ?? 0) > 365)) {
       setError("展示天数请输入 1 至 365 的整数。"); return;
     }
-    const original = brands.find(brand => brand.id === editing.id);
-    const startChanged = editing.category !== "All" && promotionStartInput !== malaysiaDateTimeInput(original?.promotionStartsAt);
     let promotionStartsAt: number | null = null;
     if (startChanged && promotionStartInput) {
       promotionStartsAt = Date.parse(`${promotionStartInput}+08:00`);
@@ -203,26 +225,33 @@ export default function AdminClient({ displayName, signInPath }: { displayName: 
     }
     setBusy(true); setError("");
     try {
-      const { id: _id, promotionExpiresAt: _expires, promotionStartsAt: _starts, scheduledCategory: _scheduledCategory, promotionDays, ...fields } = editing;
-      const durationChanged = !original || original.category !== editing.category || original.promotionDays !== promotionDays;
+      const { id: _id, publishAt: _publishAt, promotionExpiresAt: _expires, promotionStartsAt: _starts, scheduledCategory: _scheduledCategory, promotionDays, ...fields } = editing;
+      const durationChanged = !originalEditing || originalEditing.category !== editing.category || originalEditing.promotionDays !== promotionDays;
       const payload = {
         ...fields,
         ...(durationChanged ? { promotionDays: editing.category === "All" ? null : promotionDays } : {}),
         ...(startChanged ? { promotionStartsAt } : {}),
+        ...(promotionStartsAt !== null && (!originalEditing?.published || editing.published) ? { autoPublishAtStart: true } : {}),
         slug: editing.slug || editing.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, ""),
       };
       const result = await request<{ brand: Brand }>(editing.id ? `/api/admin/brands/${encodeURIComponent(editing.id)}` : "/api/admin/brands", editing.id ? "PUT" : "POST", payload);
       setBrands(current => [...current.filter(item => item.id !== result.brand.id), result.brand].sort((a, b) => a.sortOrder - b.sortOrder));
-      setEditing(null); notify("品牌已保存，前台会显示最新内容。");
+      const status = publicationStatus(result.brand);
+      setNow(Date.now());
+      setEditing(null);
+      notify(status === "scheduled" ? scheduledPublicationMessage(result.brand) : status === "published" ? "品牌已保存，前台会显示最新内容。" : "品牌草稿已保存。");
     } catch (err) { fail(err, "保存失败"); }
     finally { setBusy(false); }
   }
   async function toggle(brand: Brand, field: "published" | "featured") {
     if (busy) return; setBusy(true); setError("");
     try {
-      const { id: _id, promotionExpiresAt: _expires, promotionStartsAt: _starts, scheduledCategory: _scheduledCategory, promotionDays: _days, ...fields } = brand;
+      const { id: _id, publishAt: _publishAt, promotionExpiresAt: _expires, promotionStartsAt: _starts, scheduledCategory: _scheduledCategory, promotionDays: _days, ...fields } = brand;
       const { brand: saved } = await request<{ brand: Brand }>(`/api/admin/brands/${encodeURIComponent(brand.id)}`, "PUT", { ...fields, [field]: !brand[field] });
-      setBrands(current => current.map(item => item.id === saved.id ? saved : item)); notify(field === "published" ? (saved.published ? "品牌已上架。" : "品牌已移至草稿。") : "精选状态已更新。");
+      setBrands(current => current.map(item => item.id === saved.id ? saved : item));
+      setNow(Date.now());
+      const status = publicationStatus(saved);
+      notify(field === "featured" ? "精选状态已更新。" : status === "scheduled" ? scheduledPublicationMessage(saved) : status === "published" ? "品牌已上架。" : "品牌已移至草稿。");
     } catch (err) { fail(err, "更新失败"); }
     finally { setBusy(false); }
   }
@@ -279,8 +308,10 @@ export default function AdminClient({ displayName, signInPath }: { displayName: 
     finally { setBusy(false); }
   }
 
-  const visibleBrands = brands.filter(brand => `${brand.name} ${brand.tagline}`.toLowerCase().includes(query.toLowerCase()) && (filter === "all" || (filter === "published" ? brand.published : !brand.published))).sort((a, b) => a.sortOrder - b.sortOrder);
-  const publishedCount = brands.filter(brand => brand.published).length;
+  const visibleBrands = brands.filter(brand => `${brand.name} ${brand.tagline}`.toLowerCase().includes(query.toLowerCase()) && (filter === "all" || publicationStatus(brand, now) === filter)).sort((a, b) => a.sortOrder - b.sortOrder);
+  const publishedBrands = brands.filter(brand => isBrandPublished(brand, now));
+  const draftCount = brands.filter(brand => !brand.published).length;
+  const scheduledCount = brands.length - draftCount - publishedBrands.length;
 
   return <div className="cms-shell" data-admin-theme={theme}>
     <aside className="cms-sidebar">
@@ -302,11 +333,17 @@ export default function AdminClient({ displayName, signInPath }: { displayName: 
         {error && !editing && !deleting && <div className="cms-alert cms-error" role="alert"><span>{error}</span>{sessionExpired && <Reauthenticate signInPath={signInPath} />}<button onClick={() => setError("")} aria-label="关闭错误"><X size={17} /></button></div>}
         {success && <div className="cms-alert cms-success" role="status"><Check size={18} /><span>{success}</span></div>}
         {loading ? <div className="cms-loading"><LoaderCircle size={27} /><p>正在加载你的内容…</p></div> : !loaded ? <div className="cms-empty"><CircleHelp size={29} /><h3>暂时无法加载内容</h3><p>请重新加载，确认服务器中的最新资料。</p><button className="cms-secondary" onClick={load}>重新加载</button></div> : section === "brands" ? <>
-          <section className="cms-stats" aria-label="品牌统计"><div><span>全部品牌<LayoutGrid size={18} /></span><strong>{brands.length.toString().padStart(2, "0")}</strong><small>完整内容目录</small></div><div><span>已上架<Eye size={18} /></span><strong>{publishedCount.toString().padStart(2, "0")}<i /></strong><small>显示在前台的品牌</small></div><div><span>首页精选<Sparkles size={18} /></span><strong>{brands.filter(brand => brand.featured && brand.published).length.toString().padStart(2, "0")}</strong><small>已上架的精选品牌</small></div><div><span>草稿<FileText size={18} /></span><strong>{(brands.length - publishedCount).toString().padStart(2, "0")}</strong><small>准备好后再公开</small></div></section>
-          <section className="cms-brand-panel"><div className="cms-panel-tools"><div className="cms-tabs" role="group" aria-label="筛选状态">{[["all", "全部品牌"], ["published", "已上架"], ["draft", "草稿"]].map(([key, label]) => <button key={key} className={filter === key ? "active" : ""} onClick={() => setFilter(key)}>{label}</button>)}</div><label className="cms-search"><Search size={17} /><input aria-label="搜索品牌" placeholder="搜索品牌名称…" value={query} onChange={event => setQuery(event.target.value)} /></label></div>
-          <div className="cms-table-scroll"><table className="cms-table"><thead><tr><th>品牌名称</th><th>分类</th><th>状态</th><th>精选</th><th>排序</th><th className="cms-actions-heading">操作</th></tr></thead><tbody>{visibleBrands.map(brand => <tr key={brand.id}><td><div className="cms-brand-cell"><span className="cms-brand-icon" style={{ background: `${brand.color}18`, color: brand.color }}>{brand.imageUrl ? <img src={brand.imageUrl} alt="" /> : <BrandIcon value={brand.icon} />}</span><div><strong>{brand.name}</strong><small>{brand.tagline || brand.slug}</small></div></div></td><td>
+          <section className="cms-stats" aria-label="品牌统计"><div><span>全部品牌<LayoutGrid size={18} /></span><strong>{brands.length.toString().padStart(2, "0")}</strong><small>完整内容目录</small></div><div><span>已上架<Eye size={18} /></span><strong>{publishedBrands.length.toString().padStart(2, "0")}<i /></strong><small>{scheduledCount ? `${scheduledCount} 个品牌待上线` : "显示在前台的品牌"}</small></div><div><span>首页精选<Sparkles size={18} /></span><strong>{publishedBrands.filter(brand => brand.featured).length.toString().padStart(2, "0")}</strong><small>已上架的精选品牌</small></div><div><span>草稿<FileText size={18} /></span><strong>{draftCount.toString().padStart(2, "0")}</strong><small>准备好后再公开</small></div></section>
+          <section className="cms-brand-panel"><div className="cms-panel-tools"><div className="cms-tabs" role="group" aria-label="筛选状态">{([["all", "全部品牌"], ["published", "已上架"], ["scheduled", "待上线"], ["draft", "草稿"]] as const).map(([key, label]) => <button key={key} className={filter === key ? "active" : ""} onClick={() => setFilter(key)}>{label}</button>)}</div><label className="cms-search"><Search size={17} /><input aria-label="搜索品牌" placeholder="搜索品牌名称…" value={query} onChange={event => setQuery(event.target.value)} /></label></div>
+          <div className="cms-table-scroll"><table className="cms-table"><thead><tr><th>品牌名称</th><th>分类</th><th>状态</th><th>精选</th><th>排序</th><th className="cms-actions-heading">操作</th></tr></thead><tbody>{visibleBrands.map(brand => {
+            const status = publicationStatus(brand, now);
+            return <tr key={brand.id}><td><div className="cms-brand-cell"><span className="cms-brand-icon" style={{ background: `${brand.color}18`, color: brand.color }}>{brand.imageUrl ? <img src={brand.imageUrl} alt="" /> : <BrandIcon value={brand.icon} />}</span><div><strong>{brand.name}</strong><small>{brand.tagline || brand.slug}</small></div></div></td><td>
             <BrandPromotionCell brand={brand} now={now} />
-          </td><td><button disabled={busy} className={`cms-status ${brand.published ? "published" : "draft"}`} onClick={() => toggle(brand, "published")} title="点击切换上下架"><i />{brand.published ? "已上架" : "草稿"}</button></td><td><button disabled={busy} className={`cms-feature ${brand.featured ? "selected" : ""}`} onClick={() => toggle(brand, "featured")} aria-label={brand.featured ? `取消精选 ${brand.name}` : `精选 ${brand.name}`}><Sparkles size={17} /></button></td><td><span className="cms-order">{brand.sortOrder}</span></td><td><div className="cms-row-actions"><button disabled={busy} onClick={() => openEditor(brand)} aria-label={`编辑 ${brand.name}`}><Pencil size={16} /></button><button disabled={busy} className="cms-delete" onClick={() => { setError(""); setDeleting(brand); }} aria-label={`删除 ${brand.name}`}><Trash2 size={16} /></button></div></td></tr>)}</tbody></table></div>
+          </td><td><button disabled={busy} className={`cms-status ${status}`} onClick={() => toggle(brand, "published")}
+            title={status === "scheduled" ? "取消定时上线并移至草稿" : status === "published" ? "移至草稿" : "立即上架"}>
+              <i />{publicationLabels[status]}
+            </button></td><td><button disabled={busy} className={`cms-feature ${brand.featured ? "selected" : ""}`} onClick={() => toggle(brand, "featured")} aria-label={brand.featured ? `取消精选 ${brand.name}` : `精选 ${brand.name}`}><Sparkles size={17} /></button></td><td><span className="cms-order">{brand.sortOrder}</span></td><td><div className="cms-row-actions"><button disabled={busy} onClick={() => openEditor(brand)} aria-label={`编辑 ${brand.name}`}><Pencil size={16} /></button><button disabled={busy} className="cms-delete" onClick={() => { setError(""); setDeleting(brand); }} aria-label={`删除 ${brand.name}`}><Trash2 size={16} /></button></div></td></tr>;
+          })}</tbody></table></div>
           {visibleBrands.length === 0 && <div className="cms-empty"><Search size={29} /><h3>{query || filter !== "all" ? "没有找到符合条件的品牌" : "你的第一个品牌，从这里开始"}</h3><p>{query || filter !== "all" ? "试试其他关键词或状态。" : "添加品牌，填写内容，再上架到前台。"}</p>{!query && filter === "all" && <button className="cms-primary" onClick={() => openEditor()}><Plus size={16} />添加品牌</button>}</div>}
           <div className="cms-panel-footer"><span>显示 {visibleBrands.length} / {brands.length} 个品牌</span><small><CircleHelp size={14} />排序数字越小，显示越靠前</small></div></section>
           <p className="cms-footnote">内容由你管理 · 演示品牌仅用于展示页面效果</p>
@@ -375,7 +412,7 @@ export default function AdminClient({ displayName, signInPath }: { displayName: 
         <label className="cms-promotion-start">
           开始时间（马来西亚 UTC+8）
           <input type="datetime-local" value={promotionStartInput} onChange={event => setPromotionStartInput(event.target.value)} />
-          <small>留空立即开始。已上架的品牌在开始前显示在 All。</small>
+          <small>留空立即开始推广。草稿设置新时间并保存后，到时自动上线。已上架品牌在推广开始前继续显示在 All。</small>
         </label>
         {editing.promotionExpiresAt !== null && <p className="cms-wide cms-promotion-note">
           {editing.promotionExpiresAt <= now
@@ -390,7 +427,11 @@ export default function AdminClient({ displayName, signInPath }: { displayName: 
         {brandPhotoName && <div className="cms-image-filename" role="status"><Check size={14} />已上传 {brandPhotoName}</div>}
         <label>品牌图片 URL<input type="text" inputMode="url" autoComplete="off" spellCheck={false} maxLength={1000} value={editing.imageUrl} onChange={event => { setEditing({ ...editing, imageUrl: event.target.value }); setBrandPhotoName(""); }} placeholder="也可输入公开的图片地址" /></label>
       </div><label className="cms-wide">品牌链接<input type="url" maxLength={1000} value={editing.link} onChange={event => setEditing({ ...editing, link: event.target.value })} placeholder="https://..." /><small>可选，留空时仅展示详情。</small></label></div>
-      <div className="cms-switches"><label><span><strong>上架品牌</strong><small>允许品牌显示在前台。</small></span><input type="checkbox" checked={editing.published} onChange={event => setEditing({ ...editing, published: event.target.checked })} /></label><label><span><strong>首页精选</strong><small>在首页精选区域展示。</small></span><input type="checkbox" checked={editing.featured} onChange={event => setEditing({ ...editing, featured: event.target.checked })} /></label></div></fieldset><div className="cms-dialog-footer"><button disabled={busy} type="button" className="cms-secondary" onClick={() => setEditing(null)}>取消</button><button disabled={busy} type="submit" className="cms-primary">{busy ? <LoaderCircle size={17} className="cms-spin" /> : <Check size={17} />}{uploading === "brand" ? "正在上传…" : busy ? "正在保存…" : "保存品牌"}</button></div></form>}
+      <div className="cms-switches"><label>
+        <span><strong>{autoPublishesOnSave ? "定时上线" : "上架品牌"}</strong><small>{publicationHint}</small></span>
+        <input type="checkbox" checked={editing.published || autoPublishesOnSave} disabled={autoPublishesOnSave}
+          onChange={event => setEditing({ ...editing, published: event.target.checked })} />
+      </label><label><span><strong>首页精选</strong><small>在首页精选区域展示。</small></span><input type="checkbox" checked={editing.featured} onChange={event => setEditing({ ...editing, featured: event.target.checked })} /></label></div></fieldset><div className="cms-dialog-footer"><button disabled={busy} type="button" className="cms-secondary" onClick={() => setEditing(null)}>取消</button><button disabled={busy} type="submit" className="cms-primary">{busy ? <LoaderCircle size={17} className="cms-spin" /> : <Check size={17} />}{uploading === "brand" ? "正在上传…" : busy ? "正在保存…" : "保存品牌"}</button></div></form>}
     </dialog>
     <dialog ref={deleteDialog} className="cms-confirm cms-delete-dialog" aria-labelledby="delete-title" onCancel={event => { if (busy) event.preventDefault(); else setDeleting(null); }}>
       {deleting && <><span className="cms-confirm-icon"><Trash2 size={23} /></span><h2 id="delete-title">删除 {deleting.name}？</h2><p>这会永久删除该品牌资料，前台也会同步移除。此操作无法撤销。</p>{error && <div className="cms-alert cms-error" role="alert"><span>{error}</span>{sessionExpired && <Reauthenticate signInPath={signInPath} />}</div>}<div className="cms-confirm-actions"><button autoFocus disabled={busy} className="cms-secondary" onClick={() => setDeleting(null)}>取消</button><button disabled={busy} className="cms-danger" onClick={deleteBrand}>{busy ? "正在删除…" : "确认删除"}</button></div></>}

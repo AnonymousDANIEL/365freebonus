@@ -34,7 +34,8 @@ function BrandArtwork({brand,large=false}:{brand:Brand,large?:boolean}) {
 }
 
 export default function DirectoryClient({initialData,initialTime}:{initialData:DirectoryData;initialTime:number}) {
- const {settings,brands}=initialData;
+ const [directory,setDirectory]=useState(initialData);
+ const {settings,brands,nextPublishAt}=directory;
  const [lang,setLang]=useState<Lang>('EN'); const t=words[lang];
  const [query,setQuery]=useState(''); const [category,setCategory]=useState('All'); const [sort,setSort]=useState('featured');
  const [promotionNow, setPromotionNow] = useState(initialTime);
@@ -42,6 +43,46 @@ export default function DirectoryClient({initialData,initialTime}:{initialData:D
  const [active,setActive]=useState<Brand|null>(null); const [info,setInfo]=useState(false); const [faq,setFaq]=useState<number|null>(0);
  const randomModalTrigger=useRef<HTMLButtonElement|null>(null);
  const closeRef=useRef<HTMLButtonElement>(null); const previousFocus=useRef<HTMLElement|null>(null);
+ useEffect(() => {
+   const controller = new AbortController();
+   let timer: number | undefined;
+   let refreshing = false;
+   function schedule(immediateIfDue = false) {
+     window.clearTimeout(timer);
+     if (document.hidden || controller.signal.aborted) return;
+     const remaining = typeof nextPublishAt === 'number' ? nextPublishAt - Date.now() : 60_000;
+     const delay = remaining > 0 ? Math.min(remaining, 60_000) : immediateIfDue ? 0 : 5_000;
+     timer = window.setTimeout(refresh, delay);
+   }
+   async function refresh() {
+     if (refreshing || document.hidden || controller.signal.aborted) return;
+     refreshing = true;
+     try {
+       const response = await fetch('/api/directory', { cache: 'no-store', signal: controller.signal });
+       if (response.ok) {
+         const fresh = await response.json() as DirectoryData;
+         if (!controller.signal.aborted) setDirectory(current =>
+           JSON.stringify(current) === JSON.stringify(fresh) ? current : fresh);
+       }
+     } catch {
+       // Keep the current directory while the next refresh is scheduled.
+     } finally {
+       refreshing = false;
+       schedule();
+     }
+   }
+   function onVisibilityChange() {
+     window.clearTimeout(timer);
+     if (!document.hidden) void refresh();
+   }
+   schedule(true);
+   document.addEventListener('visibilitychange', onVisibilityChange);
+   return () => {
+     window.clearTimeout(timer);
+     controller.abort();
+     document.removeEventListener('visibilitychange', onVisibilityChange);
+   };
+ }, [nextPublishAt]);
  useEffect(() => {
    let timer: number | undefined;
    const refresh = () => {
