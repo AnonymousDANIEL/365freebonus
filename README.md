@@ -13,7 +13,7 @@ npm ci
 npm run dev
 ```
 
-The public directory works without admin configuration. `/admin` requires administrator login at `/login`. The content database is stored in `.data/directory.sqlite` by default.
+The public directory works without admin configuration. The dashboard requires administrator login at `/login`. The content database is stored in `.data/directory.sqlite` by default.
 
 ## Administrator configuration
 
@@ -22,6 +22,7 @@ Run `node scripts/create-admin.mjs` locally to generate a random password, scryp
 | Variable | Purpose |
 | --- | --- |
 | `ADMIN_USERNAME` | Administrator username, normally `admin` |
+| `ADMIN_PATH` | Optional dashboard path, one lowercase URL segment with a leading slash. Defaults to `/admin`. |
 | `ADMIN_PASSWORD_HASH` | `scrypt$saltHex$hashHex`; 64-byte scrypt key |
 | `SESSION_SECRET` | A random secret of at least 32 characters |
 | `APP_URL` | Exact canonical origin for CSRF validation |

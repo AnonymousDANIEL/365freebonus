@@ -27,7 +27,7 @@ function socialContactError(value: string, enabled: boolean): string {
   return isSafeSocialUrl(url) ? "" : "请输入完整的 https:// 或 http:// 联系链接。";
 }
 class RequestError extends Error { constructor(message: string, public status: number) { super(message); } }
-function Reauthenticate() { return <a className="cms-reauth" href="/login?return_to=%2Fadmin" target="_top">重新登入 ↗</a>; }
+function Reauthenticate({ signInPath }: { signInPath: string }) { return <a className="cms-reauth" href={signInPath} target="_top">重新登入 ↗</a>; }
 const categoryNames = { All: "All", Update: "Update", New: "New" };
 const expiryFormat = new Intl.DateTimeFormat("zh-CN", {
   timeZone: "Asia/Kuala_Lumpur", year: "numeric", month: "2-digit", day: "2-digit",
@@ -116,7 +116,7 @@ function imageUploadError(file: File): string {
   return !file.size || file.size > 5 * 1024 * 1024 ? "图片不能为空，每张最多 5 MB。" : "";
 }
 
-export default function AdminClient({ displayName }: { displayName: string }) {
+export default function AdminClient({ displayName, signInPath }: { displayName: string; signInPath: string }) {
   const { theme, setTheme } = useAdminTheme();
   const [section, setSection] = useState<Section>("brands");
   const [brands, setBrands] = useState<Brand[]>([]);
@@ -264,7 +264,7 @@ export default function AdminClient({ displayName }: { displayName: string }) {
       <header className="cms-topbar"><div className="cms-breadcrumb"><span className="cms-breadcrumb-parent">工作空间</span><ChevronRight size={14} /><span>{section === "brands" ? "品牌管理" : "网站设置"}</span></div><div className="cms-topbar-actions"><AdminThemeToggle theme={theme} onChange={setTheme} /><a className="cms-preview-link" href="/" target="_blank" rel="noopener">预览网站<ExternalLink size={14} /></a></div></header>
       <div className="cms-content">
         <div className="cms-page-heading"><div><span className="cms-eyebrow">YOUR DIRECTORY, YOUR WAY</span><h1>{section === "brands" ? "品牌管理" : "网站设置"}<span>↗</span></h1><p>{section === "brands" ? "在一个地方，管理每个值得被发现的品牌。" : "让首页文字、站名和公告，都保持你的风格。"}</p></div>{section === "brands" && <button className="cms-primary" onClick={() => openEditor()} disabled={loading || !loaded || busy}><Plus size={18} />添加品牌</button>}</div>
-        {error && !editing && !deleting && <div className="cms-alert cms-error" role="alert"><span>{error}</span>{sessionExpired && <Reauthenticate />}<button onClick={() => setError("")} aria-label="关闭错误"><X size={17} /></button></div>}
+        {error && !editing && !deleting && <div className="cms-alert cms-error" role="alert"><span>{error}</span>{sessionExpired && <Reauthenticate signInPath={signInPath} />}<button onClick={() => setError("")} aria-label="关闭错误"><X size={17} /></button></div>}
         {success && <div className="cms-alert cms-success" role="status"><Check size={18} /><span>{success}</span></div>}
         {loading ? <div className="cms-loading"><LoaderCircle size={27} /><p>正在加载你的内容…</p></div> : !loaded ? <div className="cms-empty"><CircleHelp size={29} /><h3>暂时无法加载内容</h3><p>请重新加载，确认服务器中的最新资料。</p><button className="cms-secondary" onClick={load}>重新加载</button></div> : section === "brands" ? <>
           <section className="cms-stats" aria-label="品牌统计"><div><span>全部品牌<LayoutGrid size={18} /></span><strong>{brands.length.toString().padStart(2, "0")}</strong><small>完整内容目录</small></div><div><span>已上架<Eye size={18} /></span><strong>{publishedCount.toString().padStart(2, "0")}<i /></strong><small>显示在前台的品牌</small></div><div><span>首页精选<Sparkles size={18} /></span><strong>{brands.filter(brand => brand.featured && brand.published).length.toString().padStart(2, "0")}</strong><small>已上架的精选品牌</small></div><div><span>草稿<FileText size={18} /></span><strong>{(brands.length - publishedCount).toString().padStart(2, "0")}</strong><small>准备好后再公开</small></div></section>
@@ -331,7 +331,7 @@ export default function AdminClient({ displayName }: { displayName: string }) {
 
     <dialog ref={dialog} className="cms-dialog" onCancel={event => { if (busy) event.preventDefault(); else setEditing(null); }} onClick={event => { if (event.target === dialog.current && !busy) setEditing(null); }}>
       {editing && <form onSubmit={saveBrand}><div className="cms-dialog-heading"><div><span className="cms-eyebrow">BRAND EDITOR</span><h2>{editing.id ? "编辑品牌" : "添加新品牌"}</h2></div><button type="button" disabled={busy} onClick={() => setEditing(null)} aria-label="关闭编辑"><X size={21} /></button></div>
-      <fieldset disabled={busy} className="cms-dialog-body">{error && <div className="cms-alert cms-error" role="alert"><span>{error}</span>{sessionExpired && <Reauthenticate />}</div>}<div className="cms-editor-preview"><span className="cms-brand-icon" style={{ background: `${editing.color}18`, color: editing.color }}>{editing.imageUrl ? <img src={editing.imageUrl} alt="品牌图片预览" /> : <BrandIcon value={editing.icon} />}</span><div><strong>{editing.name || "你的品牌名称"}</strong><small>{editing.tagline || "一句话，让品牌被记住。"}</small></div></div>
+      <fieldset disabled={busy} className="cms-dialog-body">{error && <div className="cms-alert cms-error" role="alert"><span>{error}</span>{sessionExpired && <Reauthenticate signInPath={signInPath} />}</div>}<div className="cms-editor-preview"><span className="cms-brand-icon" style={{ background: `${editing.color}18`, color: editing.color }}>{editing.imageUrl ? <img src={editing.imageUrl} alt="品牌图片预览" /> : <BrandIcon value={editing.icon} />}</span><div><strong>{editing.name || "你的品牌名称"}</strong><small>{editing.tagline || "一句话，让品牌被记住。"}</small></div></div>
       <div className="cms-form-grid"><label>品牌名称 <em>*</em><input autoFocus required maxLength={80} value={editing.name} onChange={event => setEditing({ ...editing, name: event.target.value })} placeholder="例如 NOVA PLAY" /></label><label>唯一标识<input pattern="[a-z0-9]+(?:-[a-z0-9]+)*" maxLength={80} value={editing.slug} onChange={event => setEditing({ ...editing, slug: event.target.value })} placeholder="例如 nova-play" /><small>小写字母、数字及短横线。</small></label><label>品牌分类<select value={editing.category} onChange={event => {
         const category = event.target.value as Brand["category"];
         setEditing({ ...editing, category, promotionDays: category === "All" ? null : editing.promotionDays ?? 7 });
@@ -357,7 +357,7 @@ export default function AdminClient({ displayName }: { displayName: string }) {
       <div className="cms-switches"><label><span><strong>上架品牌</strong><small>允许品牌显示在前台。</small></span><input type="checkbox" checked={editing.published} onChange={event => setEditing({ ...editing, published: event.target.checked })} /></label><label><span><strong>首页精选</strong><small>在首页精选区域展示。</small></span><input type="checkbox" checked={editing.featured} onChange={event => setEditing({ ...editing, featured: event.target.checked })} /></label></div></fieldset><div className="cms-dialog-footer"><button disabled={busy} type="button" className="cms-secondary" onClick={() => setEditing(null)}>取消</button><button disabled={busy} type="submit" className="cms-primary">{busy ? <LoaderCircle size={17} className="cms-spin" /> : <Check size={17} />}{uploading === "brand" ? "正在上传…" : busy ? "正在保存…" : "保存品牌"}</button></div></form>}
     </dialog>
     <dialog ref={deleteDialog} className="cms-confirm cms-delete-dialog" aria-labelledby="delete-title" onCancel={event => { if (busy) event.preventDefault(); else setDeleting(null); }}>
-      {deleting && <><span className="cms-confirm-icon"><Trash2 size={23} /></span><h2 id="delete-title">删除 {deleting.name}？</h2><p>这会永久删除该品牌资料，前台也会同步移除。此操作无法撤销。</p>{error && <div className="cms-alert cms-error" role="alert"><span>{error}</span>{sessionExpired && <Reauthenticate />}</div>}<div className="cms-confirm-actions"><button autoFocus disabled={busy} className="cms-secondary" onClick={() => setDeleting(null)}>取消</button><button disabled={busy} className="cms-danger" onClick={deleteBrand}>{busy ? "正在删除…" : "确认删除"}</button></div></>}
+      {deleting && <><span className="cms-confirm-icon"><Trash2 size={23} /></span><h2 id="delete-title">删除 {deleting.name}？</h2><p>这会永久删除该品牌资料，前台也会同步移除。此操作无法撤销。</p>{error && <div className="cms-alert cms-error" role="alert"><span>{error}</span>{sessionExpired && <Reauthenticate signInPath={signInPath} />}</div>}<div className="cms-confirm-actions"><button autoFocus disabled={busy} className="cms-secondary" onClick={() => setDeleting(null)}>取消</button><button disabled={busy} className="cms-danger" onClick={deleteBrand}>{busy ? "正在删除…" : "确认删除"}</button></div></>}
     </dialog>
   </div>;
 }

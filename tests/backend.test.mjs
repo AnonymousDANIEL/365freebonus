@@ -47,7 +47,7 @@ test('credentials and session integrity reject wrong password, tampering, expiry
 });
 
 test('authentication has no default password and CSRF does not trust forwarded host', () => {
-  const previous = { ADMIN_PASSWORD_HASH: process.env.ADMIN_PASSWORD_HASH, SESSION_SECRET: process.env.SESSION_SECRET, APP_URL: process.env.APP_URL, RAILWAY_PUBLIC_DOMAIN: process.env.RAILWAY_PUBLIC_DOMAIN, NODE_ENV: process.env.NODE_ENV };
+  const previous = { ADMIN_PASSWORD_HASH: process.env.ADMIN_PASSWORD_HASH, ADMIN_PATH: process.env.ADMIN_PATH, SESSION_SECRET: process.env.SESSION_SECRET, APP_URL: process.env.APP_URL, RAILWAY_PUBLIC_DOMAIN: process.env.RAILWAY_PUBLIC_DOMAIN, NODE_ENV: process.env.NODE_ENV };
   try {
     delete process.env.ADMIN_PASSWORD_HASH; delete process.env.SESSION_SECRET;
     assert.equal(auth.authConfig(), null);
@@ -59,9 +59,15 @@ test('authentication has no default password and CSRF does not trust forwarded h
     process.env.APP_URL = 'https://directory.example';
     assert.equal(auth.hasValidOrigin(request), false);
     assert.equal(auth.hasValidOrigin(new Request('http://internal:3000/api/admin/brands', { headers: { Origin: 'https://directory.example' } })), true);
-    assert.equal(auth.safeReturnPath('//attacker.test'), '/admin');
-    assert.equal(auth.safeReturnPath('/\\attacker.test'), '/admin');
-    assert.equal(auth.safeReturnPath('/admin?tab=settings'), '/admin?tab=settings');
+    delete process.env.ADMIN_PATH;
+    assert.equal(auth.safeReturnPath(undefined), '/admin');
+    process.env.ADMIN_PATH = '/dashboard-fixture';
+    assert.equal(auth.safeReturnPath('//attacker.test'), '/dashboard-fixture');
+    assert.equal(auth.safeReturnPath('/.//attacker.test'), '/dashboard-fixture');
+    assert.equal(auth.safeReturnPath('/\\attacker.test'), '/dashboard-fixture');
+    assert.equal(auth.safeReturnPath(undefined), '/dashboard-fixture');
+    assert.equal(auth.safeReturnPath('/dashboard-fixture?tab=settings'), '/dashboard-fixture?tab=settings');
+    assert.equal(auth.safeReturnPath('/admin?tab=settings'), '/dashboard-fixture?tab=settings');
   } finally { for (const [key, value] of Object.entries(previous)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; } }
 });
 

@@ -48,11 +48,18 @@ export function verifySession(token: string | undefined, config: AuthConfig, now
   } catch { return null; }
 }
 
-export function safeReturnPath(value: unknown, fallback = "/admin"): string {
+export function getAdminPath(): string {
+  const path = process.env.ADMIN_PATH;
+  if (path && /^\/[a-z0-9]+(?:-[a-z0-9]+)*$/.test(path) && path !== "/login" && path !== "/api") return path;
+  return "/admin";
+}
+
+export function safeReturnPath(value: unknown, fallback = getAdminPath()): string {
   if (typeof value !== "string" || !value.startsWith("/") || value.startsWith("//") || value.includes("\\")) return fallback;
   try {
     const url = new URL(value, "https://local.invalid");
-    if (url.origin !== "https://local.invalid" || url.pathname === "/login" || url.pathname.startsWith("/api/auth/")) return fallback;
+    if (url.origin !== "https://local.invalid" || url.pathname.startsWith("//") || url.pathname === "/login" || url.pathname.startsWith("/api/")) return fallback;
+    if (url.pathname === "/admin" || url.pathname === "/admin/") url.pathname = getAdminPath();
     return `${url.pathname}${url.search}${url.hash}`;
   } catch { return fallback; }
 }
