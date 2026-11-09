@@ -81,3 +81,89 @@
 @media(max-width:600px){.cms-shell .cms-topbar-actions{gap:7px}.cms-shell .cms-preview-link{font-size:10px;gap:5px;padding:6px 8px;min-height:33px}.cms-shell .cms-preview-link svg{width:12px;height:12px}.cms-shell .cms-breadcrumb-parent,.cms-shell .cms-breadcrumb>svg{display:none}}
 
 .cms-shell .cms-category-cell{display:grid;justify-items:start;gap:5px}.cms-shell .cms-category-cell small{color:var(--cms-muted);font-size:10px;line-height:1.5}.cms-shell .cms-promotion-days input{max-width:180px}.cms-shell .cms-promotion-days small{color:var(--cms-muted);line-height:1.7}
+
+.cms-shell .cms-promotion-start input {
+  min-width: 0;
+  color-scheme: dark;
+}
+.cms-shell[data-admin-theme=light] .cms-promotion-start input { color-scheme: light; }
+.cms-shell .cms-promotion-start small,
+.cms-shell .cms-promotion-note {
+  color: var(--cms-muted);
+  font-size: 11px;
+  line-height: 1.7;
+}
+.cms-shell .cms-promotion-note { margin: 0; }
+.cms-telegram-settings { margin-top: 28px; }
+.cms-shell .cms-telegram-settings .cms-alert { margin-bottom: 0; }
+.cms-shell .cms-telegram-status {
+  display: inline-block;
+  margin-top: 12px;
+  padding: 4px 9px;
+  border-radius: 4px;
+  background: var(--cms-neutral-bg);
+  color: var(--cms-muted);
+  font-size: 11px;
+}
+.cms-shell .cms-telegram-status.cms-telegram-enabled {
+  background: var(--cms-accent-bg);
+  color: var(--cms-green);
+}
+.cms-shell .cms-telegram-switch {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+.cms-shell .cms-telegram-switch input {
+  width: 18px;
+  height: 18px;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  accent-color: var(--cms-green);
+}
+.cms-shell .cms-telegram-delivery,
+.cms-shell .cms-telegram-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0;
+}
+.cms-shell .cms-telegram-delivery { align-items: center; }
+.cms-shell .cms-telegram-counts div {
+  min-width: 70px;
+  padding: 7px 10px;
+  border: 1px solid var(--cms-line);
+  border-radius: 6px;
+  background: var(--cms-inset);
+}
+.cms-shell .cms-telegram-counts dt {
+  color: var(--cms-muted);
+  font-size: 10px;
+}
+.cms-shell .cms-telegram-counts dd {
+  margin: 3px 0 0;
+  color: var(--cms-text);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.cms-shell .cms-telegram-settings .cms-telegram-last-error {
+  max-width: none;
+  margin: 0;
+  color: var(--cms-error);
+  overflow-wrap: anywhere;
+}
+.cms-shell .cms-telegram-settings .cms-telegram-loading {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0;
+  color: var(--cms-muted);
+}
+@media (max-width: 600px) {
+  .cms-telegram-settings .cms-settings-save {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 8px;
+  }
+}

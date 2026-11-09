@@ -1,6 +1,6 @@
 import { getChatGPTUser } from "../../chatgpt-auth";
 import { hasValidOrigin, trustedOrigin } from "../../lib/auth-core";
-import { SettingsValidationError } from "../../lib/directory";
+import { PromotionValidationError, SettingsValidationError } from "../../lib/directory";
 
 export class ApiError extends Error {
   status: number;
@@ -23,7 +23,7 @@ export async function authorizeAdmin(request?: Request, options?: { requireJson?
 }
 
 export function apiError(error: unknown) {
-  if (error instanceof SettingsValidationError) return Response.json({ error: error.message }, { status: 400, headers: { "Cache-Control": "no-store" } });
+  if (error instanceof SettingsValidationError || error instanceof PromotionValidationError) return Response.json({ error: error.message }, { status: 400, headers: { "Cache-Control": "no-store" } });
   if (error instanceof ApiError) return Response.json({ error: error.message }, { status: error.status, headers: { "Cache-Control": "no-store" } });
   console.error("Directory operation failed:", error instanceof Error ? error.name : "UnknownError");
   return Response.json({ error: "暂时无法保存或读取内容，请稍后再试。" }, { status: 500, headers: { "Cache-Control": "no-store" } });

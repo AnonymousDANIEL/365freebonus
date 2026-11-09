@@ -85,7 +85,7 @@ test('new installations have exact multiline hero copy and disabled social chann
   assert.deepEqual(socials(settings), emptySocial);
   assert.equal(Object.getPrototypeOf(settings), Object.prototype);
   assert.deepEqual(JSON.parse(JSON.stringify(settings)), settings);
-  assert.equal(sqlite.getSqlite().prepare('PRAGMA user_version').get().user_version, 4);
+  assert.equal(sqlite.getSqlite().prepare('PRAGMA user_version').get().user_version, 5);
 });
 
 test('v4 migration replaces only exact legacy hero fields and retains site assets, brands and auth data', async () => {
@@ -103,7 +103,7 @@ test('v4 migration replaces only exact legacy hero fields and retains site asset
       process.env.DATA_DIR = dataDir;
       const data = await repository.readDirectory(true);
       const db = sqlite.getSqlite();
-      assert.equal(db.prepare('PRAGMA user_version').get().user_version, 4);
+      assert.equal(db.prepare('PRAGMA user_version').get().user_version, 5);
       assert.equal(data.settings.headline, oldHeadline === legacyHeadline ? headline : oldHeadline);
       assert.equal(data.settings.description, oldDescription === legacyDescription ? description : oldDescription);
       assert.deepEqual(socials(data.settings), emptySocial);
@@ -114,7 +114,7 @@ test('v4 migration replaces only exact legacy hero fields and retains site asset
         id: 'existing', name: 'Existing brand', slug: 'existing', category: 'New',
         tagline: 'Original tagline', description: 'Original description', color: '#aabbcc', icon: 'sparkles',
         imageUrl: '/api/images/original.gif', featured: true, published: true, sortOrder: 73,
-        link: 'https://brand.example', promotionDays: 7, promotionExpiresAt: 1800000000000,
+        link: 'https://brand.example', promotionDays: 7, promotionStartsAt: null, promotionExpiresAt: 1800000000000,
       }]);
       assert.deepEqual({ ...db.prepare('SELECT * FROM admin_sessions').get() }, { id_hash: 'existing-session', username: 'admin', expires_at: 1900000000000 });
       assert.deepEqual({ ...db.prepare('SELECT * FROM login_attempts').get() }, { ip_hash: 'existing-attempts', attempts: 3, expires_at: 1900000000000 });

@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { ApiError } from "./_security";
 import { isSafeImageUrl, isUploadedImageUrl } from "../../lib/image-url";
-import { normalizeBrandCategory, isSafeSocialUrl } from "../../lib/directory";
+import { normalizeBrandCategory, isSafeSocialUrl, isValidPromotionStart } from "../../lib/directory";
 
 function isHttpUrl(value: string): boolean {
   if (!value) return true;
@@ -16,6 +16,7 @@ export const brandInput = z.object({
   slug: z.string().trim().min(1).max(100).regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/),
   category: z.enum(["All", "Update", "New", "Gaming", "Lifestyle", "Entertainment"]).optional().transform(normalizeBrandCategory),
   promotionDays: z.number().int().min(1).max(365).nullable().optional(),
+  promotionStartsAt: z.number().refine(isValidPromotionStart, "请输入有效的推广开始时间。").nullable().optional(),
   // Accepted for compatibility with full-object saves, but always ignored by
   // the repository: only the server can create a promotion deadline.
   promotionExpiresAt: z.number().int().safe().nullable().optional(),

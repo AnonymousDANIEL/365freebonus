@@ -12,7 +12,9 @@ export type Brand = {
   slug: string;
   category: BrandCategory;
   promotionDays: number | null;
+  promotionStartsAt?: number | null;
   promotionExpiresAt: number | null;
+  scheduledCategory?: Exclude<BrandCategory, "All">;
   tagline: string;
   description: string;
   color: string;
@@ -24,9 +26,20 @@ export type Brand = {
   link: string;
 };
 
-export function effectiveBrandCategory(brand: Pick<Brand, "category" | "promotionExpiresAt">, now = Date.now()): BrandCategory {
-  const category = normalizeBrandCategory(brand.category);
-  return category !== "All" && typeof brand.promotionExpiresAt === "number" && Number.isFinite(brand.promotionExpiresAt) && brand.promotionExpiresAt > now ? category : "All";
+export function isValidPromotionStart(value: unknown): value is number {
+  // Leave enough room for a 365-day duration inside the JavaScript Date range.
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 && value <= 8_640_000_000_000_000 - 365 * PROMOTION_DAY_MS;
+}
+
+export class PromotionValidationError extends Error {
+  constructor(message: string) { super(message); this.name = "PromotionValidationError"; }
+}
+
+export function effectiveBrandCategory(brand: Pick<Brand, "category" | "promotionStartsAt" | "promotionExpiresAt" | "scheduledCategory">, now = Date.now()): BrandCategory {
+  const start = brand.promotionStartsAt;
+  if (start != null && (!isValidPromotionStart(start) || start > now)) return "All";
+  if (typeof brand.promotionExpiresAt !== "number" || !Number.isSafeInteger(brand.promotionExpiresAt) || brand.promotionExpiresAt <= now) return "All";
+  return normalizeBrandCategory(brand.category === "All" && start != null ? brand.scheduledCategory : brand.category);
 }
 
 export function isSafeSocialUrl(value: unknown): value is string {

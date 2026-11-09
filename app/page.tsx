@@ -18,8 +18,9 @@ export async function generateMetadata(): Promise<Metadata> {
 
 export default async function Home() {
   try {
-    const data = await readDirectory();
-    return <DirectoryClient initialData={data} />;
+    const now = Date.now();
+    const data = await readDirectory(false, now);
+    return <DirectoryClient initialData={data} initialTime={now} />;
   } catch {
     return <main className="site-error"><span className="brandmark">N</span><h1>We couldn’t load the collection.</h1><p>Please refresh in a moment. Your saved content has not been changed.</p><a href="/">Try again ↗</a></main>;
   }

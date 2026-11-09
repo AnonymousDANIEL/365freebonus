@@ -33,11 +33,11 @@ function BrandArtwork({brand,large=false}:{brand:Brand,large?:boolean}) {
   </div>;
 }
 
-export default function DirectoryClient({initialData}:{initialData:DirectoryData}) {
+export default function DirectoryClient({initialData,initialTime}:{initialData:DirectoryData;initialTime:number}) {
  const {settings,brands}=initialData;
  const [lang,setLang]=useState<Lang>('EN'); const t=words[lang];
  const [query,setQuery]=useState(''); const [category,setCategory]=useState('All'); const [sort,setSort]=useState('featured');
- const [promotionNow, setPromotionNow] = useState(0);
+ const [promotionNow, setPromotionNow] = useState(initialTime);
  const [saved,setSaved]=useState<string[]>([]); const [savedReady,setSavedReady]=useState(false); const [onlySaved,setOnlySaved]=useState(false);
  const [active,setActive]=useState<Brand|null>(null); const [info,setInfo]=useState(false); const [faq,setFaq]=useState<number|null>(0);
  const randomModalTrigger=useRef<HTMLButtonElement|null>(null);
@@ -48,14 +48,14 @@ export default function DirectoryClient({initialData}:{initialData:DirectoryData
      window.clearTimeout(timer);
      const now = Date.now();
      setPromotionNow(now);
-     const nextDeadline = brands.reduce((next, brand) => {
-       const deadline = brand.promotionExpiresAt;
-       return (brand.category === 'Update' || brand.category === 'New')
-         && typeof deadline === 'number' && Number.isFinite(deadline) && deadline > now
-         ? Math.min(next, deadline) : next;
-     }, Infinity);
-     if (Number.isFinite(nextDeadline)) {
-       timer = window.setTimeout(refresh, Math.min(nextDeadline - now, 2_147_483_647));
+     let nextChange = Infinity;
+     for (const brand of brands) {
+       for (const time of [brand.promotionStartsAt, brand.promotionExpiresAt]) {
+         if (typeof time === 'number' && time > now) nextChange = Math.min(nextChange, time);
+       }
+     }
+     if (Number.isFinite(nextChange)) {
+       timer = window.setTimeout(refresh, Math.min(nextChange - now, 2_147_483_647));
      }
    };
    refresh();

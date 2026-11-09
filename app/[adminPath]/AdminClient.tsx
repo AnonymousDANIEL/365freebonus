@@ -2,9 +2,10 @@
 
 import { useEffect, useRef, useState } from "react";
 import { ArrowUpRight, Check, ChevronRight, CircleHelp, ExternalLink, Eye, FileText, ImageIcon, LayoutGrid, LoaderCircle, Plus, Search, Settings2, ShieldCheck, Sparkles, Trash2, Upload, UserRound, X, Pencil, Globe, LogOut, Orbit, Sun, Gamepad2, Moon, Triangle } from "lucide-react";
-import { effectiveBrandCategory, isSafeSocialUrl, type Brand, type SiteSettings } from "../lib/directory";
+import { DEFAULT_PROMOTION_DAYS, effectiveBrandCategory, isSafeSocialUrl, isValidPromotionStart, type Brand, type SiteSettings } from "../lib/directory";
 import { isSafeImageUrl, isUploadedImageUrl } from "../lib/image-url";
 import { AdminThemeToggle, useAdminTheme } from "../components/AdminTheme";
+import TelegramGroupSettings from "./TelegramGroupSettings";
 import "./social-contacts-admin.css";
 
 type Section = "brands" | "settings";
@@ -33,11 +34,29 @@ const expiryFormat = new Intl.DateTimeFormat("zh-CN", {
   timeZone: "Asia/Kuala_Lumpur", year: "numeric", month: "2-digit", day: "2-digit",
   hour: "2-digit", minute: "2-digit", hourCycle: "h23",
 });
-const emptyBrand = (): Brand => ({ id: "", name: "", slug: "", category: "All", promotionDays: null, promotionExpiresAt: null, tagline: "", description: "", color: "#d3b477", icon: "sparkles", imageUrl: "", featured: false, published: false, sortOrder: 10, link: "" });
+const malaysiaOffset = 8 * 60 * 60 * 1000;
+function malaysiaDateTimeInput(start: number | null | undefined): string {
+  return isValidPromotionStart(start) ? new Date(start + malaysiaOffset).toISOString().slice(0, -8) : "";
+}
+const emptyBrand = (): Brand => ({ id: "", name: "", slug: "", category: "All", promotionDays: null, promotionStartsAt: null, promotionExpiresAt: null, tagline: "", description: "", color: "#d3b477", icon: "sparkles", imageUrl: "", featured: false, published: false, sortOrder: 10, link: "" });
 
 function BrandIcon({ value }: { value: string }) {
   const Icon = ({ sparkles: Sparkles, orbit: Orbit, sun: Sun, gamepad: Gamepad2, moon: Moon, triangle: Triangle } as const)[value as "sparkles"] || Sparkles;
   return <Icon size={24} strokeWidth={1.6} />;
+}
+
+function BrandPromotionCell({ brand, now }: { brand: Brand; now: number }) {
+  const start = brand.promotionStartsAt;
+  const expiry = brand.promotionExpiresAt;
+  const scheduled = typeof start === "number" && start > now;
+  return <div className="cms-category-cell">
+    <span className="cms-category">{categoryNames[effectiveBrandCategory(brand, now)]}</span>
+    {brand.category !== "All" && <>
+      {scheduled && <small>{brand.category} 等待开始</small>}
+      {typeof start === "number" && <small>开始 {expiryFormat.format(start)}</small>}
+      {expiry !== null && <small>{expiry <= now ? `${brand.category} 已于 ${expiryFormat.format(expiry)} 到期` : `到期 ${expiryFormat.format(expiry)}`}</small>}
+    </>}
+  </div>;
 }
 
 function imagePreviewUrl(value: string): string {
@@ -133,6 +152,7 @@ export default function AdminClient({ displayName, signInPath }: { displayName: 
   const [brandPhotoName, setBrandPhotoName] = useState("");
   const [sessionExpired, setSessionExpired] = useState(false);
   const [editing, setEditing] = useState<Brand | null>(null);
+  const [promotionStartInput, setPromotionStartInput] = useState("");
   const [now, setNow] = useState(() => Date.now());
   const [deleting, setDeleting] = useState<Brand | null>(null);
   const dialog = useRef<HTMLDialogElement>(null);
@@ -152,7 +172,8 @@ export default function AdminClient({ displayName, signInPath }: { displayName: 
   useEffect(() => { if (deleting) deleteDialog.current?.showModal(); else deleteDialog.current?.close(); }, [deleting]);
   useEffect(() => { if (success) { const timer = setTimeout(() => setSuccess(""), 4500); return () => clearTimeout(timer); } }, [success]);
   useEffect(() => {
-    const upcoming = brands.map(brand => brand.promotionExpiresAt).filter((expiry): expiry is number => expiry !== null && expiry > now);
+    const upcoming = brands.flatMap(brand => [brand.promotionStartsAt, brand.promotionExpiresAt])
+      .filter((boundary): boundary is number => typeof boundary === "number" && boundary > now);
     if (!upcoming.length) return;
     const delay = Math.min(2_147_483_647, Math.max(0, Math.min(...upcoming) - Date.now() + 1));
     const timer = window.setTimeout(() => setNow(Date.now()), delay);
@@ -160,20 +181,34 @@ export default function AdminClient({ displayName, signInPath }: { displayName: 
   }, [brands, now]);
 
   function notify(message: string) { setSessionExpired(false); setError(""); setSuccess(message); }
-  function openEditor(brand?: Brand) { if (busy || !loaded) return; setError(""); setBrandPhotoName(""); setNow(Date.now()); setEditing(brand ? { ...brand } : emptyBrand()); }
+  function openEditor(brand?: Brand) {
+    if (busy || !loaded) return;
+    setError(""); setBrandPhotoName(""); setNow(Date.now());
+    setPromotionStartInput(malaysiaDateTimeInput(brand?.promotionStartsAt));
+    setEditing(brand ? { ...brand } : emptyBrand());
+  }
   async function saveBrand(event: React.FormEvent) {
     event.preventDefault(); if (!editing || busy) return;
     if (editing.category !== "All" && (!Number.isInteger(editing.promotionDays) || (editing.promotionDays ?? 0) < 1 || (editing.promotionDays ?? 0) > 365)) {
       setError("展示天数请输入 1 至 365 的整数。"); return;
     }
+    const original = brands.find(brand => brand.id === editing.id);
+    const startChanged = editing.category !== "All" && promotionStartInput !== malaysiaDateTimeInput(original?.promotionStartsAt);
+    let promotionStartsAt: number | null = null;
+    if (startChanged && promotionStartInput) {
+      promotionStartsAt = Date.parse(`${promotionStartInput}+08:00`);
+      if (!isValidPromotionStart(promotionStartsAt) || malaysiaDateTimeInput(promotionStartsAt) !== promotionStartInput || promotionStartsAt < Date.now()) {
+        setError("请选择未来的开始时间，留空则立即开始。"); return;
+      }
+    }
     setBusy(true); setError("");
     try {
-      const { id: _id, promotionExpiresAt: _expires, promotionDays, ...fields } = editing;
-      const original = brands.find(brand => brand.id === editing.id);
+      const { id: _id, promotionExpiresAt: _expires, promotionStartsAt: _starts, scheduledCategory: _scheduledCategory, promotionDays, ...fields } = editing;
       const durationChanged = !original || original.category !== editing.category || original.promotionDays !== promotionDays;
       const payload = {
         ...fields,
         ...(durationChanged ? { promotionDays: editing.category === "All" ? null : promotionDays } : {}),
+        ...(startChanged ? { promotionStartsAt } : {}),
         slug: editing.slug || editing.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, ""),
       };
       const result = await request<{ brand: Brand }>(editing.id ? `/api/admin/brands/${encodeURIComponent(editing.id)}` : "/api/admin/brands", editing.id ? "PUT" : "POST", payload);
@@ -185,7 +220,7 @@ export default function AdminClient({ displayName, signInPath }: { displayName: 
   async function toggle(brand: Brand, field: "published" | "featured") {
     if (busy) return; setBusy(true); setError("");
     try {
-      const { id: _id, promotionExpiresAt: _expires, promotionDays: _days, ...fields } = brand;
+      const { id: _id, promotionExpiresAt: _expires, promotionStartsAt: _starts, scheduledCategory: _scheduledCategory, promotionDays: _days, ...fields } = brand;
       const { brand: saved } = await request<{ brand: Brand }>(`/api/admin/brands/${encodeURIComponent(brand.id)}`, "PUT", { ...fields, [field]: !brand[field] });
       setBrands(current => current.map(item => item.id === saved.id ? saved : item)); notify(field === "published" ? (saved.published ? "品牌已上架。" : "品牌已移至草稿。") : "精选状态已更新。");
     } catch (err) { fail(err, "更新失败"); }
@@ -270,17 +305,12 @@ export default function AdminClient({ displayName, signInPath }: { displayName: 
           <section className="cms-stats" aria-label="品牌统计"><div><span>全部品牌<LayoutGrid size={18} /></span><strong>{brands.length.toString().padStart(2, "0")}</strong><small>完整内容目录</small></div><div><span>已上架<Eye size={18} /></span><strong>{publishedCount.toString().padStart(2, "0")}<i /></strong><small>显示在前台的品牌</small></div><div><span>首页精选<Sparkles size={18} /></span><strong>{brands.filter(brand => brand.featured && brand.published).length.toString().padStart(2, "0")}</strong><small>已上架的精选品牌</small></div><div><span>草稿<FileText size={18} /></span><strong>{(brands.length - publishedCount).toString().padStart(2, "0")}</strong><small>准备好后再公开</small></div></section>
           <section className="cms-brand-panel"><div className="cms-panel-tools"><div className="cms-tabs" role="group" aria-label="筛选状态">{[["all", "全部品牌"], ["published", "已上架"], ["draft", "草稿"]].map(([key, label]) => <button key={key} className={filter === key ? "active" : ""} onClick={() => setFilter(key)}>{label}</button>)}</div><label className="cms-search"><Search size={17} /><input aria-label="搜索品牌" placeholder="搜索品牌名称…" value={query} onChange={event => setQuery(event.target.value)} /></label></div>
           <div className="cms-table-scroll"><table className="cms-table"><thead><tr><th>品牌名称</th><th>分类</th><th>状态</th><th>精选</th><th>排序</th><th className="cms-actions-heading">操作</th></tr></thead><tbody>{visibleBrands.map(brand => <tr key={brand.id}><td><div className="cms-brand-cell"><span className="cms-brand-icon" style={{ background: `${brand.color}18`, color: brand.color }}>{brand.imageUrl ? <img src={brand.imageUrl} alt="" /> : <BrandIcon value={brand.icon} />}</span><div><strong>{brand.name}</strong><small>{brand.tagline || brand.slug}</small></div></div></td><td>
-            <div className="cms-category-cell">
-              <span className="cms-category">{categoryNames[effectiveBrandCategory(brand, now)]}</span>
-              {brand.category !== "All" && brand.promotionExpiresAt !== null && <small>
-                {brand.promotionExpiresAt <= now ? `${brand.category} 已到期，现仅 All` : `${expiryFormat.format(brand.promotionExpiresAt)} 到期`}
-              </small>}
-            </div>
+            <BrandPromotionCell brand={brand} now={now} />
           </td><td><button disabled={busy} className={`cms-status ${brand.published ? "published" : "draft"}`} onClick={() => toggle(brand, "published")} title="点击切换上下架"><i />{brand.published ? "已上架" : "草稿"}</button></td><td><button disabled={busy} className={`cms-feature ${brand.featured ? "selected" : ""}`} onClick={() => toggle(brand, "featured")} aria-label={brand.featured ? `取消精选 ${brand.name}` : `精选 ${brand.name}`}><Sparkles size={17} /></button></td><td><span className="cms-order">{brand.sortOrder}</span></td><td><div className="cms-row-actions"><button disabled={busy} onClick={() => openEditor(brand)} aria-label={`编辑 ${brand.name}`}><Pencil size={16} /></button><button disabled={busy} className="cms-delete" onClick={() => { setError(""); setDeleting(brand); }} aria-label={`删除 ${brand.name}`}><Trash2 size={16} /></button></div></td></tr>)}</tbody></table></div>
           {visibleBrands.length === 0 && <div className="cms-empty"><Search size={29} /><h3>{query || filter !== "all" ? "没有找到符合条件的品牌" : "你的第一个品牌，从这里开始"}</h3><p>{query || filter !== "all" ? "试试其他关键词或状态。" : "添加品牌，填写内容，再上架到前台。"}</p>{!query && filter === "all" && <button className="cms-primary" onClick={() => openEditor()}><Plus size={16} />添加品牌</button>}</div>}
           <div className="cms-panel-footer"><span>显示 {visibleBrands.length} / {brands.length} 个品牌</span><small><CircleHelp size={14} />排序数字越小，显示越靠前</small></div></section>
           <p className="cms-footnote">内容由你管理 · 演示品牌仅用于展示页面效果</p>
-        </> : settings ? <form className="cms-settings-form" onSubmit={saveSettings}><fieldset disabled={busy}><section className="cms-settings-panel"><div><h2>品牌与首页</h2><p>这里的内容会显示在前台首页。</p></div><div className="cms-settings-fields"><label>网站名称<input required maxLength={40} value={settings.name} onChange={event => setSettings({ ...settings, name: event.target.value })} /></label><label>首页主标题<textarea required rows={3} maxLength={120} value={settings.headline} onChange={event => setSettings({ ...settings, headline: event.target.value })} /><small>每行显示一段标题，换行后会依次播放标题动画。</small></label><label>首页介绍<textarea rows={4} maxLength={600} value={settings.description} onChange={event => setSettings({ ...settings, description: event.target.value })} /></label></div></section>
+        </> : settings ? <><form className="cms-settings-form" onSubmit={saveSettings}><fieldset disabled={busy}><section className="cms-settings-panel"><div><h2>品牌与首页</h2><p>这里的内容会显示在前台首页。</p></div><div className="cms-settings-fields"><label>网站名称<input required maxLength={40} value={settings.name} onChange={event => setSettings({ ...settings, name: event.target.value })} /></label><label>首页主标题<textarea required rows={3} maxLength={120} value={settings.headline} onChange={event => setSettings({ ...settings, headline: event.target.value })} /><small>每行显示一段标题，换行后会依次播放标题动画。</small></label><label>首页介绍<textarea rows={4} maxLength={600} value={settings.description} onChange={event => setSettings({ ...settings, description: event.target.value })} /></label></div></section>
           <section className="cms-settings-panel"><div><h2>首页封面与头像</h2><p>上传图片或输入图片地址。保存后更新前台，留空则使用默认图片。</p></div><div className="cms-settings-fields cms-image-fields">
             {imageFields.map(({ key, label, detail }) => <SettingsImageField key={key} field={key} label={label} detail={detail} value={settings[key] || ""} filename={imageNames[key]} uploading={uploading === key} onChange={value => changeImage(key, value)} onUpload={file => uploadPhoto(key, file)} />)}
             <p className="cms-image-form-hint">支持 JPG、PNG、GIF、WebP，每张最多 5 MB。</p>
@@ -325,7 +355,7 @@ export default function AdminClient({ displayName, signInPath }: { displayName: 
               })}
             </div>
           </section>
-          <div className="cms-settings-save"><span>保存后，刷新前台即可查看最新内容。</span><button disabled={busy} className="cms-primary" type="submit">{busy ? <LoaderCircle size={17} className="cms-spin" /> : <Check size={17} />}保存设置</button></div></fieldset></form> : <div className="cms-empty"><p>暂时无法加载网站设置。</p><button className="cms-secondary" onClick={load}>重新加载</button></div>}
+          <div className="cms-settings-save"><span>保存后，刷新前台即可查看最新内容。</span><button disabled={busy} className="cms-primary" type="submit">{busy ? <LoaderCircle size={17} className="cms-spin" /> : <Check size={17} />}保存设置</button></div></fieldset></form><TelegramGroupSettings request={request} signInPath={signInPath} /></> : <div className="cms-empty"><p>暂时无法加载网站设置。</p><button className="cms-secondary" onClick={load}>重新加载</button></div>}
       </div>
     </main>
 
@@ -334,20 +364,26 @@ export default function AdminClient({ displayName, signInPath }: { displayName: 
       <fieldset disabled={busy} className="cms-dialog-body">{error && <div className="cms-alert cms-error" role="alert"><span>{error}</span>{sessionExpired && <Reauthenticate signInPath={signInPath} />}</div>}<div className="cms-editor-preview"><span className="cms-brand-icon" style={{ background: `${editing.color}18`, color: editing.color }}>{editing.imageUrl ? <img src={editing.imageUrl} alt="品牌图片预览" /> : <BrandIcon value={editing.icon} />}</span><div><strong>{editing.name || "你的品牌名称"}</strong><small>{editing.tagline || "一句话，让品牌被记住。"}</small></div></div>
       <div className="cms-form-grid"><label>品牌名称 <em>*</em><input autoFocus required maxLength={80} value={editing.name} onChange={event => setEditing({ ...editing, name: event.target.value })} placeholder="例如 NOVA PLAY" /></label><label>唯一标识<input pattern="[a-z0-9]+(?:-[a-z0-9]+)*" maxLength={80} value={editing.slug} onChange={event => setEditing({ ...editing, slug: event.target.value })} placeholder="例如 nova-play" /><small>小写字母、数字及短横线。</small></label><label>品牌分类<select value={editing.category} onChange={event => {
         const category = event.target.value as Brand["category"];
-        setEditing({ ...editing, category, promotionDays: category === "All" ? null : editing.promotionDays ?? 7 });
-      }}>{Object.entries(categoryNames).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select><small>All 显示全部品牌，Update / New 按设置天数展示。</small></label><label>显示顺序<input type="number" required min={0} max={99999} value={editing.sortOrder} onChange={event => setEditing({ ...editing, sortOrder: Number(event.target.value) })} /></label>{editing.category !== "All" && <label className="cms-wide cms-promotion-days">
-        展示天数
-        <input type="number" required min={1} max={365} step={1} value={editing.promotionDays ?? ""}
-          onChange={event => setEditing({ ...editing, promotionDays: event.target.value === "" ? null : Number(event.target.value) })} />
-        <small>
-          {editing.promotionExpiresAt !== null
-            ? editing.promotionExpiresAt <= now
-              ? `已于 ${expiryFormat.format(editing.promotionExpiresAt)} 到期，目前仅在 All 显示。修改分类或天数后重新计时。`
-              : `当前将于 ${expiryFormat.format(editing.promotionExpiresAt)} 到期。修改分类或天数后重新计时，到期后仅在 All 显示。`
-            : "首次保存后开始计时，到期后仅在 All 显示。"}
-          时间采用马来西亚时间。
-        </small>
-      </label>}
+        setEditing({ ...editing, category, promotionDays: category === "All" ? null : editing.promotionDays ?? DEFAULT_PROMOTION_DAYS });
+      }}>{Object.entries(categoryNames).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select><small>All 显示全部品牌，Update / New 按设置天数展示。</small></label><label>显示顺序<input type="number" required min={0} max={99999} value={editing.sortOrder} onChange={event => setEditing({ ...editing, sortOrder: Number(event.target.value) })} /></label>{editing.category !== "All" && <>
+        <label className="cms-promotion-days">
+          展示天数
+          <input type="number" required min={1} max={365} step={1} value={editing.promotionDays ?? ""}
+            onChange={event => setEditing({ ...editing, promotionDays: event.target.value === "" ? null : Number(event.target.value) })} />
+          <small>从开始时间起计，到期后仅显示在 All。</small>
+        </label>
+        <label className="cms-promotion-start">
+          开始时间（马来西亚 UTC+8）
+          <input type="datetime-local" value={promotionStartInput} onChange={event => setPromotionStartInput(event.target.value)} />
+          <small>留空立即开始。已上架的品牌在开始前显示在 All。</small>
+        </label>
+        {editing.promotionExpiresAt !== null && <p className="cms-wide cms-promotion-note">
+          {editing.promotionExpiresAt <= now
+            ? `已于 ${expiryFormat.format(editing.promotionExpiresAt)} 到期，目前仅在 All 显示。`
+            : `当前设置于 ${expiryFormat.format(editing.promotionExpiresAt)} 到期。`}
+          修改开始时间或展示天数后，将重新计算到期时间。
+        </p>}
+      </>}
       <label className="cms-wide">一句话介绍<input required maxLength={160} value={editing.tagline} onChange={event => setEditing({ ...editing, tagline: event.target.value })} placeholder="介绍这个品牌的独特之处" /></label><label className="cms-wide">详细介绍<textarea rows={4} maxLength={2000} value={editing.description} onChange={event => setEditing({ ...editing, description: event.target.value })} /></label><label>品牌图标<select value={editing.icon} onChange={event => setEditing({ ...editing, icon: event.target.value })}>{[["sparkles", "星光"], ["orbit", "轨道"], ["sun", "太阳"], ["gamepad", "游戏"], ["moon", "月亮"], ["triangle", "三角"]].map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select><small>未填写图片时使用。</small></label><label>主题颜色<div className="cms-color-field"><input type="color" value={/^#[0-9a-f]{6}$/i.test(editing.color) ? editing.color : "#d3b477"} onChange={event => setEditing({ ...editing, color: event.target.value })} aria-label="选择主题颜色" /><input required pattern="#[0-9a-fA-F]{6}" maxLength={7} value={editing.color} onChange={event => setEditing({ ...editing, color: event.target.value })} /></div></label><div className="cms-wide cms-brand-photo">
         <div className="cms-image-actions"><ImageUploadButton label="上传品牌照片" uploading={uploading === "brand"} onUpload={file => uploadPhoto("brand", file)} /></div>
         <small className="cms-photo-hint">支持 JPG、PNG、GIF、WebP，每张最多 5 MB。上传后点击「保存品牌」生效。</small>
