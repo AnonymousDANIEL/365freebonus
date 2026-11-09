@@ -4,16 +4,17 @@ import { useState } from "react";
 import { ArrowLeft, ArrowUpRight, Eye, EyeOff, KeyRound, LoaderCircle, LockKeyhole, ShieldCheck, UserRound } from "lucide-react";
 import { AdminThemeToggle, useAdminTheme } from "../components/AdminTheme";
 
-function safeRedirect(value: unknown, fallback: string) {
+function safeRedirect(value: unknown) {
+  const fallback = "/login";
   if (typeof value !== "string" || !value.startsWith("/") || value.startsWith("//") || value.includes("\\")) return fallback;
   try {
     const url = new URL(value, window.location.origin);
-    if (url.origin !== window.location.origin || url.pathname === "/login" || url.pathname.startsWith("/api/")) return fallback;
+    if (url.origin !== window.location.origin || url.pathname.startsWith("//") || url.pathname === "/login" || url.pathname.startsWith("/api/")) return fallback;
     return `${url.pathname}${url.search}${url.hash}`;
   } catch { return fallback; }
 }
 
-export default function LoginClient({ returnTo }: { returnTo: string }) {
+export default function LoginClient() {
   const { theme, setTheme } = useAdminTheme();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -27,6 +28,8 @@ export default function LoginClient({ returnTo }: { returnTo: string }) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 20000);
     try {
+      const returnPaths = new URLSearchParams(window.location.search).getAll("return_to");
+      const returnTo = returnPaths.length === 1 ? returnPaths[0] : undefined;
       const response = await fetch("/api/auth/login", { method: "POST", headers: { "Content-Type": "application/json" }, credentials: "same-origin", signal: controller.signal, body: JSON.stringify({ username: username.trim(), password, returnTo }) });
       const result = await response.json().catch(() => ({})) as { ok?: boolean; redirect?: string; error?: string };
       if (!response.ok) {
@@ -36,7 +39,7 @@ export default function LoginClient({ returnTo }: { returnTo: string }) {
       }
       if (!result.ok) throw new Error("无法确认登入状态，请重试。");
       setPassword("");
-      window.location.assign(safeRedirect(result.redirect, returnTo));
+      window.location.assign(safeRedirect(result.redirect));
     } catch (err) {
       setError(err instanceof Error && err.name === "AbortError" ? "连接超时，请检查网络后重试。" : err instanceof Error ? err.message : "暂时无法登入，请稍后重试。");
       setBusy(false);

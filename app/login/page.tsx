@@ -11,9 +11,7 @@ export const metadata: Metadata = {
   robots: { index: false, follow: false },
 };
 
-export default async function LoginPage({ searchParams }: { searchParams: Promise<{ return_to?: string }> }) {
-  const params = await searchParams;
-  const returnTo = safeReturnPath(params.return_to);
-  if (await getChatGPTUser()) redirect(returnTo);
-  return <LoginClient returnTo={returnTo} />;
+export default async function LoginPage({ searchParams }: { searchParams: Promise<{ return_to?: string | string[] }> }) {
+  if (await getChatGPTUser()) redirect(safeReturnPath((await searchParams).return_to));
+  return <LoginClient />;
 }
