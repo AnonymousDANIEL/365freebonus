@@ -17,6 +17,8 @@ type Delivery = {
 
 const TOKEN_FORMAT = /^[1-9]\d{0,15}:[A-Za-z0-9_-]{20,128}$/;
 const USERNAME_FORMAT = /^@[A-Za-z0-9_]{1,32}$/;
+const PUBLIC_LINK_FORMAT = /^https:\/\/(?:t|telegram)\.me\/([A-Za-z0-9_]{1,32})\/?$/i;
+const PRIVATE_INVITE_FORMAT = /^(?:https?:\/\/(?:t|telegram)\.me\/(?:\+|%2b|joinchat(?:\/|$))|tg:\/\/join(?:\?|$))/i;
 const POLL_MS = 5_000;
 const LEASE_MS = 45_000;
 const MAX_ATTEMPTS = 5;
@@ -80,25 +82,49 @@ function publicOrigin() {
   } catch { return ""; }
 }
 
-function validGroupId(chatId: string) {
+function validChatId(chatId: string) {
   return /^-[1-9]\d{0,15}$/.test(chatId) && Number.isSafeInteger(Number(chatId));
 }
 
-async function verifyGroup(token: string, chatId: string): Promise<string> {
-  const target = validGroupId(chatId) ? Number(chatId) : chatId;
+function normalizeChatTarget(value: string) {
+  const target = value.trim();
+  if (!target || validChatId(target) || USERNAME_FORMAT.test(target)) return target;
+  if (PRIVATE_INVITE_FORMAT.test(target)) {
+    throw new TelegramSettingsError("私密邀请链接不能用于自动发送。请把机器人加入群组或频道，并填写该群组或频道的负数 Chat ID。");
+  }
+  const publicLink = PUBLIC_LINK_FORMAT.exec(target);
+  if (publicLink) return `@${publicLink[1]}`;
+  throw new TelegramSettingsError("请输入负数 Chat ID、@用户名，或群组和频道的公开 t.me 链接。");
+}
+
+async function verifyChat(token: string, chatId: string): Promise<string> {
+  const target = validChatId(chatId) ? Number(chatId) : chatId;
   const [bot, chat] = await Promise.all([telegramRequest(token, "getMe"), telegramRequest(token, "getChat", { chat_id: target })]);
   if (!bot || !chat || (!bot.ok && (bot.code >= 500 || bot.code === 429)) || (!chat.ok && (chat.code >= 500 || chat.code === 429))) {
-    throw new TelegramSettingsError("暂时无法连接 Telegram 验证机器人和群组，请稍后再试。", 503);
+    throw new TelegramSettingsError("暂时无法连接 Telegram 验证机器人和发送目标，请稍后再试。", 503);
   }
   if (!bot.ok || bot.result.is_bot !== true || !Number.isSafeInteger(bot.result.id)) {
     throw new TelegramSettingsError("Telegram 无法验证机器人 Token，请核对后重试。");
   }
-  if (!chat.ok || !["group", "supergroup"].includes(String(chat.result.type)) || !validGroupId(String(chat.result.id))) {
-    throw new TelegramSettingsError("找不到可用的 Telegram 群组。请核对群组 ID，并将机器人加入群组。");
+  if (!chat.ok) {
+    throw new TelegramSettingsError("Telegram 找不到这个发送目标。请核对公开链接或 Chat ID，并确认机器人已加入目标群组或频道。");
+  }
+  const chatType = chat.result.type;
+  if (!["group", "supergroup", "channel"].includes(String(chatType))) {
+    throw new TelegramSettingsError("公告只能发送到 Telegram 群组或频道。个人帐号和机器人不能作为发送目标。");
+  }
+  if (!validChatId(String(chat.result.id))) {
+    throw new TelegramSettingsError("Telegram 未返回有效的群组或频道 Chat ID，请核对发送目标。");
   }
   const member = await telegramRequest(token, "getChatMember", { chat_id: chat.result.id, user_id: bot.result.id });
   if (!member || (!member.ok && (member.code >= 500 || member.code === 429))) {
-    throw new TelegramSettingsError("暂时无法检查 Telegram 群组权限，请稍后再试。", 503);
+    throw new TelegramSettingsError("暂时无法检查 Telegram 发送权限，请稍后再试。", 503);
+  }
+  if (chatType === "channel") {
+    const canPost = member.ok && (member.result.status === "creator"
+      || (member.result.status === "administrator" && member.result.can_post_messages === true));
+    if (!canPost) throw new TelegramSettingsError("请将机器人设为 Telegram 频道管理员，并开启「发布消息」权限。");
+    return String(chat.result.id);
   }
   if (!member.ok) throw new TelegramSettingsError("请将机器人加入 Telegram 群组，并允许它发送消息。");
   const permissions = chat.result.permissions as { can_send_messages?: boolean } | undefined;
@@ -106,7 +132,7 @@ async function verifyGroup(token: string, chatId: string): Promise<string> {
     || (member.result.status === "member" && permissions?.can_send_messages === true)
     || (member.result.status === "restricted" && member.result.is_member === true && member.result.can_send_messages === true);
   if (!canSend) throw new TelegramSettingsError("请将机器人加入 Telegram 群组，并允许它发送消息。");
-  // Bind a public username to the verified group even if that username changes.
+  // Bind the public username to its verified numeric Chat ID.
   return String(chat.result.id);
 }
 
@@ -127,18 +153,15 @@ export async function saveTelegramPromotionSettings(input: SettingsInput) {
   const db = getSqlite();
   const previous = storedSettings(db);
   const newToken = input.token?.trim() || "";
-  let chatId = input.chatId.trim();
   if (newToken && !TOKEN_FORMAT.test(newToken)) throw new TelegramSettingsError("请输入完整的 Telegram 机器人 Token。");
-  if (chatId && !validGroupId(chatId) && !USERNAME_FORMAT.test(chatId)) {
-    throw new TelegramSettingsError("请输入负数群组 ID 或以 @ 开头的公开群组用户名。");
-  }
+  let chatId = normalizeChatTarget(input.chatId);
   const ciphertext = newToken ? encryptToken(newToken) : previous.token_ciphertext;
   if (input.enabled) {
     const token = newToken || decryptToken(previous.token_ciphertext);
     if (!token) throw new TelegramSettingsError(previous.token_ciphertext ? "无法读取已保存的机器人 Token，请重新填写。" : "请填写 Telegram 机器人 Token。");
-    if (!chatId) throw new TelegramSettingsError("请填写 Telegram 群组 ID 或公开群组用户名。");
+    if (!chatId) throw new TelegramSettingsError("请填写 Telegram 群组或频道的 Chat ID、@用户名或公开链接。");
     if (!publicOrigin()) throw new TelegramSettingsError("服务器尚未配置公开网站地址，无法生成公告链接。", 503);
-    chatId = await verifyGroup(token, chatId);
+    chatId = await verifyChat(token, chatId);
   }
   writeTransaction(db, () => {
     const current = storedSettings(db);
@@ -170,7 +193,7 @@ function claimDelivery(db: DatabaseSync) {
 
     const settings = storedSettings(db);
     const origin = publicOrigin();
-    if (!settings.enabled || !validGroupId(settings.chat_id) || !origin) return null;
+    if (!settings.enabled || !validChatId(settings.chat_id) || !origin) return null;
     const token = decryptToken(settings.token_ciphertext);
     if (!token) return null;
     const blocked = db.prepare(`SELECT 1 FROM telegram_promotion_outbox WHERE next_attempt_at > ?
@@ -216,9 +239,9 @@ async function deliverPromotion() {
     finish(retry ? "pending" : "failed", message, Math.min(Number.MAX_SAFE_INTEGER, now + delay));
     return;
   }
-  const message = [400, 403].includes(response.code) ? "Telegram 群组或机器人发送权限有误，请检查设置。"
+  const message = [400, 403].includes(response.code) ? "请检查机器人在 Telegram 群组或频道的发送权限。"
     : response.code === 401 ? "Telegram 机器人 Token 已失效，请更新设置。"
-    : "Telegram 拒绝发送这条公告，请检查群组设置。";
+    : "Telegram 拒绝发送这条公告，请检查群组或频道设置。";
   finish("failed", message);
 }
 

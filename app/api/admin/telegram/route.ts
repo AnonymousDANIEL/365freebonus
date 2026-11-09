@@ -7,7 +7,7 @@ export const runtime = "nodejs";
 
 const configInput = z.object({
   enabled: z.boolean(),
-  chatId: z.string().trim().max(40),
+  chatId: z.string().trim().max(80),
   token: z.string().trim().max(160).optional(),
 }).strict();
 

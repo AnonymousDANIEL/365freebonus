@@ -61,7 +61,7 @@ export default function TelegramGroupSettings({ request, signInPath }: { request
       const result = await request<TelegramConfig>(endpoint, "PUT", { enabled: draft.enabled, chatId, ...(token ? { token } : {}) });
       setConfig(result);
       setDraft({ enabled: result.enabled, chatId: result.chatId, token: "" });
-      setNotice({ message: result.enabled ? "已保存，机器人与群组连接验证通过。" : "Telegram 群通知设置已保存。" });
+      setNotice({ message: result.enabled ? "已保存，机器人与通知目标的连接验证通过。" : "Telegram 通知设置已保存。" });
     } catch (error) {
       setNotice(requestFailure(error));
     } finally {
@@ -89,8 +89,8 @@ export default function TelegramGroupSettings({ request, signInPath }: { request
     <fieldset disabled={loading || saving}>
       <section className="cms-settings-panel" aria-labelledby="telegram-settings-title">
         <div>
-          <h2 id="telegram-settings-title">Telegram 群通知</h2>
-          <p>品牌进入 Update 或 New 时，发送通知到指定群组。启用或切换群组时跳过已上线的待发推广。</p>
+          <h2 id="telegram-settings-title">Telegram 群组或频道通知</h2>
+          <p>品牌进入 Update 或 New 时，通知会发送到指定群组或频道。启用通知或切换目标时，已上线的待发推广会跳过。</p>
           {config && <span className={`cms-telegram-status${enabled ? " cms-telegram-enabled" : ""}`}>{connectionStatus}</span>}
         </div>
         <div className="cms-settings-fields">
@@ -98,15 +98,16 @@ export default function TelegramGroupSettings({ request, signInPath }: { request
             <span>{notice.message}</span>
             {notice.sessionExpired && <a className="cms-reauth" href={signInPath} target="_top">重新登入 ↗</a>}
           </div>}
-          {loading ? <p className="cms-telegram-loading" role="status"><LoaderCircle size={16} className="cms-spin" />正在加载群通知设置…</p> : config ? <>
+          {loading ? <p className="cms-telegram-loading" role="status"><LoaderCircle size={16} className="cms-spin" />正在加载 Telegram 通知设置…</p> : config ? <>
             <label className="cms-telegram-switch">
               <input type="checkbox" role="switch" checked={draft.enabled} onChange={event => setDraft({ ...draft, enabled: event.target.checked })} />
-              启用 Telegram 群通知
+              启用 Telegram 通知
             </label>
-            <label>Telegram 群组 ID
-              <input type="text" autoComplete="off" spellCheck={false} placeholder="-100… 或 @群组名称" maxLength={40}
+            <label>Telegram 群组或频道
+              <input type="text" autoComplete="off" spellCheck={false} placeholder="https://t.me/name" maxLength={80}
                 required={draft.enabled} value={draft.chatId} onChange={event => setDraft({ ...draft, chatId: event.target.value })} />
-              <small>请先将机器人加入群组，并允许它发送消息。</small>
+              <small>可填写公开 t.me 链接、@用户名或负数 Chat ID。</small>
+              <small>群组需要将机器人加入并允许发送消息。频道需要将机器人设为管理员，并授予发布消息权限。</small>
             </label>
             <label>机器人 Token
               <input type="password" autoComplete="new-password" spellCheck={false} maxLength={160} value={draft.token}
@@ -123,8 +124,8 @@ export default function TelegramGroupSettings({ request, signInPath }: { request
             </div>
             {config.lastError && <p className="cms-telegram-last-error">最近发送异常 · {config.lastError}</p>}
             <div className="cms-settings-save">
-              <span>启用后保存，将核验机器人与群组连接。</span>
-              <button className="cms-primary" type="submit" disabled={refreshing}>{saving ? <LoaderCircle size={17} className="cms-spin" /> : <Check size={17} />}{saving ? "正在保存…" : "保存群通知设置"}</button>
+              <span>启用后保存，将核验机器人与通知目标的连接。</span>
+              <button className="cms-primary" type="submit" disabled={refreshing}>{saving ? <LoaderCircle size={17} className="cms-spin" /> : <Check size={17} />}{saving ? "正在保存…" : "保存通知设置"}</button>
             </div>
           </> : <div><button type="button" className="cms-secondary" onClick={() => setReload(previous => previous + 1)}>重新加载</button></div>}
         </div>
