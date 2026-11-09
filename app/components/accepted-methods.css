@@ -8,10 +8,9 @@
   background: radial-gradient(ellipse at 0 0, #eee3f6a6, transparent 58%), linear-gradient(120deg, #faf6fd, #fffdf9);
   box-shadow: 0 12px 35px #4a295004;
 }
-.public-site .accepted-methods-heading { display: flex; justify-content: space-between; align-items: flex-end; gap: 20px; margin-bottom: 25px; }
+.public-site .accepted-methods-heading { margin-bottom: 25px; }
 .public-site .accepted-methods-eyebrow { display: inline-flex; align-items: center; gap: 7px; color: #96713e; font-size: 8px; font-weight: 600; letter-spacing: 1.5px; }
 .public-site .accepted-methods-heading h2 { color: #452b53; font-family: Georgia, 'Times New Roman', serif; font-size: 31px; line-height: 1.2; letter-spacing: -.7px; margin: 12px 0 0; }
-.public-site .accepted-methods-heading p { color: #816b8d; font-size: 11px; line-height: 1.7; margin: 0 0 3px; text-align: right; }
 .public-site .accepted-methods-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; margin: 0; padding: 0; list-style: none; }
 .public-site .accepted-method-card {
   min-width: 0;
@@ -59,9 +58,8 @@
 @media (max-width: 640px) {
   .public-site .accepted-methods { padding: 9px 0 43px; }
   .public-site .accepted-methods-panel { padding: 24px 18px 19px; border-radius: 12px; }
-  .public-site .accepted-methods-heading { display: block; margin-bottom: 21px; }
+  .public-site .accepted-methods-heading { margin-bottom: 21px; }
   .public-site .accepted-methods-heading h2 { font-size: 28px; margin-top: 11px; }
-  .public-site .accepted-methods-heading p { margin: 12px 0 0; text-align: left; font-size: 10px; }
   .public-site .accepted-methods-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
   .public-site .accepted-method-card, .public-site .accepted-method-card:nth-last-child(-n + 2) { grid-column: auto; }
   .public-site .accepted-method-card:last-child { grid-column: 1 / -1; }

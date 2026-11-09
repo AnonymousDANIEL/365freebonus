@@ -5,9 +5,9 @@ import './accepted-methods.css';
 type Lang = 'EN' | 'BM' | '中文';
 type Country = 'MY' | 'ID' | 'TH';
 const text = {
-  EN: { eyebrow: 'ACROSS BORDERS', title: 'We accept', description: 'Bank transfers, telco reloads and USDT.', malaysia: 'Malaysia', indonesia: 'Indonesia', thailand: 'Thailand', bank: 'Bank transfer', telco: 'Telco reload', asset: 'Digital asset' },
-  BM: { eyebrow: 'MERENTASI SEMPADAN', title: 'Kami menerima', description: 'Pindahan bank, tambah nilai telco dan USDT.', malaysia: 'Malaysia', indonesia: 'Indonesia', thailand: 'Thailand', bank: 'Pindahan bank', telco: 'Tambah nilai telco', asset: 'Aset digital' },
-  '中文': { eyebrow: '跨越边界，轻松连接', title: '我们接受', description: '银行转账、手机充值与 USDT。', malaysia: '马来西亚', indonesia: '印度尼西亚', thailand: '泰国', bank: '银行转账', telco: '手机充值', asset: '数字资产' },
+  EN: { eyebrow: 'ACROSS BORDERS', title: 'We accept', malaysia: 'Malaysia', indonesia: 'Indonesia', thailand: 'Thailand', bank: 'Bank transfer', telco: 'Telco reload', asset: 'Digital asset' },
+  BM: { eyebrow: 'MERENTASI SEMPADAN', title: 'Kami menerima', malaysia: 'Malaysia', indonesia: 'Indonesia', thailand: 'Thailand', bank: 'Pindahan bank', telco: 'Tambah nilai telco', asset: 'Aset digital' },
+  '中文': { eyebrow: '跨越边界，轻松连接', title: '我们接受', malaysia: '马来西亚', indonesia: '印度尼西亚', thailand: '泰国', bank: '银行转账', telco: '手机充值', asset: '数字资产' },
 };
 
 function CountryFlag({ country }: { country: Country }) {
@@ -51,8 +51,8 @@ export default function AcceptedMethods({ lang }: { lang: Lang }) {
     <div className="section-shell">
       <div className="accepted-methods-panel">
         <div className="accepted-methods-heading">
-          <div><span className="accepted-methods-eyebrow"><Sparkles size={12} aria-hidden="true" />{t.eyebrow}</span><h2>{t.title}</h2></div>
-          <p>{t.description}</p>
+          <span className="accepted-methods-eyebrow"><Sparkles size={12} aria-hidden="true" />{t.eyebrow}</span>
+          <h2>{t.title}</h2>
         </div>
         <ul className="accepted-methods-grid">
           {methods.map((method, index) => <li className={`accepted-method-card${method.id === 'usdt' ? ' is-usdt' : ''}`} key={method.id} style={{ '--method-index': index } as CSSProperties}>
