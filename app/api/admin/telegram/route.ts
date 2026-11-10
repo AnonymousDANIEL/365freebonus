@@ -9,6 +9,12 @@ const configInput = z.object({
   enabled: z.boolean(),
   chatId: z.string().trim().max(80),
   token: z.string().trim().max(160).optional(),
+  promotionMessage: z.string().trim().max(2_000).optional(),
+  welcome: z.object({
+    enabled: z.boolean(),
+    chatId: z.string().trim().max(80),
+    message: z.string().trim().max(2_000),
+  }).strict().optional(),
 }).strict();
 
 function respond(status: ReturnType<typeof telegramPromotionStatus>) {

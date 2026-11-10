@@ -12,7 +12,7 @@ export function getDataDirectory(): string {
 function migrate(db: DatabaseSync) {
   if (migrated.has(db)) return;
   const readVersion = () => (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
-  if (readVersion() < 6) {
+  if (readVersion() < 7) {
     db.exec("BEGIN IMMEDIATE");
     try {
       // Read again inside the write lock, so concurrent process starts cannot
@@ -91,6 +91,22 @@ function migrate(db: DatabaseSync) {
       if (version < 6) db.exec(`
         ALTER TABLE brands ADD COLUMN publish_at INTEGER DEFAULT NULL;
         PRAGMA user_version = 6;
+      `);
+      if (version < 7) db.exec(`
+        ALTER TABLE telegram_promotion_settings ADD COLUMN promotion_message TEXT NOT NULL DEFAULT '';
+        ALTER TABLE telegram_promotion_settings ADD COLUMN welcome_enabled INTEGER NOT NULL DEFAULT 0 CHECK (welcome_enabled IN (0, 1));
+        ALTER TABLE telegram_promotion_settings ADD COLUMN welcome_chat_id TEXT NOT NULL DEFAULT '';
+        ALTER TABLE telegram_promotion_settings ADD COLUMN welcome_message TEXT NOT NULL DEFAULT '';
+        ALTER TABLE telegram_promotion_settings ADD COLUMN welcome_started_at INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE telegram_promotion_settings ADD COLUMN welcome_revision TEXT NOT NULL DEFAULT '';
+        CREATE TABLE telegram_welcome_state (
+          id TEXT PRIMARY KEY, revision TEXT NOT NULL,
+          next_offset INTEGER NOT NULL DEFAULT 0, last_polled_at INTEGER NOT NULL DEFAULT 0,
+          next_poll_at INTEGER NOT NULL DEFAULT 0, lease_id TEXT NOT NULL DEFAULT '',
+          lease_until INTEGER NOT NULL DEFAULT 0, sent INTEGER NOT NULL DEFAULT 0,
+          last_error TEXT NOT NULL DEFAULT ''
+        );
+        PRAGMA user_version = 7;
       `);
       db.exec("COMMIT");
     } catch (error) { db.exec("ROLLBACK"); throw error; }

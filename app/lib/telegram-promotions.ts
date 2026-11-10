@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, createHmac, randomBytes } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHmac, randomBytes, randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { getAdminPath } from "./auth-core";
 import { brandAnnouncementPath } from "./brand-links";
@@ -8,9 +8,26 @@ import { isSafeImageUrl, isUploadedImageUrl } from "./image-url";
 import { getSqlite } from "./sqlite";
 import { cleanTelegramBackground } from "./telegram-background";
 import { telegramRequest, type TelegramUpload } from "./telegram-bot";
+import { startTelegramWelcomeWorker } from "./telegram-welcome";
 
-type StoredSettings = { enabled: number; chat_id: string; token_ciphertext: string };
-type SettingsInput = { enabled: boolean; chatId: string; token?: string };
+type StoredSettings = {
+  enabled: number;
+  chat_id: string;
+  token_ciphertext: string;
+  promotion_message: string;
+  welcome_enabled: number;
+  welcome_chat_id: string;
+  welcome_message: string;
+  welcome_started_at: number;
+  welcome_revision: string;
+};
+type SettingsInput = {
+  enabled: boolean;
+  chatId: string;
+  token?: string;
+  promotionMessage?: string;
+  welcome?: { enabled: boolean; chatId: string; message: string };
+};
 type DeliveryStatus = "pending" | "sending" | "sent" | "failed" | "unknown" | "skipped";
 type Delivery = {
   brand_id: string;
@@ -68,8 +85,13 @@ function decryptToken(stored: string) {
 }
 
 function storedSettings(db: DatabaseSync): StoredSettings {
-  return db.prepare("SELECT enabled, chat_id, token_ciphertext FROM telegram_promotion_settings WHERE id = 'primary'").get() as StoredSettings | undefined
-    ?? { enabled: 0, chat_id: "", token_ciphertext: "" };
+  return db.prepare(`SELECT enabled, chat_id, token_ciphertext, promotion_message, welcome_enabled,
+    welcome_chat_id, welcome_message, welcome_started_at, welcome_revision
+    FROM telegram_promotion_settings WHERE id = 'primary'`).get() as StoredSettings | undefined
+    ?? {
+      enabled: 0, chat_id: "", token_ciphertext: "", promotion_message: "",
+      welcome_enabled: 0, welcome_chat_id: "", welcome_message: "", welcome_started_at: 0, welcome_revision: "",
+    };
 }
 
 function writeTransaction<T>(db: DatabaseSync, write: () => T): T {
@@ -107,7 +129,7 @@ function normalizeChatTarget(value: string) {
   throw new TelegramSettingsError("请输入负数 Chat ID、@用户名，或群组和频道的公开 t.me 链接。");
 }
 
-async function verifyChat(token: string, chatId: string): Promise<string> {
+async function verifyChat(token: string, chatId: string, welcome = false): Promise<string> {
   const target = validChatId(chatId) ? Number(chatId) : chatId;
   const [bot, chat] = await Promise.all([telegramRequest(token, "getMe"), telegramRequest(token, "getChat", { chat_id: target })]);
   if (!bot || !chat || (!bot.ok && (bot.code >= 500 || bot.code === 429)) || (!chat.ok && (chat.code >= 500 || chat.code === 429))) {
@@ -123,12 +145,28 @@ async function verifyChat(token: string, chatId: string): Promise<string> {
   if (!["group", "supergroup", "channel"].includes(String(chatType))) {
     throw new TelegramSettingsError("公告只能发送到 Telegram 群组或频道。个人帐号和机器人不能作为发送目标。");
   }
+  if (welcome && chatType === "channel") {
+    throw new TelegramSettingsError("入群欢迎消息需要 Telegram 群组。请填写群组的 Chat ID 或公开链接。");
+  }
   if (!validChatId(String(chat.result.id))) {
     throw new TelegramSettingsError("Telegram 未返回有效的群组或频道 Chat ID，请核对发送目标。");
   }
   const member = await telegramRequest(token, "getChatMember", { chat_id: chat.result.id, user_id: bot.result.id });
   if (!member || (!member.ok && (member.code >= 500 || member.code === 429))) {
     throw new TelegramSettingsError("暂时无法检查 Telegram 发送权限，请稍后再试。", 503);
+  }
+  if (welcome) {
+    if (!member.ok || !["creator", "administrator"].includes(String(member.result.status))) {
+      throw new TelegramSettingsError("请先将机器人设为欢迎群组的管理员，以接收新成员加入通知。");
+    }
+    const webhook = await telegramRequest(token, "getWebhookInfo");
+    if (!webhook?.ok || typeof webhook.result.url !== "string") {
+      throw new TelegramSettingsError("暂时无法检查 Telegram 机器人的接收方式，请稍后再试。", 503);
+    }
+    if (webhook.result.url) {
+      throw new TelegramSettingsError("这个机器人已连接到其他 Webhook。请使用专门接收本站入群通知的机器人。");
+    }
+    return String(chat.result.id);
   }
   if (chatType === "channel") {
     const canPost = member.ok && (member.result.status === "creator"
@@ -153,10 +191,21 @@ export function telegramPromotionStatus() {
   const rows = db.prepare("SELECT status, COUNT(*) AS count FROM telegram_promotion_outbox GROUP BY status").all() as { status: DeliveryStatus; count: number }[];
   for (const row of rows) counts[row.status] = row.count;
   const recent = db.prepare("SELECT last_error FROM telegram_promotion_outbox WHERE last_error <> '' ORDER BY next_attempt_at DESC LIMIT 1").get() as { last_error: string } | undefined;
+  const welcome = db.prepare("SELECT sent, last_polled_at, last_error FROM telegram_welcome_state WHERE id = 'primary' AND revision = ?")
+    .get(settings.welcome_revision) as { sent: number; last_polled_at: number; last_error: string } | undefined;
+  const unreadableToken = (settings.enabled || settings.welcome_enabled) && !decryptToken(settings.token_ciphertext);
   let lastError = recent?.last_error || "";
-  if (settings.enabled && !decryptToken(settings.token_ciphertext)) lastError = "无法读取已保存的机器人 Token，请重新填写。";
+  if (settings.enabled && unreadableToken) lastError = "无法读取已保存的机器人 Token，请重新填写。";
   else if (settings.enabled && !publicOrigin()) lastError = "服务器尚未配置公开网站地址，无法生成公告链接。";
-  return { enabled: settings.enabled === 1, chatId: settings.chat_id, hasToken: Boolean(settings.token_ciphertext), counts, lastError };
+  return {
+    enabled: settings.enabled === 1, chatId: settings.chat_id, hasToken: Boolean(settings.token_ciphertext), counts, lastError,
+    promotionMessage: settings.promotion_message,
+    welcome: {
+      enabled: settings.welcome_enabled === 1, chatId: settings.welcome_chat_id, message: settings.welcome_message,
+      sent: welcome?.sent ?? 0, lastPolledAt: welcome?.last_polled_at || null,
+      lastError: settings.welcome_enabled && unreadableToken ? "无法读取已保存的机器人 Token，请重新填写。" : welcome?.last_error || "",
+    },
+  };
 }
 
 export async function saveTelegramPromotionSettings(input: SettingsInput) {
@@ -164,18 +213,34 @@ export async function saveTelegramPromotionSettings(input: SettingsInput) {
   const previous = storedSettings(db);
   const newToken = input.token?.trim() || "";
   if (newToken && !TOKEN_FORMAT.test(newToken)) throw new TelegramSettingsError("请输入完整的 Telegram 机器人 Token。");
+  const previousToken = decryptToken(previous.token_ciphertext);
+  const tokenChanged = Boolean(newToken && newToken !== previousToken);
+  const token = newToken || previousToken;
   let chatId = normalizeChatTarget(input.chatId);
-  const ciphertext = newToken ? encryptToken(newToken) : previous.token_ciphertext;
+  const promotionMessage = input.promotionMessage?.trim() ?? previous.promotion_message;
+  const welcomeEnabled = input.welcome?.enabled ?? (previous.welcome_enabled === 1);
+  const welcomeMessage = input.welcome?.message.trim() ?? previous.welcome_message;
+  let welcomeChatId = input.welcome ? normalizeChatTarget(input.welcome.chatId) : previous.welcome_chat_id;
+  if ((input.enabled || welcomeEnabled) && !token) {
+    throw new TelegramSettingsError(previous.token_ciphertext ? "无法读取已保存的机器人 Token，请重新填写。" : "请填写 Telegram 机器人 Token。");
+  }
+  if (welcomeEnabled && (!welcomeChatId || !welcomeMessage)) {
+    throw new TelegramSettingsError("请输入欢迎群组和欢迎消息内容。");
+  }
+  const ciphertext = tokenChanged ? encryptToken(newToken) : previous.token_ciphertext;
   if (input.enabled) {
-    const token = newToken || decryptToken(previous.token_ciphertext);
-    if (!token) throw new TelegramSettingsError(previous.token_ciphertext ? "无法读取已保存的机器人 Token，请重新填写。" : "请填写 Telegram 机器人 Token。");
     if (!chatId) throw new TelegramSettingsError("请填写 Telegram 群组或频道的 Chat ID、@用户名或公开链接。");
     if (!publicOrigin()) throw new TelegramSettingsError("服务器尚未配置公开网站地址，无法生成公告链接。", 503);
-    chatId = await verifyChat(token, chatId);
   }
+  [chatId, welcomeChatId] = await Promise.all([
+    input.enabled ? verifyChat(token, chatId) : chatId,
+    welcomeEnabled && (input.welcome || tokenChanged) ? verifyChat(token, welcomeChatId, true) : welcomeChatId,
+  ]);
+  const restartWelcome = welcomeEnabled !== (previous.welcome_enabled === 1)
+    || (welcomeEnabled && (welcomeChatId !== previous.welcome_chat_id || tokenChanged));
   writeTransaction(db, () => {
     const current = storedSettings(db);
-    if (current.enabled !== previous.enabled || current.chat_id !== previous.chat_id || current.token_ciphertext !== previous.token_ciphertext) {
+    if ((Object.keys(previous) as (keyof StoredSettings)[]).some(key => current[key] !== previous[key])) {
       throw new TelegramSettingsError("Telegram 设置已更新，请刷新后再保存。", 409);
     }
     if (input.enabled && (!current.enabled || current.chat_id !== chatId)) {
@@ -185,9 +250,20 @@ export async function saveTelegramPromotionSettings(input: SettingsInput) {
           SELECT id FROM brands WHERE published=1 AND (promotion_starts_at IS NULL OR promotion_starts_at < ?)
         )`).run(Date.now());
     }
-    db.prepare(`INSERT INTO telegram_promotion_settings (id, enabled, chat_id, token_ciphertext) VALUES ('primary', ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET enabled = excluded.enabled, chat_id = excluded.chat_id, token_ciphertext = excluded.token_ciphertext`)
-      .run(Number(input.enabled), chatId, ciphertext);
+    if (restartWelcome) db.prepare("DELETE FROM telegram_welcome_state WHERE id = 'primary'").run();
+    const welcomeStartedAt = restartWelcome ? (welcomeEnabled ? Math.floor(Date.now() / 1_000) : 0) : current.welcome_started_at;
+    const welcomeRevision = restartWelcome ? (welcomeEnabled ? randomUUID() : "") : current.welcome_revision;
+    db.prepare(`INSERT INTO telegram_promotion_settings (
+      id, enabled, chat_id, token_ciphertext, promotion_message, welcome_enabled,
+      welcome_chat_id, welcome_message, welcome_started_at, welcome_revision
+    ) VALUES ('primary', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET enabled = excluded.enabled, chat_id = excluded.chat_id,
+      token_ciphertext = excluded.token_ciphertext, promotion_message = excluded.promotion_message,
+      welcome_enabled = excluded.welcome_enabled, welcome_chat_id = excluded.welcome_chat_id,
+      welcome_message = excluded.welcome_message, welcome_started_at = excluded.welcome_started_at,
+      welcome_revision = excluded.welcome_revision`)
+      .run(Number(input.enabled), chatId, ciphertext, promotionMessage, Number(welcomeEnabled),
+        welcomeChatId, welcomeMessage, welcomeStartedAt, welcomeRevision);
   });
   return telegramPromotionStatus();
 }
@@ -218,7 +294,7 @@ function claimDelivery(db: DatabaseSync) {
     if (!row) return null;
     db.prepare(`UPDATE telegram_promotion_outbox SET status = 'sending', attempts = attempts + 1, next_attempt_at = ?, last_error = ''
       WHERE brand_id = ? AND revision = ?`).run(now + LEASE_MS, row.brand_id, row.revision);
-    return { ...row, attempts: row.attempts + 1, token, chatId: Number(settings.chat_id), origin };
+    return { ...row, attempts: row.attempts + 1, token, chatId: Number(settings.chat_id), origin, message: settings.promotion_message };
   });
 }
 
@@ -274,9 +350,13 @@ async function deliverPromotion() {
   const url = new URL(brandAnnouncementPath(delivery.slug, delivery.brand_id, getAdminPath()), delivery.origin);
   const title = `${delivery.category} · ${delivery.name}`;
   const tagline = delivery.tagline.trim();
-  const text = [title, tagline, url.href].filter(Boolean).join("\n\n");
+  const fields = { category: delivery.category, name: delivery.name, tagline, link: url.href };
+  const customText = delivery.message.replace(/\{(category|name|tagline|link)\}/g, (_, field: keyof typeof fields) => fields[field]).trim();
+  const text = customText.length > 4_096
+    ? `${customText.slice(0, 4_095).replace(/[\uD800-\uDBFF]$/, "")}…`
+    : customText || [title, tagline, url.href].filter(Boolean).join("\n\n");
   const sendText = () => telegramRequest(delivery.token, "sendMessage", { chat_id: delivery.chatId, text, link_preview_options: { is_disabled: true } });
-  const caption = promotionCaption(title, tagline, url.href);
+  const caption = customText ? (customText.length <= 1_024 ? customText : null) : promotionCaption(title, tagline, url.href);
   const media = caption ? await promotionMedia(delivery.image_url, delivery.origin, delivery.slug) : null;
   let response;
   if (media && caption) {
@@ -321,6 +401,7 @@ const workers = globalThis as typeof globalThis & { telegramPromotionWorkerStart
 export function startTelegramPromotionWorker() {
   if (workers.telegramPromotionWorkerStarted) return;
   workers.telegramPromotionWorkerStarted = true;
+  startTelegramWelcomeWorker(decryptToken);
   let running = false;
   let reportedError = false;
   const tick = async () => {

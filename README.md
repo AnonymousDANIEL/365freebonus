@@ -43,6 +43,8 @@ The volume keeps brands, settings, sessions and login-rate limits across restart
 - Publish or hide entries, change display order and select homepage features.
 - Set a Malaysia date and time for a brand to enter Update or New. Saving a new time for a draft schedules its first public appearance without a second action. Already published brands stay in All until their promotion starts. The duration starts at the scheduled time.
 - Connect a Telegram bot and a group or channel under Telegram 通知 in the dashboard sidebar. Channel bots need administrator permission to post. The running Node service checks the SQLite notification queue and sends when the promotion starts. Enabling notifications or switching destinations skips pending announcements for promotions that already started. Keep the service running for scheduled delivery and the same session secret for saved bot credentials.
+- Edit the automatic promotion message using `{category}`, `{name}`, `{tagline}` and `{link}`. Leave it blank to use the default. Messages exceeding Telegram's media caption limit are sent as text.
+- Enable 入群欢迎消息 in Telegram 通知 to welcome new members in a group. The same bot must be a group administrator, and the welcome group can differ from the promotion destination. Use `{name}` and `{group}` in the welcome text. The worker polls for joins, so this bot must have no webhook or other update receiver. Welcome messages start after the setting is enabled.
 - Edit site name, headline, description, announcement and contact URL.
 - Public saved brands and language preference are stored only in the visitor's current browser.
 - `/login` uses HttpOnly signed session cookies, server-side revocation, scrypt password verification, same-origin checks and a persistent login rate limit.

@@ -1,10 +1,10 @@
 import { randomBytes } from "node:crypto";
 import { request } from "node:https";
 
-type TelegramMethod = "getMe" | "getChat" | "getChatMember" | "sendMessage" | "sendPhoto" | "sendAnimation" | "sendDocument";
+type TelegramMethod = "getMe" | "getChat" | "getChatMember" | "getWebhookInfo" | "sendMessage" | "sendPhoto" | "sendAnimation" | "sendDocument";
 export type TelegramUpload = { field: "photo" | "animation" | "document"; fileName: string; mime: string; bytes: Buffer };
-type TelegramReply =
-  | { ok: true; result: Record<string, unknown> }
+type TelegramReply<Result> =
+  | { ok: true; result: Result }
   | { ok: false; code: number; retryAfter: number }
   | null;
 
@@ -14,11 +14,17 @@ function asRecord(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
-function parseReply(body: string): TelegramReply {
+function asUpdates(value: unknown): Record<string, unknown>[] | null {
+  if (!Array.isArray(value)) return null;
+  const records = value.map(asRecord);
+  return records.every(record => record !== null) ? records : null;
+}
+
+function parseReply<Result>(body: string, parseResult: (value: unknown) => Result | null): TelegramReply<Result> {
   const reply = asRecord(JSON.parse(body));
   if (reply?.ok === true) {
-    const result = asRecord(reply.result);
-    return result ? { ok: true, result } : null;
+    const result = parseResult(reply.result);
+    return result !== null ? { ok: true, result } : null;
   }
   if (reply?.ok !== false || typeof reply.error_code !== "number") return null;
   const seconds = asRecord(reply.parameters)?.retry_after;
@@ -48,7 +54,7 @@ function multipartPayload(parameters: Record<string, unknown>, upload: TelegramU
   return { body: Buffer.concat(parts), contentType: `multipart/form-data; boundary=${boundary}` };
 }
 
-export function telegramRequest(token: string, method: TelegramMethod, parameters: Record<string, unknown> = {}, upload?: TelegramUpload): Promise<TelegramReply> {
+function requestTelegram<Result>(token: string, method: TelegramMethod | "getUpdates", parameters: Record<string, unknown>, parseResult: (value: unknown) => Result | null, upload?: TelegramUpload): Promise<TelegramReply<Result>> {
   // Telegram requires the token in the request path. Use Node HTTPS directly so
   // Next's fetch tracing never sees that URL, and keep raw replies private.
   return new Promise(resolve => {
@@ -60,7 +66,7 @@ export function telegramRequest(token: string, method: TelegramMethod, parameter
       method: "POST",
       path: `/bot${token}/${method}`,
       headers: { "Content-Type": contentType, "Content-Length": Buffer.byteLength(body) },
-      signal: AbortSignal.timeout(upload ? 20_000 : 8_000),
+      signal: AbortSignal.timeout(upload || method === "getUpdates" ? 20_000 : 8_000),
     }, response => {
       let content = "";
       response.setEncoding("utf8");
@@ -69,7 +75,7 @@ export function telegramRequest(token: string, method: TelegramMethod, parameter
         if (content.length > 65_536) response.destroy();
       });
       response.on("end", () => {
-        try { resolve(parseReply(content)); }
+        try { resolve(parseReply(content, parseResult)); }
         catch { resolve(null); }
       });
       response.on("error", () => resolve(null));
@@ -78,4 +84,12 @@ export function telegramRequest(token: string, method: TelegramMethod, parameter
     outgoing.on("error", () => resolve(null));
     outgoing.end(body);
   });
+}
+
+export function telegramRequest(token: string, method: TelegramMethod, parameters: Record<string, unknown> = {}, upload?: TelegramUpload) {
+  return requestTelegram(token, method, parameters, asRecord, upload);
+}
+
+export function telegramUpdates(token: string, offset: number) {
+  return requestTelegram(token, "getUpdates", { offset, timeout: 10, limit: 10, allowed_updates: ["chat_member"] }, asUpdates);
 }

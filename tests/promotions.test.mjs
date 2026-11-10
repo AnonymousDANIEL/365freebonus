@@ -44,7 +44,7 @@ function example(id, extra = {}) {
 test('migrations preserve brand data and existing expiry without creating Telegram notifications for legacy brands', async () => {
   const currentDataDir = process.env.DATA_DIR;
   try {
-    for (const version of [1, 2, 4, 5]) {
+    for (const version of [1, 2, 4, 5, 6]) {
       const legacyPath = path.join(fixture, `legacy-${version}`);
       mkdirSync(legacyPath);
       const legacy = new DatabaseSync(path.join(legacyPath, 'directory.sqlite'));
@@ -76,7 +76,7 @@ test('migrations preserve brand data and existing expiry without creating Telegr
           ALTER TABLE site_settings ADD COLUMN facebook_enabled INTEGER NOT NULL DEFAULT 0;`);
         legacy.prepare("UPDATE brands SET category='New', promotion_days=7, promotion_expires_at=?").run(now + 7 * day);
       }
-      if (version === 5) {
+      if (version >= 5) {
         legacy.exec(`ALTER TABLE brands ADD COLUMN promotion_starts_at INTEGER DEFAULT NULL;
           CREATE TABLE telegram_promotion_outbox (
             brand_id TEXT PRIMARY KEY REFERENCES brands(id) ON DELETE CASCADE,
@@ -92,20 +92,37 @@ test('migrations preserve brand data and existing expiry without creating Telegr
         legacy.prepare(`INSERT INTO brands VALUES ('legacy-draft', 'Old draft', 'legacy-draft', 'Update', 'Draft', 'Draft',
           '#aabbcc', 'sparkles', '', 0, 0, 80, '', 1, ?, ?)`).run(now + 2 * day, now + day);
       }
+      if (version === 6) {
+        legacy.exec(`ALTER TABLE brands ADD COLUMN publish_at INTEGER DEFAULT NULL;
+          INSERT INTO telegram_promotion_settings (id, enabled, chat_id, token_ciphertext)
+          VALUES ('primary', 1, '-10012345', 'existing-ciphertext');`);
+        legacy.prepare("UPDATE brands SET publish_at=? WHERE id='original'").run(now + day);
+      }
       legacy.close();
       process.env.DATA_DIR = legacyPath;
       const saved = await repository.readDirectory(true, now);
       const upgraded = sqlite.getSqlite();
-      assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version, 6);
-      assert.equal(upgraded.prepare('SELECT COUNT(*) AS count FROM telegram_promotion_outbox').get().count, version === 5 ? 1 : 0);
-      assert.equal(saved.brands.length, version === 5 ? 2 : 1, 'migration must not add demo brands to an existing site');
+      assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version, 7);
+      assert.equal(upgraded.prepare('SELECT COUNT(*) AS count FROM telegram_promotion_outbox').get().count, version >= 5 ? 1 : 0);
+      assert.equal(upgraded.prepare('SELECT COUNT(*) AS count FROM telegram_welcome_state').get().count, 0);
+      if (version === 6) {
+        const settings = upgraded.prepare("SELECT * FROM telegram_promotion_settings WHERE id='primary'").get();
+        assert.deepEqual({ ...settings }, {
+          id: 'primary', enabled: 1, chat_id: '-10012345', token_ciphertext: 'existing-ciphertext',
+          promotion_message: '', welcome_enabled: 0, welcome_chat_id: '', welcome_message: '', welcome_started_at: 0, welcome_revision: '',
+        });
+        const outbox = upgraded.prepare("SELECT revision, status, attempts FROM telegram_promotion_outbox WHERE brand_id='original'").get();
+        assert.deepEqual({ ...outbox }, { revision: 'legacy-revision', status: 'pending', attempts: 2 });
+      }
+      assert.equal(saved.brands.length, version >= 5 ? 2 : 1, 'migration must not add demo brands to an existing site');
       assert.deepEqual(saved.brands[0], {
         id: 'original', name: 'Existing brand', slug: 'original', category: version >= 4 ? 'New' : 'All',
         tagline: 'Original tagline', description: 'Original description', color: '#aabbcc', icon: 'sparkles',
         imageUrl: '/api/images/original.gif', featured: true, published: true, sortOrder: 73,
         link: 'https://brand.example', promotionDays: version >= 4 ? 7 : null,
-        promotionStartsAt: version === 5 ? now + day : null,
-        promotionExpiresAt: version >= 4 ? now + (version === 5 ? 8 : 7) * day : null, publishAt: null,
+        promotionStartsAt: version >= 5 ? now + day : null,
+        promotionExpiresAt: version >= 4 ? now + (version >= 5 ? 8 : 7) * day : null,
+        publishAt: version === 6 ? now + day : null,
       });
       assert.equal(saved.settings.name, 'Existing site');
       assert.equal(saved.settings.coverImageUrl, version >= 2 ? '/cover.png' : '');
