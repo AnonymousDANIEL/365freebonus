@@ -41,6 +41,7 @@ The volume keeps brands, settings, sessions and login-rate limits across restart
 
 - Add, edit or delete brands; upload is currently through a public image URL.
 - Publish or hide entries, change display order and select homepage features.
+- Use 弹窗公告 in the dashboard to upload a banner, set its click-through URL, and control its visibility and order. Enabled banners rotate every three seconds in a centered 2:1 frame on the homepage.
 - Set a Malaysia date and time for a brand to enter Update or New. Saving a new time for a draft schedules its first public appearance without a second action. Already published brands stay in All until their promotion starts. The duration starts at the scheduled time.
 - Connect @FreeBonus365Bot to a group or channel under Telegram 通知 in the dashboard sidebar. Channel bots need administrator permission to post. The running Node service checks the SQLite notification queue and sends when the promotion starts. Enabling notifications or switching destinations skips pending announcements for promotions that already started. Keep the service running for scheduled delivery and the same session secret for saved bot credentials.
 - Edit the automatic promotion message using `{category}`, `{name}`, `{tagline}` and `{link}`. Leave it blank to use the default. Messages exceeding Telegram's media caption limit are sent as text.

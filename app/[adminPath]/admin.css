@@ -189,6 +189,27 @@
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
 }
+.cms-shell .cms-popup-notices .cms-brand-cell strong { max-width: 240px; overflow: hidden; text-overflow: ellipsis; }
+.cms-shell .cms-popup-notice-thumb {
+  position: relative;
+  flex: 0 0 72px;
+  width: 72px;
+  aspect-ratio: 2 / 1;
+  overflow: hidden;
+  border-radius: 5px;
+  background: var(--cms-image-mat);
+}
+.cms-shell .cms-popup-notice-image { display: grid; min-width: 0; gap: 10px; }
+.cms-shell .cms-popup-notice-preview { position: relative; aspect-ratio: 2 / 1; min-height: 0; max-height: none; }
+.cms-shell :is(.cms-popup-notice-thumb, .cms-popup-notice-preview) img {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center;
+}
 @media (max-width: 600px) {
   .cms-sidebar {
     flex-wrap: wrap;
