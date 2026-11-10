@@ -185,7 +185,7 @@ export default function NoticeCarousel({ notices }: { notices: PopupNotice[] }) 
                 {open && <img src={notice.imageUrl} alt="" referrerPolicy="no-referrer" />}
                 <span className="notice-carousel-open" aria-hidden="true"><ArrowUpRight size={19} /></span>
               </a> : <div className="notice-carousel-media">{open && <img src={notice.imageUrl} alt={notice.title} referrerPolicy="no-referrer" />}</div>}
-              <div className="notice-carousel-caption"><span>{notice.title}</span>{entries.length > 1 && <span aria-hidden="true">{activeIndex + 1} / {entries.length}</span>}</div>
+              {entries.length > 1 && <div className="notice-carousel-position" aria-hidden="true">{activeIndex + 1} / {entries.length}</div>}
             </>}
           </div>)}
         </div>

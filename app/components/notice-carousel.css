@@ -116,8 +116,7 @@
   background: #e8d2a7;
 }
 .notice-carousel-media:hover .notice-carousel-open { background: #f1deb9; }
-.notice-carousel-caption { display: flex; justify-content: space-between; gap: 12px; padding: 10px 2px 1px; color: #66526f; font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
-.notice-carousel-caption > span:nth-child(2) { flex-shrink: 0; font-variant-numeric: tabular-nums; }
+.notice-carousel-position { padding: 10px 2px 1px; color: #66526f; font-size: 11px; line-height: 1.5; text-align: right; font-variant-numeric: tabular-nums; }
 @media (max-width: 620px) {
   .notice-carousel { width: calc(100% - 24px); max-height: calc(100dvh - 24px); border-radius: 13px; }
   .notice-carousel-header { padding: 15px 13px 13px; gap: 8px; }
