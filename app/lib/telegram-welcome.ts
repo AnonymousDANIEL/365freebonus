@@ -1,11 +1,11 @@
 import { randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { getSqlite } from "./sqlite";
-import { telegramRequest, telegramUpdates } from "./telegram-bot";
+import { answerTelegramCallback, telegramRequest, telegramUpdates } from "./telegram-bot";
 import { normalizeTelegramKeyword } from "./telegram-keywords";
 
 type DecryptToken = (ciphertext: string) => string;
-type GroupSettings = {
+type ChatSettings = {
   chat_bot_token_ciphertext: string;
   welcome_enabled: number;
   welcome_chat_id: string;
@@ -14,10 +14,22 @@ type GroupSettings = {
   welcome_revision: string;
   keyword_enabled: number;
   keyword_started_at: number;
+  private_enabled: number;
+  private_started_at: number;
+  private_start_message: string;
 };
 type PollClaim = { revision: string; leaseId: string; offset: number; ciphertext: string };
 type PollState = { revision: string; next_offset: number; last_polled_at: number; next_poll_at: number; lease_until: number };
-type GroupReply = { kind: "welcome"; text: string } | { kind: "keyword"; text: string; messageId: number; threadId?: number };
+type InlineButton = { text: string } & ({ url: string } | { callback_data: string });
+type ChatReply = {
+  kind: "welcome" | "keyword" | "private";
+  chatId: number;
+  text?: string;
+  messageId?: number;
+  threadId?: number;
+  callbackId?: string;
+  keyboard?: InlineButton[][];
+};
 
 const POLL_MS = 5_000;
 const LEASE_MS = 30_000;
@@ -26,6 +38,9 @@ const SLOW_RETRY_MS = 60_000;
 const ownedState = "id = 'primary' AND revision = ? AND lease_id = ?";
 const RATE_LIMIT_ERROR = "Telegram 正在限制发送频率，稍后重试。";
 const INVALID_TOKEN_ERROR = "无法使用 Telegram 机器人 Token，请检查设置。";
+const PRIVATE_START_URL = "https://t.me/FreeBonus365ChatBot?start=welcome";
+const DEFAULT_PRIVATE_GREETING = "欢迎使用 365 Free Bonus。请选择下方菜单，或直接输入关键词。";
+const MENU_PAGE_SIZE = 8;
 
 function inTransaction<T>(db: DatabaseSync, operation: () => T): T {
   db.exec("BEGIN IMMEDIATE");
@@ -41,20 +56,22 @@ function inTransaction<T>(db: DatabaseSync, operation: () => T): T {
 
 function readSettings(db: DatabaseSync) {
   return db.prepare(`SELECT chat_bot_token_ciphertext, welcome_enabled, welcome_chat_id, welcome_message,
-    welcome_started_at, welcome_revision, keyword_enabled, keyword_started_at
-    FROM telegram_promotion_settings WHERE id = 'primary'`).get() as GroupSettings | undefined;
+    welcome_started_at, welcome_revision, keyword_enabled, keyword_started_at,
+    private_enabled, private_started_at, private_start_message
+    FROM telegram_promotion_settings WHERE id = 'primary'`).get() as ChatSettings | undefined;
 }
 
-function groupReady(settings: GroupSettings | undefined): settings is GroupSettings {
-  return Boolean(settings && settings.welcome_revision && settings.chat_bot_token_ciphertext
-    && /^-[1-9]\d{0,15}$/.test(settings.welcome_chat_id) && Number.isSafeInteger(Number(settings.welcome_chat_id))
-    && (settings.welcome_enabled === 1 || settings.keyword_enabled === 1));
+function chatReady(settings: ChatSettings | undefined): settings is ChatSettings {
+  if (!settings?.welcome_revision || !settings.chat_bot_token_ciphertext) return false;
+  if (settings.private_enabled === 1) return true;
+  return /^-[1-9]\d{0,15}$/.test(settings.welcome_chat_id) && Number.isSafeInteger(Number(settings.welcome_chat_id))
+    && (settings.welcome_enabled === 1 || settings.keyword_enabled === 1);
 }
 
 function claimPoll(db: DatabaseSync, now: number): PollClaim | null {
   return inTransaction(db, () => {
     const settings = readSettings(db);
-    if (!groupReady(settings)) return null;
+    if (!chatReady(settings)) return null;
     const revision = settings.welcome_revision;
     let state = db.prepare(`SELECT revision, next_offset, last_polled_at, next_poll_at, lease_until
       FROM telegram_welcome_state WHERE id = 'primary'`).get() as PollState | undefined;
@@ -106,57 +123,136 @@ function isCurrentEvent(date: unknown, cutoff: number): boolean {
   return positiveInteger(cutoff) && positiveInteger(date) && date >= cutoff;
 }
 
-function targetGroup(value: unknown, settings: GroupSettings): Record<string, unknown> | null {
+function targetChat(value: unknown, settings: ChatSettings, allowChannel = false): Record<string, unknown> | null {
   const chat = asRecord(value);
-  return chat && chat.id === Number(settings.welcome_chat_id) && (chat.type === "group" || chat.type === "supergroup") ? chat : null;
+  const chatId = Number(settings.welcome_chat_id);
+  if (!chat || !Number.isSafeInteger(chatId) || chatId >= 0 || chat.id !== chatId) return null;
+  return chat.type === "group" || chat.type === "supergroup" || (allowChannel && chat.type === "channel") ? chat : null;
 }
 
-function welcomeText(update: Record<string, unknown>, settings: GroupSettings): string {
-  if (settings.welcome_enabled !== 1) return "";
+function optionsButton(text: string): InlineButton[][] {
+  return [[{ text, callback_data: "dm:page:0" }]];
+}
+
+function welcomeReply(db: DatabaseSync, update: Record<string, unknown>, settings: ChatSettings): ChatReply | null {
+  if (settings.welcome_enabled !== 1) return null;
   const change = asRecord(update.chat_member);
-  if (!change || !isCurrentEvent(change.date, settings.welcome_started_at)) return "";
-  const chat = targetGroup(change.chat, settings);
-  if (!chat) return "";
-  if (membership(change.old_chat_member) !== false || membership(change.new_chat_member) !== true) return "";
+  if (!change || !isCurrentEvent(change.date, settings.welcome_started_at)) return null;
+  const privateEnabled = settings.private_enabled === 1;
+  const chat = targetChat(change.chat, settings, privateEnabled);
+  if (!chat || membership(change.old_chat_member) !== false || membership(change.new_chat_member) !== true) return null;
   const user = asRecord(asRecord(change.new_chat_member)?.user);
-  if (!user || user.is_bot !== false || !Number.isSafeInteger(user.id)) return "";
+  if (!user || user.is_bot !== false || !positiveInteger(user.id)) return null;
   const name = [displayText(user.first_name), displayText(user.last_name)].filter(Boolean).join(" ") || "新成员";
-  const group = displayText(chat.title) || "Telegram 群组";
-  return shorten(settings.welcome_message.replace(/\{(name|group)\}/g, (_, key) => key === "name" ? name : group).trim(), 4_096);
+  const group = displayText(chat.title) || (chat.type === "channel" ? "Telegram 频道" : "Telegram 群组");
+  const text = shorten(settings.welcome_message.replace(/\{(name|group)\}/g, (_, key) => key === "name" ? name : group).trim(), 4_096);
+  if (!text) return null;
+  if (privateEnabled && db.prepare("SELECT 1 FROM telegram_private_contacts WHERE user_id = ?").get(user.id)) {
+    return { kind: "welcome", chatId: user.id, text, keyboard: optionsButton("查看选项") };
+  }
+  if (chat.type === "channel") return null;
+  return {
+    kind: "welcome", chatId: Number(settings.welcome_chat_id), text,
+    keyboard: privateEnabled ? [[{ text: "开启私聊", url: PRIVATE_START_URL }]] : undefined,
+  };
 }
 
-function keywordReply(db: DatabaseSync, update: Record<string, unknown>, settings: GroupSettings): GroupReply | null {
-  if (settings.keyword_enabled !== 1) return null;
-  const message = asRecord(update.message);
-  if (!message || !isCurrentEvent(message.date, settings.keyword_started_at) || !targetGroup(message.chat, settings)) return null;
-  const sender = asRecord(message.from);
-  if (!sender || sender.is_bot !== false || !positiveInteger(sender.id) || !positiveInteger(message.message_id)) return null;
+function originalText(message: Record<string, unknown>): string | null {
   if (message.sender_chat != null || message.forward_origin != null || message.via_bot != null || message.is_automatic_forward === true) return null;
-  if (typeof message.text !== "string") return null;
-  const key = normalizeTelegramKeyword(message.text);
+  return typeof message.text === "string" ? message.text : null;
+}
+
+function keywordResponse(db: DatabaseSync, text: string): string | null {
+  const key = normalizeTelegramKeyword(text);
   if (!key) return null;
   const rule = db.prepare(`SELECT response FROM telegram_keyword_rules
     WHERE (match_mode = 'exact' AND keyword_key = ?)
       OR (match_mode = 'contains' AND keyword_key <> '' AND instr(?, keyword_key) > 0)
     ORDER BY match_mode = 'exact' DESC, length(keyword_key) DESC, id ASC LIMIT 1`).get(key, key);
   if (typeof rule?.response !== "string" || !rule.response.trim()) return null;
-  const text = shorten(rule.response.trim(), 4_096);
+  return shorten(rule.response.trim(), 4_096);
+}
+
+function keywordReply(db: DatabaseSync, update: Record<string, unknown>, settings: ChatSettings): ChatReply | null {
+  if (settings.keyword_enabled !== 1) return null;
+  const message = asRecord(update.message);
+  if (!message || !isCurrentEvent(message.date, settings.keyword_started_at) || !targetChat(message.chat, settings)) return null;
+  const sender = asRecord(message.from);
+  if (!sender || sender.is_bot !== false || !positiveInteger(sender.id) || !positiveInteger(message.message_id)) return null;
+  const input = originalText(message);
+  const text = input && keywordResponse(db, input);
+  if (!text) return null;
   const threadId = message.is_topic_message === true && positiveInteger(message.message_thread_id) ? message.message_thread_id : undefined;
-  return { kind: "keyword", text, messageId: message.message_id, threadId };
+  return { kind: "keyword", chatId: Number(settings.welcome_chat_id), text, messageId: message.message_id, threadId };
+}
+
+function privateChatId(chatValue: unknown, senderValue: unknown): number | null {
+  const chat = asRecord(chatValue);
+  const sender = asRecord(senderValue);
+  if (chat?.type !== "private" || sender?.is_bot !== false || !positiveInteger(sender.id) || chat.id !== sender.id) return null;
+  return sender.id;
+}
+
+function privateMenu(db: DatabaseSync, settings: ChatSettings, chatId: number, page: number): ChatReply {
+  const rules = db.prepare("SELECT id, keyword FROM telegram_keyword_rules ORDER BY id LIMIT ? OFFSET ?")
+    .all(MENU_PAGE_SIZE + 1, page * MENU_PAGE_SIZE) as { id: number; keyword: string }[];
+  if (page > 0 && !rules.length) return privateMenu(db, settings, chatId, 0);
+  const keyboard: InlineButton[][] = rules.slice(0, MENU_PAGE_SIZE).map(rule => [
+    { text: shorten(rule.keyword, 64), callback_data: `dm:rule:${rule.id}` },
+  ]);
+  const pagination: InlineButton[] = [];
+  if (page > 0) pagination.push({ text: "上一页", callback_data: `dm:page:${page - 1}` });
+  if (rules.length > MENU_PAGE_SIZE) pagination.push({ text: "下一页", callback_data: `dm:page:${page + 1}` });
+  if (pagination.length) keyboard.push(pagination);
+  const text = shorten(settings.private_start_message.trim() || DEFAULT_PRIVATE_GREETING, 4_096);
+  return { kind: "private", chatId, text, keyboard };
+}
+
+function callbackReply(db: DatabaseSync, update: Record<string, unknown>, settings: ChatSettings): ChatReply | null {
+  const callback = asRecord(update.callback_query);
+  const message = asRecord(callback?.message);
+  if (!callback || !message || !positiveInteger(message.message_id) || typeof callback.id !== "string" || !callback.id || callback.id.length > 128) return null;
+  const chatId = privateChatId(message.chat, callback.from);
+  if (chatId === null || typeof callback.data !== "string") return null;
+  const action = /^dm:(rule|page):(\d{1,16})$/.exec(callback.data);
+  if (!action) return null;
+  const id = Number(action[2]);
+  if (!Number.isSafeInteger(id)) return null;
+  if (action[1] === "page") {
+    if (id > Math.floor(Number.MAX_SAFE_INTEGER / MENU_PAGE_SIZE)) return null;
+    return { ...privateMenu(db, settings, chatId, id), callbackId: callback.id };
+  }
+  const rule = db.prepare("SELECT response FROM telegram_keyword_rules WHERE id = ?").get(id);
+  const text = typeof rule?.response === "string" ? shorten(rule.response.trim(), 4_096) : "";
+  return { kind: "private", chatId, text, callbackId: callback.id, keyboard: text ? optionsButton("返回选项") : undefined };
+}
+
+function privateReply(db: DatabaseSync, update: Record<string, unknown>, settings: ChatSettings): ChatReply | null {
+  if (settings.private_enabled !== 1) return null;
+  if (update.callback_query) return callbackReply(db, update, settings);
+  const message = asRecord(update.message);
+  if (!message || !positiveInteger(message.message_id) || !isCurrentEvent(message.date, settings.private_started_at)) return null;
+  const chatId = privateChatId(message.chat, message.from);
+  if (chatId === null) return null;
+  db.prepare("INSERT OR IGNORE INTO telegram_private_contacts (user_id) VALUES (?)").run(chatId);
+  const input = originalText(message);
+  if (!input) return null;
+  if (/^\/(?:start|menu)(?:@FreeBonus365ChatBot)?(?:\s|$)/i.test(input.trim())) return privateMenu(db, settings, chatId, 0);
+  const text = keywordResponse(db, input);
+  return text ? { kind: "private", chatId, text, keyboard: optionsButton("返回选项") } : null;
 }
 
 function claimUpdate(db: DatabaseSync, claim: PollClaim, id: number, update: Record<string, unknown>, now: number) {
   return inTransaction(db, () => {
     const settings = readSettings(db);
-    if (!groupReady(settings) || settings.welcome_revision !== claim.revision) return null;
+    if (!chatReady(settings) || settings.welcome_revision !== claim.revision) return null;
     // Persist consumption before any send. A crash or an ambiguous reply can
     // lose a welcome, but cannot cause an automatic duplicate.
     const result = db.prepare(`UPDATE telegram_welcome_state SET next_offset = ?, lease_until = ?
       WHERE ${ownedState} AND next_offset <= ?`).run(id + 1, now + LEASE_MS, claim.revision, claim.leaseId, id);
     if (!result.changes) return null;
-    const text = welcomeText(update, settings);
-    const reply: GroupReply | null = text ? { kind: "welcome", text } : keywordReply(db, update, settings);
-    return { chatId: Number(settings.welcome_chat_id), reply };
+    const reply = welcomeReply(db, update, settings) ?? keywordReply(db, update, settings) ?? privateReply(db, update, settings);
+    return { reply };
   });
 }
 
@@ -212,16 +308,28 @@ export async function pollTelegramWelcomeOnce(decryptToken: DecryptToken, clock 
     offset = id + 1;
     const action = delivery.reply;
     if (!action) continue;
+    if (action.callbackId) {
+      await answerTelegramCallback(token, action.callbackId).catch(() => false);
+      if (!action.text) continue;
+      const active = db.prepare(`SELECT 1 FROM telegram_welcome_state WHERE ${ownedState}
+        AND EXISTS (SELECT 1 FROM telegram_promotion_settings
+          WHERE id = 'primary' AND welcome_revision = ? AND private_enabled = 1)`)
+        .get(claim.revision, claim.leaseId, claim.revision);
+      if (!active) { finishPoll(db, claim); return; }
+    }
+    if (!action.text) continue;
     const reply = await telegramRequest(token, "sendMessage", {
-      chat_id: delivery.chatId, text: action.text, link_preview_options: { is_disabled: true },
-      ...(action.kind === "keyword" ? {
+      chat_id: action.chatId, text: action.text, link_preview_options: { is_disabled: true },
+      ...(action.keyboard?.length ? { reply_markup: { inline_keyboard: action.keyboard } } : {}),
+      ...(action.messageId === undefined ? {} : {
         reply_parameters: { message_id: action.messageId, allow_sending_without_reply: false },
         ...(action.threadId === undefined ? {} : { message_thread_id: action.threadId }),
-      } : {}),
+      }),
     }).catch(() => null);
     if (reply?.ok && Number.isSafeInteger(reply.result.message_id)) {
       db.prepare(`UPDATE telegram_welcome_state SET sent = sent + ?, keyword_replies = keyword_replies + ?,
-        last_error = '' WHERE ${ownedState}`).run(Number(action.kind === "welcome"), Number(action.kind === "keyword"), claim.revision, claim.leaseId);
+        private_replies = private_replies + ?, last_error = '' WHERE ${ownedState}`)
+        .run(Number(action.kind === "welcome"), Number(action.kind === "keyword"), Number(action.kind === "private"), claim.revision, claim.leaseId);
     } else if (reply && !reply.ok && reply.code === 429) {
       // This request was rejected. Telegram still holds the update until the
       // next poll acknowledges it, so retry its ID after the specified delay.
@@ -229,7 +337,12 @@ export async function pollTelegramWelcomeOnce(decryptToken: DecryptToken, clock 
       return;
     } else {
       const code = reply && !reply.ok ? reply.code : 0;
-      const label = action.kind === "welcome" ? "欢迎消息" : "关键词回复";
+      if (code === 403 && action.chatId > 0) {
+        db.prepare(`DELETE FROM telegram_private_contacts WHERE user_id = ?
+          AND EXISTS (SELECT 1 FROM telegram_welcome_state WHERE ${ownedState})`).run(action.chatId, claim.revision, claim.leaseId);
+        continue;
+      }
+      const label = action.kind === "welcome" ? "欢迎消息" : action.kind === "private" ? "私聊回复" : "关键词回复";
       const error = code === 401 ? INVALID_TOKEN_ERROR
         : code === 400 || code === 403 ? `Telegram 拒绝发送${label}，请检查群组和机器人权限。`
         : `Telegram 未确认${label}的发送结果，该消息不会自动重发。`;

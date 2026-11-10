@@ -44,7 +44,8 @@ function example(id, extra = {}) {
 test('migrations preserve brand data and existing expiry without creating Telegram notifications for legacy brands', async () => {
   const currentDataDir = process.env.DATA_DIR;
   try {
-    for (const version of [1, 2, 4, 5, 6, 7]) {
+    for (const version of [1, 2, 4, 5, 6, 7, 8]) {
+      const hasChatBot = version === 8;
       const legacyPath = path.join(fixture, `legacy-${version}`);
       mkdirSync(legacyPath);
       const legacy = new DatabaseSync(path.join(legacyPath, 'directory.sqlite'));
@@ -98,7 +99,7 @@ test('migrations preserve brand data and existing expiry without creating Telegr
           VALUES ('primary', 1, '-10012345', 'existing-ciphertext');`);
         legacy.prepare("UPDATE brands SET publish_at=? WHERE id='original'").run(now + day);
       }
-      if (version === 7) {
+      if (version >= 7) {
         legacy.exec(`ALTER TABLE telegram_promotion_settings ADD COLUMN promotion_message TEXT NOT NULL DEFAULT '';
           ALTER TABLE telegram_promotion_settings ADD COLUMN welcome_enabled INTEGER NOT NULL DEFAULT 0 CHECK (welcome_enabled IN (0, 1));
           ALTER TABLE telegram_promotion_settings ADD COLUMN welcome_chat_id TEXT NOT NULL DEFAULT '';
@@ -118,22 +119,48 @@ test('migrations preserve brand data and existing expiry without creating Telegr
           INSERT INTO telegram_welcome_state (id, revision, next_offset, sent)
           VALUES ('primary', 'legacy-welcome', 12345, 3);`);
       }
+      if (hasChatBot) {
+        legacy.exec(`ALTER TABLE telegram_promotion_settings ADD COLUMN chat_bot_token_ciphertext TEXT NOT NULL DEFAULT '';
+          ALTER TABLE telegram_promotion_settings ADD COLUMN keyword_enabled INTEGER NOT NULL DEFAULT 0 CHECK (keyword_enabled IN (0, 1));
+          ALTER TABLE telegram_promotion_settings ADD COLUMN keyword_started_at INTEGER NOT NULL DEFAULT 0;
+          ALTER TABLE telegram_welcome_state ADD COLUMN keyword_replies INTEGER NOT NULL DEFAULT 0;
+          CREATE TABLE telegram_keyword_rules (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, keyword TEXT NOT NULL, keyword_key TEXT NOT NULL,
+            match_mode TEXT NOT NULL CHECK (match_mode IN ('exact', 'contains')),
+            response TEXT NOT NULL, UNIQUE (keyword_key, match_mode)
+          );
+          UPDATE telegram_promotion_settings SET chat_bot_token_ciphertext='existing-chat-ciphertext',
+            keyword_enabled=1, keyword_started_at=1800000001;
+          UPDATE telegram_welcome_state SET last_polled_at=1800000002000, keyword_replies=5;
+          INSERT INTO telegram_keyword_rules (id, keyword, keyword_key, match_mode, response)
+          VALUES (7, 'Bonus', 'bonus', 'exact', 'Existing keyword response');`);
+      }
       legacy.close();
       process.env.DATA_DIR = legacyPath;
       const saved = await repository.readDirectory(true, now);
       const upgraded = sqlite.getSqlite();
-      assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version, 8);
+      assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version, 9);
       assert.equal(upgraded.prepare('SELECT COUNT(*) AS count FROM telegram_promotion_outbox').get().count, version >= 5 ? 1 : 0);
-      assert.equal(upgraded.prepare('SELECT COUNT(*) AS count FROM telegram_welcome_state').get().count, 0);
-      assert.equal(upgraded.prepare('SELECT COUNT(*) AS count FROM telegram_keyword_rules').get().count, 0);
+      assert.equal(upgraded.prepare('SELECT COUNT(*) AS count FROM telegram_private_contacts').get().count, 0);
+      const runtime = upgraded.prepare("SELECT revision, next_offset, last_polled_at, sent, keyword_replies, private_replies FROM telegram_welcome_state WHERE id='primary'").get();
+      assert.deepEqual(runtime && { ...runtime }, hasChatBot ? {
+        revision: 'legacy-welcome', next_offset: 12345, last_polled_at: 1800000002000, sent: 3, keyword_replies: 5, private_replies: 0,
+      } : undefined);
+      const rules = upgraded.prepare('SELECT * FROM telegram_keyword_rules ORDER BY id').all().map(rule => ({ ...rule }));
+      assert.deepEqual(rules, hasChatBot ? [
+        { id: 7, keyword: 'Bonus', keyword_key: 'bonus', match_mode: 'exact', response: 'Existing keyword response' },
+      ] : []);
       if (version >= 6) {
         const settings = upgraded.prepare("SELECT * FROM telegram_promotion_settings WHERE id='primary'").get();
         assert.deepEqual({ ...settings }, {
           id: 'primary', enabled: 1, chat_id: '-10012345', token_ciphertext: 'existing-ciphertext',
-          promotion_message: version === 7 ? 'Existing promotion message' : '',
-          welcome_enabled: 0, welcome_chat_id: version === 7 ? '-10054321' : '',
-          welcome_message: version === 7 ? 'Existing welcome message' : '', welcome_started_at: 0, welcome_revision: '',
-          chat_bot_token_ciphertext: '', keyword_enabled: 0, keyword_started_at: 0,
+          promotion_message: version >= 7 ? 'Existing promotion message' : '',
+          welcome_enabled: Number(hasChatBot), welcome_chat_id: version >= 7 ? '-10054321' : '',
+          welcome_message: version >= 7 ? 'Existing welcome message' : '',
+          welcome_started_at: hasChatBot ? 1800000000 : 0, welcome_revision: hasChatBot ? 'legacy-welcome' : '',
+          chat_bot_token_ciphertext: hasChatBot ? 'existing-chat-ciphertext' : '',
+          keyword_enabled: Number(hasChatBot), keyword_started_at: hasChatBot ? 1800000001 : 0,
+          private_enabled: 0, private_started_at: 0, private_start_message: '',
         });
         const outbox = upgraded.prepare("SELECT revision, status, attempts FROM telegram_promotion_outbox WHERE brand_id='original'").get();
         assert.deepEqual({ ...outbox }, { revision: 'legacy-revision', status: 'pending', attempts: 2 });

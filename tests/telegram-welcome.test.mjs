@@ -25,6 +25,7 @@ const now = 1_800_000_000_000;
 const minute = 60_000;
 const cutoff = now / 1_000 - 10;
 const chatId = -1001234567890;
+const privateChatId = 701;
 const revision = 'welcome-revision';
 const group = 'Public <Group>';
 const token = 'fixture-chat-token';
@@ -51,21 +52,33 @@ test.after(() => {
   rmSync(fixture, { recursive: true, force: true });
 });
 
-function configureWelcome({ enabled = true, message = 'Welcome {name} to {group}!', chatCiphertext = ciphertext } = {}) {
+function configureWelcome({
+  enabled = true, message = 'Welcome {name} to {group}!', chatCiphertext = ciphertext, groupChatId = chatId,
+} = {}) {
   getSqlite().prepare(`INSERT INTO telegram_promotion_settings (
     id, enabled, chat_id, token_ciphertext, chat_bot_token_ciphertext, welcome_enabled,
     welcome_chat_id, welcome_message, welcome_started_at, welcome_revision
   ) VALUES ('primary', 0, '', ?, ?, ?, ?, ?, ?, ?)
   ON CONFLICT(id) DO UPDATE SET welcome_enabled = excluded.welcome_enabled,
-    welcome_message = excluded.welcome_message, chat_bot_token_ciphertext = excluded.chat_bot_token_ciphertext`)
-    .run(promotionCiphertext, chatCiphertext, Number(enabled), String(chatId), message, cutoff, revision);
+    welcome_chat_id = excluded.welcome_chat_id, welcome_message = excluded.welcome_message,
+    chat_bot_token_ciphertext = excluded.chat_bot_token_ciphertext`)
+    .run(promotionCiphertext, chatCiphertext, Number(enabled), String(groupChatId), message, cutoff, revision);
 }
 
-function configureKeywords(rules, startedAt = cutoff) {
+function configureKeywords(rules, startedAt = cutoff, enabled = true) {
   const db = getSqlite();
-  db.prepare("UPDATE telegram_promotion_settings SET keyword_enabled = 1, keyword_started_at = ? WHERE id = 'primary'").run(startedAt);
+  db.prepare("UPDATE telegram_promotion_settings SET keyword_enabled = ?, keyword_started_at = ? WHERE id = 'primary'").run(Number(enabled), startedAt);
   const insert = db.prepare('INSERT INTO telegram_keyword_rules (keyword, keyword_key, match_mode, response) VALUES (?, ?, ?, ?)');
   for (const [keyword, mode, response] of rules) insert.run(keyword, keyword, mode, response);
+}
+
+function configurePrivate({ enabled = true, startMessage = 'Choose a topic' } = {}) {
+  getSqlite().prepare(`UPDATE telegram_promotion_settings SET private_enabled = ?, private_started_at = ?,
+    private_start_message = ? WHERE id = 'primary'`).run(Number(enabled), cutoff, startMessage);
+}
+
+function privateContacts() {
+  return getSqlite().prepare('SELECT user_id FROM telegram_private_contacts ORDER BY user_id').all().map(row => row.user_id);
 }
 
 function putState({ offset = 0, lastPoll = now, leaseId = '', leaseUntil = 0 } = {}) {
@@ -96,21 +109,42 @@ function groupMessage(updateId, {
 }
 
 function membership(updateId, {
-  id = chatId, date = now / 1_000, firstName = 'Ada', lastName = 'Lovelace',
+  id = chatId, type = 'supergroup', userId = 500, date = now / 1_000, firstName = 'Ada', lastName = 'Lovelace',
   bot = false, oldStatus = 'left', newStatus = 'member',
 } = {}) {
-  const user = { id: 500, is_bot: bot, first_name: firstName, last_name: lastName };
+  const user = { id: userId, is_bot: bot, first_name: firstName, last_name: lastName };
   return {
     update_id: updateId,
     chat_member: {
-      date, chat: { id, type: 'supergroup', title: group },
+      date, chat: { id, type, title: group },
       old_chat_member: { status: oldStatus, user },
       new_chat_member: { status: newStatus, user },
     },
   };
 }
 
-function mockTransport(t, updates, sends) {
+function privateMessage(updateId, { id = privateChatId, fromId = id, text = '/start' } = {}) {
+  return {
+    update_id: updateId,
+    message: {
+      message_id: updateId + 1_000, date: now / 1_000, text,
+      chat: { id, type: 'private' }, from: { id: fromId, is_bot: false, first_name: 'Ada' },
+    },
+  };
+}
+
+function privateCallback(updateId, data, fromId = privateChatId) {
+  return {
+    update_id: updateId,
+    callback_query: {
+      id: `callback-${updateId}`, data,
+      from: { id: fromId, is_bot: false, first_name: 'Ada' },
+      message: { message_id: 1_400, date: now / 1_000, chat: { id: privateChatId, type: 'private' } },
+    },
+  };
+}
+
+function mockTransport(t, updates, sends, { chatIds = [chatId] } = {}) {
   const take = (queue, method, parameter) => {
     assert.ok(queue.length, `Unexpected ${method}`);
     const reply = queue.shift();
@@ -123,7 +157,7 @@ function mockTransport(t, updates, sends) {
   const send = t.mock.method(transport, 'telegramRequest', async (actualToken, method, params) => {
     assert.equal(actualToken, token);
     assert.equal(method, 'sendMessage');
-    assert.equal(String(params.chat_id), String(chatId));
+    assert.ok(chatIds.includes(Number(params.chat_id)), `Unexpected chat ${params.chat_id}`);
     assert.equal(params.parse_mode, undefined);
     return take(sends, method, params);
   });
@@ -257,7 +291,7 @@ test('welcome and keyword replies share a cursor and select one matching rule pe
     ['gold', 'contains', 'Earlier rule'],
     ['deal', 'contains', 'Later rule'],
   ], cutoff + 5);
-  const exact = groupMessage(210, { text: '  ＢＯＮＵＳ  ' });
+  const exact = groupMessage(210, { text: '  ＢＯＮＵＳ  ', message_thread_id: 26 });
   const batch = [
     exact, membership(200, { date: cutoff }),
     groupMessage(201, { id: chatId - 1 }), groupMessage(202, { bot: true }),
@@ -311,4 +345,91 @@ test('keyword-only polling uses the chat token and does not retry an ambiguous r
   assert.equal(state().sent, 0);
   assert.equal(state().keyword_replies, 1);
   assert.equal(state().next_offset, 303);
+});
+
+test('private-only polling answers start, menu navigation, and keywords with group features off', async t => {
+  configureWelcome({ enabled: false, groupChatId: '' });
+  configurePrivate();
+  configureKeywords(Array.from({ length: 10 }, (_, index) => {
+    const id = index + 1;
+    return [`topic ${id}`, 'exact', `Answer ${id}`];
+  }), cutoff, false);
+  const batch = [
+    privateMessage(400, { text: '/start welcome' }),
+    privateCallback(401, 'dm:page:1'), privateCallback(402, 'dm:rule:9'),
+    privateCallback(403, 'dm:rule:999'), privateCallback(404, 'dm:rule:9', privateChatId + 1),
+    privateMessage(405, { text: 'TOPIC 1' }), privateMessage(406, { text: '/menu' }),
+    privateMessage(407, { id: privateChatId + 1, fromId: privateChatId + 2, text: 'topic 1' }),
+  ];
+  const requests = mockTransport(t, [ok(batch)], Array(5).fill(successfulSend), { chatIds: [privateChatId] });
+  const callback = t.mock.method(transport, 'answerTelegramCallback', async (actualToken, queryId) => {
+    assert.equal(actualToken, token);
+    assert.ok(queryId);
+    return true;
+  });
+
+  await tick();
+  const [menu, nextPage, selectedRule, keywordReply, menuAgain] = requests.parameters();
+  const buttonData = payload => payload.reply_markup.inline_keyboard.flat().map(button => button.callback_data);
+  assert.match(menu.text, /Choose a topic/);
+  assert.deepEqual(buttonData(menu), [...Array.from({ length: 8 }, (_, index) => `dm:rule:${index + 1}`), 'dm:page:1']);
+  assert.deepEqual(buttonData(nextPage), ['dm:rule:9', 'dm:rule:10', 'dm:page:0']);
+  assert.equal(selectedRule.text, 'Answer 9');
+  assert.equal(keywordReply.text, 'Answer 1');
+  assert.deepEqual(buttonData(selectedRule), ['dm:page:0']);
+  assert.deepEqual(buttonData(keywordReply), ['dm:page:0']);
+  assert.deepEqual(buttonData(menuAgain), buttonData(menu));
+  assert.deepEqual(callback.mock.calls.map(call => call.arguments[1]), ['callback-401', 'callback-402', 'callback-403']);
+  assert.deepEqual(privateContacts(), [privateChatId]);
+  assert.deepEqual(requests.offsets(), [0]);
+  assert.equal(state().private_replies, 5);
+  assert.equal(state().next_offset, 408);
+});
+
+test('known group joiners receive a DM and a rejected DM clears the contact for subsequent joins', async t => {
+  configureWelcome();
+  configurePrivate();
+  const batch = [
+    privateMessage(500, { text: 'Hi' }), membership(501, { userId: privateChatId }),
+    membership(502, { userId: privateChatId + 1 }), membership(503, { userId: privateChatId }),
+    membership(504, { userId: privateChatId }), membership(505, { userId: privateChatId + 2, bot: true }),
+  ];
+  const forbidden = { ok: false, code: 403, retryAfter: 0 };
+  const requests = mockTransport(t, [ok(batch), ok(batch)], [successfulSend, successfulSend, forbidden, successfulSend], { chatIds: [privateChatId, chatId] });
+
+  await tick();
+  const sent = requests.parameters();
+  assert.deepEqual(sent.map(reply => Number(reply.chat_id)), [privateChatId, chatId, privateChatId, chatId]);
+  assert.ok(sent[0].reply_markup.inline_keyboard.flat().some(button => button.callback_data === 'dm:page:0'));
+  for (const reply of [sent[1], sent[3]]) {
+    assert.ok(reply.reply_markup.inline_keyboard.flat().some(button => button.url === 'https://t.me/FreeBonus365ChatBot?start=welcome'));
+  }
+  assert.deepEqual(privateContacts(), []);
+  assert.equal(state().sent, 3);
+  assert.equal(state().private_replies, 0);
+
+  closeDatabase();
+  await tick(now + minute);
+  assert.deepEqual(requests.offsets(), [0, 506]);
+  assert.equal(requests.messages().length, 4);
+  assert.deepEqual(privateContacts(), []);
+});
+
+test('channel joins send only to known private contacts with both features enabled', async t => {
+  const channelId = chatId - 10;
+  configureWelcome({ groupChatId: channelId });
+  configurePrivate();
+  const channelJoin = (updateId, userId) => membership(updateId, { id: channelId, type: 'channel', userId });
+  const requests = mockTransport(t, [ok([
+    privateMessage(600, { text: 'Hi' }), channelJoin(601, privateChatId + 1), channelJoin(602, privateChatId),
+  ]), ok([channelJoin(603, privateChatId)])], [successfulSend], { chatIds: [privateChatId] });
+
+  await tick();
+  assert.deepEqual(requests.parameters().map(reply => Number(reply.chat_id)), [privateChatId]);
+  assert.ok(requests.parameters()[0].reply_markup.inline_keyboard.flat().some(button => button.callback_data === 'dm:page:0'));
+  assert.equal(state().sent, 1);
+  assert.deepEqual(privateContacts(), [privateChatId]);
+  configurePrivate({ enabled: false });
+  await tick(now + minute);
+  assert.equal(requests.messages().length, 1);
 });

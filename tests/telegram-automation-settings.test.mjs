@@ -13,11 +13,13 @@ const promotionToken = '12345678:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
 const rotatedPromotionToken = '12345678:CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC';
 const chatToken = '87654321:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB';
 const rotatedChatToken = '87654321:DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD';
+const replacementChatToken = '99887766:EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE';
 const channelId = '-1001234567890';
 const groupId = '-1001234567891';
 const otherGroupId = '-1001234567892';
 const promotionMessage = 'New offers from the directory.';
 const welcomeMessage = '欢迎加入群组！';
+const privateStartMessage = '欢迎私聊，请浏览最新优惠。';
 const previousEnv = Object.fromEntries(['APP_URL', 'DATA_DIR', 'SESSION_SECRET'].map(key => [key, process.env[key]]));
 
 function writeFixture(relative, content) {
@@ -49,11 +51,12 @@ const targets = new Map([
 exports.calls = [];
 exports.webhookUrl = '';
 exports.groupAdmin = true;
+exports.channelAdmin = true;
 exports.telegramRequest = async (token, method, parameters = {}) => {
   exports.calls.push({ token, method, parameters });
   if (method === 'getMe') {
     const id = Number(token.split(':')[0]);
-    const username = id === 12345678 ? 'FreeBonus365Bot' : id === 87654321 ? 'FreeBonus365ChatBot' : 'OtherBot';
+    const username = id === 12345678 ? 'FreeBonus365Bot' : [87654321, 99887766].includes(id) ? 'FreeBonus365ChatBot' : 'OtherBot';
     return { ok: true, result: { is_bot: true, id, username } };
   }
   if (method === 'getWebhookInfo') return { ok: true, result: { url: exports.webhookUrl } };
@@ -62,7 +65,9 @@ exports.telegramRequest = async (token, method, parameters = {}) => {
     return { ok: true, result: { id, type: id === ${channelId} ? 'channel' : 'supergroup' } };
   }
   if (method === 'getChatMember') {
-    if (id === ${channelId}) return { ok: true, result: { status: 'administrator', can_post_messages: true } };
+    if (id === ${channelId}) return { ok: true, result: {
+      status: exports.channelAdmin ? 'administrator' : 'member', can_post_messages: token.startsWith('12345678:'),
+    } };
     return { ok: true, result: { status: exports.groupAdmin ? 'administrator' : 'member' } };
   }
   throw new Error('Unexpected Telegram method in settings test');
@@ -83,6 +88,7 @@ test.beforeEach(() => {
   telegram.calls.length = 0;
   telegram.webhookUrl = '';
   telegram.groupAdmin = true;
+  telegram.channelAdmin = true;
   database = getSqlite();
 });
 
@@ -122,11 +128,11 @@ function runtimeRow() {
 }
 
 function recordChatProgress(revision) {
-  database.prepare(`INSERT INTO telegram_welcome_state (id, revision, next_offset, last_polled_at, sent, keyword_replies, last_error)
-    VALUES ('primary', ?, 73, 12345678, 2, 4, 'fixture state')
+  database.prepare(`INSERT INTO telegram_welcome_state (id, revision, next_offset, last_polled_at, sent, keyword_replies, private_replies, last_error)
+    VALUES ('primary', ?, 73, 12345678, 2, 4, 6, 'fixture state')
     ON CONFLICT(id) DO UPDATE SET revision = excluded.revision, next_offset = excluded.next_offset,
       last_polled_at = excluded.last_polled_at, sent = excluded.sent, keyword_replies = excluded.keyword_replies,
-      last_error = excluded.last_error`).run(revision);
+      private_replies = excluded.private_replies, last_error = excluded.last_error`).run(revision);
   return runtimeRow();
 }
 
@@ -134,13 +140,19 @@ const channel = { enabled: true, chatId: channelId };
 const welcome = { enabled: true, chatId: groupId, message: welcomeMessage };
 const keywordChatBot = { token: chatToken, keywordEnabled: true };
 const bothBots = { ...channel, token: promotionToken, promotionMessage, welcome, chatBot: keywordChatBot };
+const privateChat = { privateEnabled: true, privateStartMessage };
+const initialChatStatus = {
+  hasToken: false, keywordEnabled: false, keywordReplies: 0,
+  privateEnabled: false, privateStartMessage: '', privateReplies: 0,
+};
+const keywordChatStatus = { ...initialChatStatus, hasToken: true, keywordEnabled: true };
 
 test('the channel and chat group use different bot identities and settings never expose either token', async () => {
   const initial = await get();
   assert.equal(initial.enabled, false);
   assert.equal(initial.hasToken, false);
   assert.deepEqual(initial.welcome, { enabled: false, chatId: '', message: '', sent: 0, lastPolledAt: null, lastError: '' });
-  assert.deepEqual(initial.chatBot, { hasToken: false, keywordEnabled: false, keywordReplies: 0 });
+  assert.deepEqual(initial.chatBot, initialChatStatus);
 
   const configured = await put({ enabled: true, chatId: 'https://t.me/fixture_channel/', token: promotionToken });
   assert.equal(configured.chatId, channelId);
@@ -156,7 +168,7 @@ test('the channel and chat group use different bot identities and settings never
   assert.equal(both.chatId, channelId);
   assert.equal(both.welcome.chatId, groupId);
   assert.equal(both.welcome.enabled, true);
-  assert.deepEqual(both.chatBot, { hasToken: true, keywordEnabled: true, keywordReplies: 0 });
+  assert.deepEqual(both.chatBot, keywordChatStatus);
   assert.ok(telegram.calls.every(call => call.token === chatToken));
   assert.ok(telegram.calls.some(call => call.method === 'getChat' && call.token === chatToken && call.parameters.chat_id === '@fixture_group'));
   assert.ok(telegram.calls.some(call => call.method === 'getChatMember' && call.token === chatToken && call.parameters.chat_id === Number(groupId)));
@@ -187,10 +199,51 @@ test('keyword replies can be enabled independently of welcome messages and annou
   assert.equal(saved.hasToken, false);
   assert.equal(saved.welcome.enabled, false);
   assert.equal(saved.welcome.chatId, groupId);
-  assert.deepEqual(saved.chatBot, { hasToken: true, keywordEnabled: true, keywordReplies: 0 });
+  assert.deepEqual(saved.chatBot, keywordChatStatus);
   assert.ok(telegram.calls.every(call => call.token === chatToken));
   assert.ok(telegram.calls.some(call => call.method === 'getWebhookInfo'));
   assert.ok(telegram.calls.some(call => call.method === 'getChatMember'));
+});
+
+test('private chat can be enabled without a group, welcome messages, or the promotion bot', async () => {
+  const config = { enabled: false, chatId: '', chatBot: { token: chatToken, keywordEnabled: false, ...privateChat } };
+  telegram.webhookUrl = 'https://existing-webhook.example/private-webhook';
+  const blocked = await put(config, 400);
+  assert.match(blocked.error, /Webhook/);
+  assert.ok(!blocked.error.includes(telegram.webhookUrl));
+  assert.deepEqual((await get()).chatBot, initialChatStatus);
+
+  telegram.webhookUrl = '';
+  telegram.calls.length = 0;
+  const saved = await put(config);
+  assert.equal(saved.hasToken, false);
+  assert.equal(saved.welcome.enabled, false);
+  assert.equal(saved.welcome.chatId, '');
+  assert.deepEqual(saved.chatBot, { ...initialChatStatus, hasToken: true, ...privateChat });
+  assert.ok(telegram.calls.every(call => call.token === chatToken));
+  assert.deepEqual(telegram.calls.map(call => call.method).sort(), ['getMe', 'getWebhookInfo']);
+  assert.ok(settingsRow().private_started_at > 0);
+});
+
+test('channel welcome requires private chat, channel administration and disabled group keyword replies', async () => {
+  const channelWelcome = { ...welcome, chatId: channelId };
+  const config = { enabled: false, chatId: '', welcome: channelWelcome, chatBot: { token: chatToken, keywordEnabled: false, ...privateChat } };
+  const privateOff = await put({ ...config, chatBot: { ...config.chatBot, privateEnabled: false } }, 400);
+  assert.match(privateOff.error, /需要 Telegram 群组|私聊/);
+
+  telegram.channelAdmin = false;
+  const noAdmin = await put(config, 400);
+  assert.match(noAdmin.error, /频道.*管理员/);
+  telegram.channelAdmin = true;
+
+  const saved = await put(config);
+  assert.deepEqual(saved.welcome, { ...channelWelcome, sent: 0, lastPolledAt: null, lastError: '' });
+  assert.deepEqual(saved.chatBot, { ...initialChatStatus, hasToken: true, ...privateChat });
+  const keywordOn = await put({ enabled: false, chatId: '', chatBot: { keywordEnabled: true } }, 400);
+  assert.match(keywordOn.error, /群组/);
+  const disablePrivate = await put({ enabled: false, chatId: '', chatBot: { keywordEnabled: false, privateEnabled: false } }, 400);
+  assert.match(disablePrivate.error, /需要 Telegram 群组|私聊/);
+  assert.deepEqual(await get(), saved);
 });
 
 test('the two token fields reject the other bot and a promotion token cannot enable welcome', async () => {
@@ -225,15 +278,15 @@ test('the keyword bot rejects a channel, missing group administration and a conf
   assert.equal(runtimeRow(), undefined);
 });
 
-test('legacy saves and template edits preserve both chat features and their delivery progress', async () => {
-  await put(bothBots);
+test('legacy saves and template edits preserve chat features and their delivery progress', async () => {
+  await put({ ...bothBots, chatBot: { ...keywordChatBot, ...privateChat } });
   const original = settingsRow();
   const runtime = recordChatProgress(original.welcome_revision);
 
   const legacy = await put(channel);
   assert.equal(legacy.promotionMessage, promotionMessage);
   assert.deepEqual(legacy.welcome, { ...welcome, sent: 2, lastPolledAt: 12345678, lastError: 'fixture state' });
-  assert.deepEqual(legacy.chatBot, { hasToken: true, keywordEnabled: true, keywordReplies: 4 });
+  assert.deepEqual(legacy.chatBot, { ...keywordChatStatus, ...privateChat, keywordReplies: 4, privateReplies: 6 });
   assert.deepEqual(settingsRow(), original);
 
   const updated = await put({
@@ -242,12 +295,14 @@ test('legacy saves and template edits preserve both chat features and their deli
   });
   assert.equal(updated.promotionMessage, 'Updated promotion template.');
   assert.equal(updated.welcome.message, '欢迎来到我们的新群组！');
+  assert.deepEqual(updated.chatBot, legacy.chatBot);
   const saved = settingsRow();
   assert.equal(saved.token_ciphertext, original.token_ciphertext);
   assert.equal(saved.chat_bot_token_ciphertext, original.chat_bot_token_ciphertext);
   assert.equal(saved.welcome_revision, original.welcome_revision);
   assert.equal(saved.welcome_started_at, original.welcome_started_at);
   assert.equal(saved.keyword_started_at, original.keyword_started_at);
+  assert.equal(saved.private_started_at, original.private_started_at);
   assert.deepEqual(runtimeRow(), runtime);
 });
 
@@ -293,10 +348,12 @@ test('moving the same chat bot and toggling either feature preserves its shared 
   assert.equal(runtimeRow().next_offset, progress.next_offset);
 });
 
-test('independent token rotations preserve the other bot and reset progress only for the chat bot', async () => {
-  await put(bothBots);
+test('independent token rotations preserve the other bot and clear contacts only on a different ChatBot identity', async () => {
+  await put({ ...bothBots, chatBot: { ...keywordChatBot, ...privateChat } });
   const first = settingsRow();
   const runtime = recordChatProgress(first.welcome_revision);
+  database.prepare('INSERT INTO telegram_private_contacts (user_id) VALUES (?)').run(14321098765);
+  const contacts = () => database.prepare('SELECT user_id FROM telegram_private_contacts ORDER BY user_id').all().map(row => row.user_id);
 
   await put({ ...channel, token: rotatedPromotionToken });
   const updatedPromotion = settingsRow();
@@ -305,7 +362,9 @@ test('independent token rotations preserve the other bot and reset progress only
   assert.equal(updatedPromotion.welcome_revision, first.welcome_revision);
   assert.equal(updatedPromotion.welcome_started_at, first.welcome_started_at);
   assert.equal(updatedPromotion.keyword_started_at, first.keyword_started_at);
+  assert.equal(updatedPromotion.private_started_at, first.private_started_at);
   assert.deepEqual(runtimeRow(), runtime);
+  assert.deepEqual(contacts(), [14321098765]);
 
   const updated = await put({ ...channel, chatBot: { token: rotatedChatToken, keywordEnabled: true } });
   const updatedChat = settingsRow();
@@ -314,6 +373,18 @@ test('independent token rotations preserve the other bot and reset progress only
   assert.notEqual(updatedChat.welcome_revision, updatedPromotion.welcome_revision);
   assert.equal(updated.welcome.chatId, groupId);
   assert.equal(updated.welcome.sent, 0);
-  assert.equal(updated.chatBot.keywordReplies, 0);
+  assert.deepEqual(updated.chatBot, { ...keywordChatStatus, ...privateChat });
+  assert.ok(!JSON.stringify(updated).includes('14321098765'));
   assert.equal(runtimeRow(), undefined);
+  assert.deepEqual(contacts(), [14321098765]);
+
+  recordChatProgress(updatedChat.welcome_revision);
+  const replacement = await put({ ...channel, chatBot: { token: replacementChatToken, keywordEnabled: true } });
+  const replacedChat = settingsRow();
+  assert.notEqual(replacedChat.chat_bot_token_ciphertext, updatedChat.chat_bot_token_ciphertext);
+  assert.equal(replacedChat.token_ciphertext, updatedPromotion.token_ciphertext);
+  assert.notEqual(replacedChat.welcome_revision, updatedChat.welcome_revision);
+  assert.deepEqual(replacement.chatBot, { ...keywordChatStatus, ...privateChat });
+  assert.equal(runtimeRow(), undefined);
+  assert.deepEqual(contacts(), []);
 });

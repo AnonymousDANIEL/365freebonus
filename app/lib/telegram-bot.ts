@@ -54,7 +54,7 @@ function multipartPayload(parameters: Record<string, unknown>, upload: TelegramU
   return { body: Buffer.concat(parts), contentType: `multipart/form-data; boundary=${boundary}` };
 }
 
-function requestTelegram<Result>(token: string, method: TelegramMethod | "getUpdates", parameters: Record<string, unknown>, parseResult: (value: unknown) => Result | null, upload?: TelegramUpload): Promise<TelegramReply<Result>> {
+function requestTelegram<Result>(token: string, method: TelegramMethod | "getUpdates" | "answerCallbackQuery", parameters: Record<string, unknown>, parseResult: (value: unknown) => Result | null, upload?: TelegramUpload): Promise<TelegramReply<Result>> {
   // Telegram requires the token in the request path. Use Node HTTPS directly so
   // Next's fetch tracing never sees that URL, and keep raw replies private.
   return new Promise(resolve => {
@@ -92,5 +92,10 @@ export function telegramRequest(token: string, method: TelegramMethod, parameter
 }
 
 export function telegramUpdates(token: string, offset: number) {
-  return requestTelegram(token, "getUpdates", { offset, timeout: 10, limit: 10, allowed_updates: ["chat_member", "message"] }, asUpdates);
+  return requestTelegram(token, "getUpdates", { offset, timeout: 10, limit: 10, allowed_updates: ["chat_member", "message", "callback_query"] }, asUpdates);
+}
+
+export async function answerTelegramCallback(token: string, queryId: string): Promise<boolean> {
+  const reply = await requestTelegram(token, "answerCallbackQuery", { callback_query_id: queryId }, value => value === true ? true : null);
+  return reply?.ok === true;
 }

@@ -12,7 +12,7 @@ export function getDataDirectory(): string {
 function migrate(db: DatabaseSync) {
   if (migrated.has(db)) return;
   const readVersion = () => (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
-  if (readVersion() < 8) {
+  if (readVersion() < 9) {
     db.exec("BEGIN IMMEDIATE");
     try {
       // Read again inside the write lock, so concurrent process starts cannot
@@ -121,6 +121,14 @@ function migrate(db: DatabaseSync) {
         UPDATE telegram_promotion_settings SET welcome_enabled = 0, welcome_started_at = 0, welcome_revision = '';
         DELETE FROM telegram_welcome_state;
         PRAGMA user_version = 8;
+      `);
+      if (version < 9) db.exec(`
+        ALTER TABLE telegram_promotion_settings ADD COLUMN private_enabled INTEGER NOT NULL DEFAULT 0 CHECK (private_enabled IN (0, 1));
+        ALTER TABLE telegram_promotion_settings ADD COLUMN private_started_at INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE telegram_promotion_settings ADD COLUMN private_start_message TEXT NOT NULL DEFAULT '';
+        ALTER TABLE telegram_welcome_state ADD COLUMN private_replies INTEGER NOT NULL DEFAULT 0;
+        CREATE TABLE telegram_private_contacts (user_id INTEGER PRIMARY KEY);
+        PRAGMA user_version = 9;
       `);
       db.exec("COMMIT");
     } catch (error) { db.exec("ROLLBACK"); throw error; }

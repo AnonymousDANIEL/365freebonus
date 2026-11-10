@@ -18,6 +18,8 @@ const configInput = z.object({
   chatBot: z.object({
     token: z.string().trim().max(160).optional(),
     keywordEnabled: z.boolean(),
+    privateEnabled: z.boolean().optional(),
+    privateStartMessage: z.string().trim().max(2_000).optional(),
   }).strict().optional(),
 }).strict();
 

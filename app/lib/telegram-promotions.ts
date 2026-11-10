@@ -23,6 +23,9 @@ type StoredSettings = {
   welcome_revision: string;
   keyword_enabled: number;
   keyword_started_at: number;
+  private_enabled: number;
+  private_started_at: number;
+  private_start_message: string;
 };
 type SettingsInput = {
   enabled: boolean;
@@ -30,7 +33,7 @@ type SettingsInput = {
   token?: string;
   promotionMessage?: string;
   welcome?: { enabled: boolean; chatId: string; message: string };
-  chatBot?: { token?: string; keywordEnabled: boolean };
+  chatBot?: { token?: string; keywordEnabled: boolean; privateEnabled?: boolean; privateStartMessage?: string };
 };
 type DeliveryStatus = "pending" | "sending" | "sent" | "failed" | "unknown" | "skipped";
 type Delivery = {
@@ -92,12 +95,14 @@ function decryptToken(stored: string) {
 
 function storedSettings(db: DatabaseSync): StoredSettings {
   return db.prepare(`SELECT enabled, chat_id, token_ciphertext, chat_bot_token_ciphertext, promotion_message, welcome_enabled,
-    welcome_chat_id, welcome_message, welcome_started_at, welcome_revision, keyword_enabled, keyword_started_at
+    welcome_chat_id, welcome_message, welcome_started_at, welcome_revision, keyword_enabled, keyword_started_at,
+    private_enabled, private_started_at, private_start_message
     FROM telegram_promotion_settings WHERE id = 'primary'`).get() as StoredSettings | undefined
     ?? {
       enabled: 0, chat_id: "", token_ciphertext: "", chat_bot_token_ciphertext: "", promotion_message: "",
       welcome_enabled: 0, welcome_chat_id: "", welcome_message: "", welcome_started_at: 0, welcome_revision: "",
       keyword_enabled: 0, keyword_started_at: 0,
+      private_enabled: 0, private_started_at: 0, private_start_message: "",
     };
 }
 
@@ -150,13 +155,23 @@ async function verifyBot(token: string, expectedUsername: string) {
   return bot.result.id;
 }
 
-async function verifyChat(token: string, chatId: string, username: string): Promise<string> {
+async function verifyChatBotUpdates(token: string) {
+  const webhook = await telegramRequest(token, "getWebhookInfo");
+  if (!webhook?.ok || typeof webhook.result.url !== "string") {
+    throw new TelegramSettingsError("暂时无法检查 Telegram 机器人的接收方式，请稍后再试。", 503);
+  }
+  if (webhook.result.url) {
+    throw new TelegramSettingsError("ChatBot 已连接到其他 Webhook，请先解除该连接再启用自动回复。");
+  }
+}
+
+async function verifyChat(token: string, chatId: string, username: string, allowChannelWelcome = false): Promise<string> {
   const isChatBot = username === CHAT_BOT;
   const target = validChatId(chatId) ? Number(chatId) : chatId;
-  const [botId, chat, webhook] = await Promise.all([
+  const [botId, chat] = await Promise.all([
     verifyBot(token, username),
     telegramRequest(token, "getChat", { chat_id: target }),
-    isChatBot ? telegramRequest(token, "getWebhookInfo") : null,
+    isChatBot ? verifyChatBotUpdates(token) : null,
   ]);
   if (!chat || (!chat.ok && (chat.code >= 500 || chat.code === 429))) {
     throw new TelegramSettingsError("暂时无法连接 Telegram 验证机器人和发送目标，请稍后再试。", 503);
@@ -165,8 +180,8 @@ async function verifyChat(token: string, chatId: string, username: string): Prom
     throw new TelegramSettingsError("Telegram 找不到这个发送目标。请核对公开链接或 Chat ID，并确认机器人已加入目标群组或频道。");
   }
   const chatType = chat.result.type;
-  if (isChatBot && chatType !== "group" && chatType !== "supergroup") {
-    throw new TelegramSettingsError("入群欢迎和关键词回复需要 Telegram 群组。请填写群组的 Chat ID 或公开链接。");
+  if (isChatBot && chatType !== "group" && chatType !== "supergroup" && !(allowChannelWelcome && chatType === "channel")) {
+    throw new TelegramSettingsError("群内关键词回复需要 Telegram 群组。频道欢迎请选择 1 对 1 私聊，并关闭群内关键词回复。");
   }
   if (!["group", "supergroup", "channel"].includes(String(chatType))) {
     throw new TelegramSettingsError("公告只能发送到 Telegram 群组或频道。个人帐号和机器人不能作为发送目标。");
@@ -180,13 +195,7 @@ async function verifyChat(token: string, chatId: string, username: string): Prom
   }
   if (isChatBot) {
     if (!member.ok || !["creator", "administrator"].includes(String(member.result.status))) {
-      throw new TelegramSettingsError(`请先将 @${CHAT_BOT} 设为目标群组的管理员。`);
-    }
-    if (!webhook?.ok || typeof webhook.result.url !== "string") {
-      throw new TelegramSettingsError("暂时无法检查 Telegram 机器人的接收方式，请稍后再试。", 503);
-    }
-    if (webhook.result.url) {
-      throw new TelegramSettingsError("ChatBot 已连接到其他 Webhook，请先解除该连接再启用群内自动回复。");
+      throw new TelegramSettingsError(`请先将 @${CHAT_BOT} 设为目标${chatType === "channel" ? "频道" : "群组"}的管理员。`);
     }
     return String(chat.result.id);
   }
@@ -213,9 +222,9 @@ export function telegramPromotionStatus() {
   const rows = db.prepare("SELECT status, COUNT(*) AS count FROM telegram_promotion_outbox GROUP BY status").all() as { status: DeliveryStatus; count: number }[];
   for (const row of rows) counts[row.status] = row.count;
   const recent = db.prepare("SELECT last_error FROM telegram_promotion_outbox WHERE last_error <> '' ORDER BY next_attempt_at DESC LIMIT 1").get() as { last_error: string } | undefined;
-  const welcome = db.prepare("SELECT sent, keyword_replies, last_polled_at, last_error FROM telegram_welcome_state WHERE id = 'primary' AND revision = ?")
-    .get(settings.welcome_revision) as { sent: number; keyword_replies: number; last_polled_at: number; last_error: string } | undefined;
-  const chatEnabled = settings.welcome_enabled || settings.keyword_enabled;
+  const welcome = db.prepare("SELECT sent, keyword_replies, private_replies, last_polled_at, last_error FROM telegram_welcome_state WHERE id = 'primary' AND revision = ?")
+    .get(settings.welcome_revision) as { sent: number; keyword_replies: number; private_replies: number; last_polled_at: number; last_error: string } | undefined;
+  const chatEnabled = settings.welcome_enabled || settings.keyword_enabled || settings.private_enabled;
   let lastError = recent?.last_error || "";
   if (settings.enabled && !decryptToken(settings.token_ciphertext)) lastError = "无法读取已保存的机器人 Token，请重新填写。";
   else if (settings.enabled && !publicOrigin()) lastError = "服务器尚未配置公开网站地址，无法生成公告链接。";
@@ -225,6 +234,9 @@ export function telegramPromotionStatus() {
     chatBot: {
       hasToken: Boolean(settings.chat_bot_token_ciphertext), keywordEnabled: settings.keyword_enabled === 1,
       keywordReplies: welcome?.keyword_replies ?? 0,
+      privateEnabled: settings.private_enabled === 1,
+      privateStartMessage: settings.private_start_message,
+      privateReplies: welcome?.private_replies ?? 0,
     },
     welcome: {
       enabled: settings.welcome_enabled === 1, chatId: settings.welcome_chat_id, message: settings.welcome_message,
@@ -248,20 +260,24 @@ export async function saveTelegramPromotionSettings(input: SettingsInput) {
   const chatTokenChanged = Boolean(newChatToken && newChatToken !== previousChatToken);
   const token = newToken || previousToken;
   const chatToken = newChatToken || previousChatToken;
-  if (token && chatToken && token.split(":", 1)[0] === chatToken.split(":", 1)[0]) {
+  const chatBotId = chatToken.split(":", 1)[0];
+  if (token && chatToken && token.split(":", 1)[0] === chatBotId) {
     throw new TelegramSettingsError("品牌通知和 ChatBot 需要分别填写两个不同机器人的 Token。");
   }
   let chatId = normalizeChatTarget(input.chatId);
   const promotionMessage = input.promotionMessage?.trim() ?? previous.promotion_message;
   const welcomeEnabled = input.welcome?.enabled ?? (previous.welcome_enabled === 1);
   const keywordEnabled = input.chatBot?.keywordEnabled ?? (previous.keyword_enabled === 1);
-  const chatEnabled = welcomeEnabled || keywordEnabled;
+  const privateEnabled = input.chatBot?.privateEnabled ?? (previous.private_enabled === 1);
+  const privateStartMessage = input.chatBot?.privateStartMessage?.trim() ?? previous.private_start_message;
+  const targetEnabled = welcomeEnabled || keywordEnabled;
+  const chatEnabled = targetEnabled || privateEnabled;
   const welcomeMessage = input.welcome?.message.trim() ?? previous.welcome_message;
   let welcomeChatId = input.welcome ? normalizeChatTarget(input.welcome.chatId) : previous.welcome_chat_id;
   if (input.enabled && !token) throw new TelegramSettingsError(`请填写 @${PROMOTION_BOT} 的 Token。`);
   if (chatEnabled && !chatToken) throw new TelegramSettingsError(`请填写 @${CHAT_BOT} 的 Token。`);
-  if (chatEnabled && !welcomeChatId) {
-    throw new TelegramSettingsError("请填写 ChatBot 使用的 Telegram 群组。");
+  if (targetEnabled && !welcomeChatId) {
+    throw new TelegramSettingsError("请填写 ChatBot 的欢迎目标或关键词回复群组。");
   }
   if (welcomeEnabled && !welcomeMessage) {
     throw new TelegramSettingsError("请输入欢迎消息内容。");
@@ -270,12 +286,20 @@ export async function saveTelegramPromotionSettings(input: SettingsInput) {
     if (!chatId) throw new TelegramSettingsError("请填写 Telegram 群组或频道的 Chat ID、@用户名或公开链接。");
     if (!publicOrigin()) throw new TelegramSettingsError("服务器尚未配置公开网站地址，无法生成公告链接。", 503);
   }
-  const previouslyChatEnabled = previous.welcome_enabled || previous.keyword_enabled;
+  const previouslyTargetEnabled = previous.welcome_enabled || previous.keyword_enabled;
+  const privateModeChanged = privateEnabled !== (previous.private_enabled === 1);
+  const channelWelcome = welcomeEnabled && privateEnabled && !keywordEnabled;
+  const previouslyChannelWelcome = previous.welcome_enabled === 1 && previous.private_enabled === 1 && previous.keyword_enabled === 0;
+  const validateTarget = targetEnabled && (!previouslyTargetEnabled || welcomeChatId !== previous.welcome_chat_id
+    || chatTokenChanged || channelWelcome !== previouslyChannelWelcome);
+  const chatVerification = validateTarget ? verifyChat(chatToken, welcomeChatId, CHAT_BOT, channelWelcome)
+    : privateEnabled && (privateModeChanged || chatTokenChanged)
+      ? Promise.all([verifyBot(chatToken, CHAT_BOT), verifyChatBotUpdates(chatToken)])
+      : chatTokenChanged ? verifyBot(chatToken, CHAT_BOT) : null;
   const [verifiedChat, verifiedChatBotGroup] = await Promise.all([
     input.enabled && (!previous.enabled || chatId !== previous.chat_id || tokenChanged)
       ? verifyChat(token, chatId, PROMOTION_BOT) : tokenChanged ? verifyBot(token, PROMOTION_BOT) : null,
-    chatEnabled && (!previouslyChatEnabled || welcomeChatId !== previous.welcome_chat_id || chatTokenChanged)
-      ? verifyChat(chatToken, welcomeChatId, CHAT_BOT) : chatTokenChanged ? verifyBot(chatToken, CHAT_BOT) : null,
+    chatVerification,
   ]);
   if (typeof verifiedChat === "string") chatId = verifiedChat;
   if (typeof verifiedChatBotGroup === "string") welcomeChatId = verifiedChatBotGroup;
@@ -295,25 +319,32 @@ export async function saveTelegramPromotionSettings(input: SettingsInput) {
         )`).run(Date.now());
     }
     // Keep the Telegram cursor for the same bot across group edits and toggles.
-    if (chatTokenChanged) db.prepare("DELETE FROM telegram_welcome_state WHERE id = 'primary'").run();
+    if (chatTokenChanged) {
+      db.prepare("DELETE FROM telegram_welcome_state WHERE id = 'primary'").run();
+      if (chatBotId !== previousChatToken.split(":", 1)[0]) db.exec("DELETE FROM telegram_private_contacts");
+    }
     const now = Math.floor(Date.now() / 1_000);
-    const welcomeStartedAt = welcomeEnabled ? (!current.welcome_enabled || groupChanged || chatTokenChanged ? now : current.welcome_started_at) : 0;
+    const welcomeStartedAt = welcomeEnabled ? (!current.welcome_enabled || groupChanged || chatTokenChanged || privateModeChanged ? now : current.welcome_started_at) : 0;
     const keywordStartedAt = keywordEnabled ? (!current.keyword_enabled || groupChanged || chatTokenChanged ? now : current.keyword_started_at) : 0;
+    const privateStartedAt = privateEnabled ? (!current.private_enabled || chatTokenChanged ? now : current.private_started_at) : 0;
     let welcomeRevision = chatTokenChanged ? "" : current.welcome_revision;
     if (chatEnabled && !welcomeRevision) welcomeRevision = randomUUID();
     db.prepare(`INSERT INTO telegram_promotion_settings (
       id, enabled, chat_id, token_ciphertext, promotion_message, welcome_enabled,
       welcome_chat_id, welcome_message, welcome_started_at, welcome_revision,
-      chat_bot_token_ciphertext, keyword_enabled, keyword_started_at
-    ) VALUES ('primary', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      chat_bot_token_ciphertext, keyword_enabled, keyword_started_at, private_enabled, private_started_at, private_start_message
+    ) VALUES ('primary', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET enabled = excluded.enabled, chat_id = excluded.chat_id,
       token_ciphertext = excluded.token_ciphertext, promotion_message = excluded.promotion_message,
       welcome_enabled = excluded.welcome_enabled, welcome_chat_id = excluded.welcome_chat_id,
       welcome_message = excluded.welcome_message, welcome_started_at = excluded.welcome_started_at,
       welcome_revision = excluded.welcome_revision, chat_bot_token_ciphertext = excluded.chat_bot_token_ciphertext,
-      keyword_enabled = excluded.keyword_enabled, keyword_started_at = excluded.keyword_started_at`)
+      keyword_enabled = excluded.keyword_enabled, keyword_started_at = excluded.keyword_started_at,
+      private_enabled = excluded.private_enabled, private_started_at = excluded.private_started_at,
+      private_start_message = excluded.private_start_message`)
       .run(Number(input.enabled), chatId, ciphertext, promotionMessage, Number(welcomeEnabled),
-        welcomeChatId, welcomeMessage, welcomeStartedAt, welcomeRevision, chatCiphertext, Number(keywordEnabled), keywordStartedAt);
+        welcomeChatId, welcomeMessage, welcomeStartedAt, welcomeRevision, chatCiphertext, Number(keywordEnabled), keywordStartedAt,
+        Number(privateEnabled), privateStartedAt, privateStartMessage);
   });
   return telegramPromotionStatus();
 }

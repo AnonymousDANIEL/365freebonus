@@ -165,6 +165,8 @@
   color: var(--cms-muted);
 }
 .cms-shell .cms-telegram-keywords { margin-top: 20px; }
+.cms-shell .cms-telegram-start a { color: var(--cms-green); overflow-wrap: anywhere; text-decoration: underline; }
+.cms-shell .cms-telegram-start p { max-width: none; margin: 5px 0 0; }
 .cms-shell .cms-telegram-keywords h3 { margin: 0; font-size: 13px; font-weight: 600; }
 .cms-shell .cms-telegram-keyword-list { margin: 0; padding: 0; list-style: none; }
 .cms-shell .cms-telegram-keyword-list > li {
