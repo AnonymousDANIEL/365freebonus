@@ -1,14 +1,19 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { ArrowUpRight, Check, ChevronRight, CircleHelp, ExternalLink, Eye, FileText, ImageIcon, LayoutGrid, LoaderCircle, Plus, Search, Settings2, ShieldCheck, Sparkles, Trash2, Upload, UserRound, X, Pencil, Globe, LogOut, Orbit, Sun, Gamepad2, Moon, Triangle } from "lucide-react";
+import { ArrowUpRight, Check, ChevronRight, CircleHelp, ExternalLink, Eye, FileText, ImageIcon, LayoutGrid, LoaderCircle, Plus, Search, Send, Settings2, ShieldCheck, Sparkles, Trash2, Upload, UserRound, X, Pencil, Globe, LogOut, Orbit, Sun, Gamepad2, Moon, Triangle } from "lucide-react";
 import { DEFAULT_PROMOTION_DAYS, effectiveBrandCategory, isBrandPublished, isSafeSocialUrl, isValidPromotionStart, type Brand, type SiteSettings } from "../lib/directory";
 import { isSafeImageUrl, isUploadedImageUrl } from "../lib/image-url";
 import { AdminThemeToggle, useAdminTheme } from "../components/AdminTheme";
 import TelegramGroupSettings from "./TelegramGroupSettings";
 import "./social-contacts-admin.css";
 
-type Section = "brands" | "settings";
+const sections = {
+  brands: { title: "品牌管理", description: "在一个地方，管理每个值得被发现的品牌。" },
+  settings: { title: "网站设置", description: "让首页文字、站名和公告，都保持你的风格。" },
+  telegram: { title: "Telegram 通知", description: "管理品牌更新的自动通知，查看发送状态。" },
+};
+type Section = keyof typeof sections;
 type ImageField = "coverImageUrl" | "avatarImageUrl";
 type UploadTarget = ImageField | "brand";
 const uploadTypes = ["image/jpeg", "image/png", "image/gif", "image/webp"];
@@ -151,6 +156,7 @@ function imageUploadError(file: File): string {
 export default function AdminClient({ displayName, signInPath }: { displayName: string; signInPath: string }) {
   const { theme, setTheme } = useAdminTheme();
   const [section, setSection] = useState<Section>("brands");
+  const { title, description } = sections[section];
   const [brands, setBrands] = useState<Brand[]>([]);
   const [settings, setSettings] = useState<SiteSettings | null>(null);
   const [query, setQuery] = useState("");
@@ -318,8 +324,9 @@ export default function AdminClient({ displayName, signInPath }: { displayName: 
       <a href="/" className="cms-logo"><span className="cms-logo-symbol">✳</span>{settings?.name || "365freebonus"}<span className="cms-logo-dot">.</span></a>
       <span className="cms-workspace-label">CONTENT WORKSPACE</span>
       <nav aria-label="后台导航">
-        <button className={section === "brands" ? "active" : ""} onClick={() => setSection("brands")}><LayoutGrid size={19} />品牌管理<span>{brands.length}</span></button>
-        <button className={section === "settings" ? "active" : ""} onClick={() => setSection("settings")}><Settings2 size={19} />网站设置</button>
+        <button className={section === "brands" ? "active" : ""} aria-current={section === "brands" ? "page" : undefined} onClick={() => setSection("brands")}><LayoutGrid size={19} />{sections.brands.title}<span>{brands.length}</span></button>
+        <button className={section === "settings" ? "active" : ""} aria-current={section === "settings" ? "page" : undefined} onClick={() => setSection("settings")}><Settings2 size={19} />{sections.settings.title}</button>
+        <button className={section === "telegram" ? "active" : ""} aria-current={section === "telegram" ? "page" : undefined} title={sections.telegram.title} onClick={() => setSection("telegram")}><Send size={19} />{sections.telegram.title}</button>
         <a href="/" target="_blank" rel="noopener"><Globe size={19} />查看前台<ArrowUpRight size={16} className="cms-nav-arrow" /></a>
       </nav>
       <div className="cms-side-note"><ShieldCheck size={21} /><strong>安全管理空间</strong><p>通过管理员登入保护。品牌与设置保存后即时生效。</p></div>
@@ -327,12 +334,13 @@ export default function AdminClient({ displayName, signInPath }: { displayName: 
     </aside>
 
     <main className="cms-main">
-      <header className="cms-topbar"><div className="cms-breadcrumb"><span className="cms-breadcrumb-parent">工作空间</span><ChevronRight size={14} /><span>{section === "brands" ? "品牌管理" : "网站设置"}</span></div><div className="cms-topbar-actions"><AdminThemeToggle theme={theme} onChange={setTheme} /><a className="cms-preview-link" href="/" target="_blank" rel="noopener">预览网站<ExternalLink size={14} /></a></div></header>
+      <header className="cms-topbar"><div className="cms-breadcrumb"><span className="cms-breadcrumb-parent">工作空间</span><ChevronRight size={14} /><span>{title}</span></div><div className="cms-topbar-actions"><AdminThemeToggle theme={theme} onChange={setTheme} /><a className="cms-preview-link" href="/" target="_blank" rel="noopener">预览网站<ExternalLink size={14} /></a></div></header>
       <div className="cms-content">
-        <div className="cms-page-heading"><div><span className="cms-eyebrow">YOUR DIRECTORY, YOUR WAY</span><h1>{section === "brands" ? "品牌管理" : "网站设置"}<span>↗</span></h1><p>{section === "brands" ? "在一个地方，管理每个值得被发现的品牌。" : "让首页文字、站名和公告，都保持你的风格。"}</p></div>{section === "brands" && <button className="cms-primary" onClick={() => openEditor()} disabled={loading || !loaded || busy}><Plus size={18} />添加品牌</button>}</div>
-        {error && !editing && !deleting && <div className="cms-alert cms-error" role="alert"><span>{error}</span>{sessionExpired && <Reauthenticate signInPath={signInPath} />}<button onClick={() => setError("")} aria-label="关闭错误"><X size={17} /></button></div>}
-        {success && <div className="cms-alert cms-success" role="status"><Check size={18} /><span>{success}</span></div>}
-        {loading ? <div className="cms-loading"><LoaderCircle size={27} /><p>正在加载你的内容…</p></div> : !loaded ? <div className="cms-empty"><CircleHelp size={29} /><h3>暂时无法加载内容</h3><p>请重新加载，确认服务器中的最新资料。</p><button className="cms-secondary" onClick={load}>重新加载</button></div> : section === "brands" ? <>
+        <div className="cms-page-heading"><div><span className="cms-eyebrow">YOUR DIRECTORY, YOUR WAY</span><h1>{title}<span>↗</span></h1><p>{description}</p></div>{section === "brands" && <button className="cms-primary" onClick={() => openEditor()} disabled={loading || !loaded || busy}><Plus size={18} />添加品牌</button>}</div>
+        {section !== "telegram" && error && !editing && !deleting && <div className="cms-alert cms-error" role="alert"><span>{error}</span>{sessionExpired && <Reauthenticate signInPath={signInPath} />}<button onClick={() => setError("")} aria-label="关闭错误"><X size={17} /></button></div>}
+        {section !== "telegram" && success && <div className="cms-alert cms-success" role="status"><Check size={18} /><span>{success}</span></div>}
+        {section === "telegram" ? <TelegramGroupSettings request={request} signInPath={signInPath} /> :
+        loading ? <div className="cms-loading"><LoaderCircle size={27} /><p>正在加载你的内容…</p></div> : !loaded ? <div className="cms-empty"><CircleHelp size={29} /><h3>暂时无法加载内容</h3><p>请重新加载，确认服务器中的最新资料。</p><button className="cms-secondary" onClick={load}>重新加载</button></div> : section === "brands" ? <>
           <section className="cms-stats" aria-label="品牌统计"><div><span>全部品牌<LayoutGrid size={18} /></span><strong>{brands.length.toString().padStart(2, "0")}</strong><small>完整内容目录</small></div><div><span>已上架<Eye size={18} /></span><strong>{publishedBrands.length.toString().padStart(2, "0")}<i /></strong><small>{scheduledCount ? `${scheduledCount} 个品牌待上线` : "显示在前台的品牌"}</small></div><div><span>首页精选<Sparkles size={18} /></span><strong>{publishedBrands.filter(brand => brand.featured).length.toString().padStart(2, "0")}</strong><small>已上架的精选品牌</small></div><div><span>草稿<FileText size={18} /></span><strong>{draftCount.toString().padStart(2, "0")}</strong><small>准备好后再公开</small></div></section>
           <section className="cms-brand-panel"><div className="cms-panel-tools"><div className="cms-tabs" role="group" aria-label="筛选状态">{([["all", "全部品牌"], ["published", "已上架"], ["scheduled", "待上线"], ["draft", "草稿"]] as const).map(([key, label]) => <button key={key} className={filter === key ? "active" : ""} onClick={() => setFilter(key)}>{label}</button>)}</div><label className="cms-search"><Search size={17} /><input aria-label="搜索品牌" placeholder="搜索品牌名称…" value={query} onChange={event => setQuery(event.target.value)} /></label></div>
           <div className="cms-table-scroll"><table className="cms-table"><thead><tr><th>品牌名称</th><th>分类</th><th>状态</th><th>精选</th><th>排序</th><th className="cms-actions-heading">操作</th></tr></thead><tbody>{visibleBrands.map(brand => {
@@ -347,7 +355,7 @@ export default function AdminClient({ displayName, signInPath }: { displayName: 
           {visibleBrands.length === 0 && <div className="cms-empty"><Search size={29} /><h3>{query || filter !== "all" ? "没有找到符合条件的品牌" : "你的第一个品牌，从这里开始"}</h3><p>{query || filter !== "all" ? "试试其他关键词或状态。" : "添加品牌，填写内容，再上架到前台。"}</p>{!query && filter === "all" && <button className="cms-primary" onClick={() => openEditor()}><Plus size={16} />添加品牌</button>}</div>}
           <div className="cms-panel-footer"><span>显示 {visibleBrands.length} / {brands.length} 个品牌</span><small><CircleHelp size={14} />排序数字越小，显示越靠前</small></div></section>
           <p className="cms-footnote">内容由你管理 · 演示品牌仅用于展示页面效果</p>
-        </> : settings ? <><form className="cms-settings-form" onSubmit={saveSettings}><fieldset disabled={busy}><section className="cms-settings-panel"><div><h2>品牌与首页</h2><p>这里的内容会显示在前台首页。</p></div><div className="cms-settings-fields"><label>网站名称<input required maxLength={40} value={settings.name} onChange={event => setSettings({ ...settings, name: event.target.value })} /></label><label>首页主标题<textarea required rows={3} maxLength={120} value={settings.headline} onChange={event => setSettings({ ...settings, headline: event.target.value })} /><small>每行显示一段标题，换行后会依次播放标题动画。</small></label><label>首页介绍<textarea rows={4} maxLength={600} value={settings.description} onChange={event => setSettings({ ...settings, description: event.target.value })} /></label></div></section>
+        </> : settings ? <form className="cms-settings-form" onSubmit={saveSettings}><fieldset disabled={busy}><section className="cms-settings-panel"><div><h2>品牌与首页</h2><p>这里的内容会显示在前台首页。</p></div><div className="cms-settings-fields"><label>网站名称<input required maxLength={40} value={settings.name} onChange={event => setSettings({ ...settings, name: event.target.value })} /></label><label>首页主标题<textarea required rows={3} maxLength={120} value={settings.headline} onChange={event => setSettings({ ...settings, headline: event.target.value })} /><small>每行显示一段标题，换行后会依次播放标题动画。</small></label><label>首页介绍<textarea rows={4} maxLength={600} value={settings.description} onChange={event => setSettings({ ...settings, description: event.target.value })} /></label></div></section>
           <section className="cms-settings-panel"><div><h2>首页封面与头像</h2><p>上传图片或输入图片地址。保存后更新前台，留空则使用默认图片。</p></div><div className="cms-settings-fields cms-image-fields">
             {imageFields.map(({ key, label, detail }) => <SettingsImageField key={key} field={key} label={label} detail={detail} value={settings[key] || ""} filename={imageNames[key]} uploading={uploading === key} onChange={value => changeImage(key, value)} onUpload={file => uploadPhoto(key, file)} />)}
             <p className="cms-image-form-hint">支持 JPG、PNG、GIF、WebP，每张最多 5 MB。</p>
@@ -392,7 +400,7 @@ export default function AdminClient({ displayName, signInPath }: { displayName: 
               })}
             </div>
           </section>
-          <div className="cms-settings-save"><span>保存后，刷新前台即可查看最新内容。</span><button disabled={busy} className="cms-primary" type="submit">{busy ? <LoaderCircle size={17} className="cms-spin" /> : <Check size={17} />}保存设置</button></div></fieldset></form><TelegramGroupSettings request={request} signInPath={signInPath} /></> : <div className="cms-empty"><p>暂时无法加载网站设置。</p><button className="cms-secondary" onClick={load}>重新加载</button></div>}
+          <div className="cms-settings-save"><span>保存后，刷新前台即可查看最新内容。</span><button disabled={busy} className="cms-primary" type="submit">{busy ? <LoaderCircle size={17} className="cms-spin" /> : <Check size={17} />}保存设置</button></div></fieldset></form> : <div className="cms-empty"><p>暂时无法加载网站设置。</p><button className="cms-secondary" onClick={load}>重新加载</button></div>}
       </div>
     </main>
 

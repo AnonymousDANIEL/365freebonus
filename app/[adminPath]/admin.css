@@ -99,7 +99,6 @@
   line-height: 1.7;
 }
 .cms-shell .cms-promotion-note { margin: 0; }
-.cms-telegram-settings { margin-top: 28px; }
 .cms-shell .cms-telegram-settings .cms-alert { margin-bottom: 0; }
 .cms-shell .cms-telegram-status {
   display: inline-block;
@@ -166,6 +165,10 @@
   color: var(--cms-muted);
 }
 @media (max-width: 600px) {
+  .cms-sidebar {
+    flex-wrap: wrap;
+    row-gap: 8px;
+  }
   .cms-telegram-settings .cms-settings-save {
     align-items: flex-start;
     flex-direction: column;
