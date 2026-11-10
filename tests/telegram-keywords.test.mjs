@@ -107,8 +107,12 @@ test('keyword operations require an admin session and mutations validate origin 
   await request('POST', ruleInput, 403, 'https://other.example');
   for (const invalid of [
     { keyword: '   ' }, { keyword: 'a'.repeat(121) }, { response: ' ' },
-    { response: 'a'.repeat(2_001) }, { matchMode: 'prefix' },
+    { response: 'a'.repeat(2_001) }, { matchMode: 'prefix' }, { unknown: true },
   ]) await request('POST', { ...ruleInput, ...invalid }, 400);
-  await request('DELETE', { id: 1.2 }, 400);
+  for (const id of [0, -1, 1.2, '1', Number.MAX_SAFE_INTEGER + 1]) {
+    await request('DELETE', { id }, 400);
+    await request('PUT', { ...ruleInput, id }, 400);
+  }
+  await request('DELETE', { id: 1, unknown: true }, 400);
   assert.deepEqual(await request('GET', undefined, 200), { rules: [] });
 });

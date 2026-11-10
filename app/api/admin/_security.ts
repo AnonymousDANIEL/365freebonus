@@ -30,9 +30,30 @@ export function apiError(error: unknown) {
 }
 export function isUniqueConstraint(error: unknown) { return String(error).toUpperCase().includes("UNIQUE CONSTRAINT"); }
 export async function jsonBody(request: Request) {
+  const maxBytes = 30_000;
   const contentLength = Number(request.headers.get("content-length") || "0");
-  if (contentLength > 30_000) throw new ApiError(413, "提交的内容过大。");
-  const text = await request.text();
-  if (Buffer.byteLength(text, "utf8") > 30_000) throw new ApiError(413, "提交的内容过大。");
-  try { return JSON.parse(text); } catch { throw new ApiError(400, "提交的格式不正确。"); }
+  if (contentLength > maxBytes) {
+    await request.body?.cancel().catch(() => undefined);
+    throw new ApiError(413, "提交的内容过大。");
+  }
+  if (!request.body) throw new ApiError(400, "提交的格式不正确。");
+  const reader = request.body.getReader();
+  const chunks: Buffer[] = [];
+  let bytes = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      bytes += value.byteLength;
+      if (bytes > maxBytes) {
+        await reader.cancel().catch(() => undefined);
+        throw new ApiError(413, "提交的内容过大。");
+      }
+      chunks.push(Buffer.from(value));
+    }
+  } finally { reader.releaseLock(); }
+  try {
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks, bytes));
+    return JSON.parse(text);
+  } catch { throw new ApiError(400, "提交的格式不正确。"); }
 }

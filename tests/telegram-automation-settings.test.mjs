@@ -147,6 +147,40 @@ const initialChatStatus = {
 };
 const keywordChatStatus = { ...initialChatStatus, hasToken: true, keywordEnabled: true };
 
+test('Telegram settings reject invalid nested shapes and unknown fields before transport or persistence', async () => {
+  const base = { enabled: false, chatId: '' };
+  const before = settingsRow();
+  for (const invalid of [
+    { ...base, enabled: 'false' },
+    { ...base, chatId: 123 },
+    { ...base, token: 'a'.repeat(161) },
+    { ...base, promotionMessage: 'a'.repeat(2_001) },
+    { ...base, token_ciphertext: 'must-not-overwrite' },
+    { ...base, welcome: [] },
+    { ...base, welcome: { enabled: false, chatId: '', message: '', unknown: true } },
+    { ...base, welcome: { enabled: 'false', chatId: '', message: '' } },
+    { ...base, welcome: { enabled: false, chatId: 'a'.repeat(81), message: '' } },
+    { ...base, welcome: { enabled: false, chatId: '', message: 'a'.repeat(2_001) } },
+    { ...base, chatBot: null },
+    { ...base, chatBot: { keywordEnabled: false, unknown: true } },
+    { ...base, chatBot: { keywordEnabled: 0 } },
+    { ...base, chatBot: { keywordEnabled: false, privateEnabled: 'true' } },
+    { ...base, chatBot: { keywordEnabled: false, privateStartMessage: 'a'.repeat(2_001) } },
+  ]) {
+    await put(invalid, 400);
+    assert.deepEqual(settingsRow(), before, 'schema rejection must not mutate saved settings');
+    assert.equal(telegram.calls.length, 0, 'schema rejection must not contact Telegram');
+  }
+  const valid = await put({
+    ...base, promotionMessage: `  ${'a'.repeat(2_000)}  `,
+    welcome: { enabled: false, chatId: '', message: '' },
+    chatBot: { keywordEnabled: false, privateEnabled: false, privateStartMessage: '' },
+  });
+  assert.equal(valid.promotionMessage, 'a'.repeat(2_000), 'trim before applying the maximum length');
+  assert.equal(valid.chatBot.privateEnabled, false);
+  assert.equal(telegram.calls.length, 0);
+});
+
 test('the channel and chat group use different bot identities and settings never expose either token', async () => {
   const initial = await get();
   assert.equal(initial.enabled, false);
