@@ -8,7 +8,6 @@ import { isSafeImageUrl } from '../lib/image-url';
 import type { PopupNotice } from '../lib/popup-notices';
 import './notice-carousel.css';
 
-const DISMISSAL_KEY = '365fb-popup-notices-dismissed';
 const ROTATION_DELAY = 3000;
 const labels = {
   en: { heading: 'Announcements', list: 'Choose an announcement', close: 'Close announcements', pause: 'Pause', play: 'Resume', open: 'Open announcement' },
@@ -37,10 +36,11 @@ export default function NoticeCarousel({ notices }: { notices: PopupNotice[] }) 
   const active = entries[activeIndex];
 
   useEffect(() => {
-    if (!hasNotices || window.location.hash.startsWith('#brand-card-')) return;
-    try {
-      if (sessionStorage.getItem(DISMISSAL_KEY) === '1') return;
-    } catch { /* The dialog can still close when storage is unavailable. */ }
+    if (!hasNotices) return;
+    if (window.location.hash.startsWith('#brand-card-')) {
+      const [navigation] = performance.getEntriesByType('navigation') as PerformanceNavigationTiming[];
+      if (navigation?.type !== 'reload') return;
+    }
 
     const motion = window.matchMedia('(prefers-reduced-motion: reduce)');
     const syncMotion = () => { if (motion.matches) setPaused(true); };
@@ -105,7 +105,6 @@ export default function NoticeCarousel({ notices }: { notices: PopupNotice[] }) 
   }, [activeIndex, open]);
 
   function dismiss() {
-    try { sessionStorage.setItem(DISMISSAL_KEY, '1'); } catch { /* Storage is optional. */ }
     setOpen(false);
   }
 
