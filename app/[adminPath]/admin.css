@@ -164,6 +164,29 @@
   margin: 0;
   color: var(--cms-muted);
 }
+.cms-shell .cms-telegram-keywords { margin-top: 20px; }
+.cms-shell .cms-telegram-keywords h3 { margin: 0; font-size: 13px; font-weight: 600; }
+.cms-shell .cms-telegram-keyword-list { margin: 0; padding: 0; list-style: none; }
+.cms-shell .cms-telegram-keyword-list > li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 12px;
+  padding: 12px;
+}
+.cms-shell .cms-telegram-keyword-list > li + li { border-top: 1px solid var(--cms-line); }
+.cms-shell .cms-telegram-keyword-summary { display: grid; gap: 3px; overflow-wrap: anywhere; }
+.cms-shell .cms-telegram-keyword-summary strong { font-size: 12px; font-weight: 600; }
+.cms-shell .cms-telegram-keyword-summary small { color: var(--cms-muted); font-size: 10px; }
+.cms-shell .cms-telegram-keyword-summary p {
+  display: -webkit-box;
+  max-width: none;
+  margin: 0;
+  overflow: hidden;
+  white-space: pre-wrap;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
 @media (max-width: 600px) {
   .cms-sidebar {
     flex-wrap: wrap;

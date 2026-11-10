@@ -15,6 +15,10 @@ const configInput = z.object({
     chatId: z.string().trim().max(80),
     message: z.string().trim().max(2_000),
   }).strict().optional(),
+  chatBot: z.object({
+    token: z.string().trim().max(160).optional(),
+    keywordEnabled: z.boolean(),
+  }).strict().optional(),
 }).strict();
 
 function respond(status: ReturnType<typeof telegramPromotionStatus>) {

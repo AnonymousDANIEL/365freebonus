@@ -44,7 +44,7 @@ function example(id, extra = {}) {
 test('migrations preserve brand data and existing expiry without creating Telegram notifications for legacy brands', async () => {
   const currentDataDir = process.env.DATA_DIR;
   try {
-    for (const version of [1, 2, 4, 5, 6]) {
+    for (const version of [1, 2, 4, 5, 6, 7]) {
       const legacyPath = path.join(fixture, `legacy-${version}`);
       mkdirSync(legacyPath);
       const legacy = new DatabaseSync(path.join(legacyPath, 'directory.sqlite'));
@@ -92,24 +92,48 @@ test('migrations preserve brand data and existing expiry without creating Telegr
         legacy.prepare(`INSERT INTO brands VALUES ('legacy-draft', 'Old draft', 'legacy-draft', 'Update', 'Draft', 'Draft',
           '#aabbcc', 'sparkles', '', 0, 0, 80, '', 1, ?, ?)`).run(now + 2 * day, now + day);
       }
-      if (version === 6) {
+      if (version >= 6) {
         legacy.exec(`ALTER TABLE brands ADD COLUMN publish_at INTEGER DEFAULT NULL;
           INSERT INTO telegram_promotion_settings (id, enabled, chat_id, token_ciphertext)
           VALUES ('primary', 1, '-10012345', 'existing-ciphertext');`);
         legacy.prepare("UPDATE brands SET publish_at=? WHERE id='original'").run(now + day);
       }
+      if (version === 7) {
+        legacy.exec(`ALTER TABLE telegram_promotion_settings ADD COLUMN promotion_message TEXT NOT NULL DEFAULT '';
+          ALTER TABLE telegram_promotion_settings ADD COLUMN welcome_enabled INTEGER NOT NULL DEFAULT 0 CHECK (welcome_enabled IN (0, 1));
+          ALTER TABLE telegram_promotion_settings ADD COLUMN welcome_chat_id TEXT NOT NULL DEFAULT '';
+          ALTER TABLE telegram_promotion_settings ADD COLUMN welcome_message TEXT NOT NULL DEFAULT '';
+          ALTER TABLE telegram_promotion_settings ADD COLUMN welcome_started_at INTEGER NOT NULL DEFAULT 0;
+          ALTER TABLE telegram_promotion_settings ADD COLUMN welcome_revision TEXT NOT NULL DEFAULT '';
+          CREATE TABLE telegram_welcome_state (
+            id TEXT PRIMARY KEY, revision TEXT NOT NULL,
+            next_offset INTEGER NOT NULL DEFAULT 0, last_polled_at INTEGER NOT NULL DEFAULT 0,
+            next_poll_at INTEGER NOT NULL DEFAULT 0, lease_id TEXT NOT NULL DEFAULT '',
+            lease_until INTEGER NOT NULL DEFAULT 0, sent INTEGER NOT NULL DEFAULT 0,
+            last_error TEXT NOT NULL DEFAULT ''
+          );
+          UPDATE telegram_promotion_settings SET promotion_message='Existing promotion message',
+            welcome_enabled=1, welcome_chat_id='-10054321', welcome_message='Existing welcome message',
+            welcome_started_at=1800000000, welcome_revision='legacy-welcome';
+          INSERT INTO telegram_welcome_state (id, revision, next_offset, sent)
+          VALUES ('primary', 'legacy-welcome', 12345, 3);`);
+      }
       legacy.close();
       process.env.DATA_DIR = legacyPath;
       const saved = await repository.readDirectory(true, now);
       const upgraded = sqlite.getSqlite();
-      assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version, 7);
+      assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version, 8);
       assert.equal(upgraded.prepare('SELECT COUNT(*) AS count FROM telegram_promotion_outbox').get().count, version >= 5 ? 1 : 0);
       assert.equal(upgraded.prepare('SELECT COUNT(*) AS count FROM telegram_welcome_state').get().count, 0);
-      if (version === 6) {
+      assert.equal(upgraded.prepare('SELECT COUNT(*) AS count FROM telegram_keyword_rules').get().count, 0);
+      if (version >= 6) {
         const settings = upgraded.prepare("SELECT * FROM telegram_promotion_settings WHERE id='primary'").get();
         assert.deepEqual({ ...settings }, {
           id: 'primary', enabled: 1, chat_id: '-10012345', token_ciphertext: 'existing-ciphertext',
-          promotion_message: '', welcome_enabled: 0, welcome_chat_id: '', welcome_message: '', welcome_started_at: 0, welcome_revision: '',
+          promotion_message: version === 7 ? 'Existing promotion message' : '',
+          welcome_enabled: 0, welcome_chat_id: version === 7 ? '-10054321' : '',
+          welcome_message: version === 7 ? 'Existing welcome message' : '', welcome_started_at: 0, welcome_revision: '',
+          chat_bot_token_ciphertext: '', keyword_enabled: 0, keyword_started_at: 0,
         });
         const outbox = upgraded.prepare("SELECT revision, status, attempts FROM telegram_promotion_outbox WHERE brand_id='original'").get();
         assert.deepEqual({ ...outbox }, { revision: 'legacy-revision', status: 'pending', attempts: 2 });
@@ -122,7 +146,7 @@ test('migrations preserve brand data and existing expiry without creating Telegr
         link: 'https://brand.example', promotionDays: version >= 4 ? 7 : null,
         promotionStartsAt: version >= 5 ? now + day : null,
         promotionExpiresAt: version >= 4 ? now + (version >= 5 ? 8 : 7) * day : null,
-        publishAt: version === 6 ? now + day : null,
+        publishAt: version >= 6 ? now + day : null,
       });
       assert.equal(saved.settings.name, 'Existing site');
       assert.equal(saved.settings.coverImageUrl, version >= 2 ? '/cover.png' : '');

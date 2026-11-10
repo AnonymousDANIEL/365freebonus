@@ -8,7 +8,7 @@ import ts from 'typescript';
 
 const fixture = mkdtempSync(path.join(tmpdir(), 'directory-telegram-welcome-'));
 writeFileSync(path.join(fixture, 'package.json'), '{"type":"commonjs"}');
-for (const name of ['sqlite', 'telegram-bot', 'telegram-welcome']) {
+for (const name of ['sqlite', 'telegram-bot', 'telegram-keywords', 'telegram-welcome']) {
   const source = readFileSync(new URL(`../app/lib/${name}.ts`, import.meta.url), 'utf8');
   const { outputText } = ts.transpileModule(source, {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, esModuleInterop: true },
@@ -27,8 +27,10 @@ const cutoff = now / 1_000 - 10;
 const chatId = -1001234567890;
 const revision = 'welcome-revision';
 const group = 'Public <Group>';
-const token = 'fixture-token';
-const ciphertext = 'fixture-ciphertext';
+const token = 'fixture-chat-token';
+const ciphertext = 'fixture-chat-ciphertext';
+const promotionToken = 'fixture-promotion-token';
+const promotionCiphertext = 'fixture-promotion-ciphertext';
 const ok = result => ({ ok: true, result });
 const limited = retryAfter => ({ ok: false, code: 429, retryAfter });
 const successfulSend = ok({ message_id: 1 });
@@ -49,13 +51,21 @@ test.after(() => {
   rmSync(fixture, { recursive: true, force: true });
 });
 
-function configureWelcome({ enabled = true, message = 'Welcome {name} to {group}!' } = {}) {
+function configureWelcome({ enabled = true, message = 'Welcome {name} to {group}!', chatCiphertext = ciphertext } = {}) {
   getSqlite().prepare(`INSERT INTO telegram_promotion_settings (
-    id, enabled, chat_id, token_ciphertext, welcome_enabled,
+    id, enabled, chat_id, token_ciphertext, chat_bot_token_ciphertext, welcome_enabled,
     welcome_chat_id, welcome_message, welcome_started_at, welcome_revision
-  ) VALUES ('primary', 0, '', ?, ?, ?, ?, ?, ?)
+  ) VALUES ('primary', 0, '', ?, ?, ?, ?, ?, ?, ?)
   ON CONFLICT(id) DO UPDATE SET welcome_enabled = excluded.welcome_enabled,
-    welcome_message = excluded.welcome_message`).run(ciphertext, Number(enabled), String(chatId), message, cutoff, revision);
+    welcome_message = excluded.welcome_message, chat_bot_token_ciphertext = excluded.chat_bot_token_ciphertext`)
+    .run(promotionCiphertext, chatCiphertext, Number(enabled), String(chatId), message, cutoff, revision);
+}
+
+function configureKeywords(rules, startedAt = cutoff) {
+  const db = getSqlite();
+  db.prepare("UPDATE telegram_promotion_settings SET keyword_enabled = 1, keyword_started_at = ? WHERE id = 'primary'").run(startedAt);
+  const insert = db.prepare('INSERT INTO telegram_keyword_rules (keyword, keyword_key, match_mode, response) VALUES (?, ?, ?, ?)');
+  for (const [keyword, mode, response] of rules) insert.run(keyword, keyword, mode, response);
 }
 
 function putState({ offset = 0, lastPoll = now, leaseId = '', leaseUntil = 0 } = {}) {
@@ -69,7 +79,20 @@ function state() {
 }
 
 function tick(time = now) {
-  return pollTelegramWelcomeOnce(value => value === ciphertext ? token : '', () => time);
+  const decrypt = value => value === ciphertext ? token : value === promotionCiphertext ? promotionToken : '';
+  return pollTelegramWelcomeOnce(decrypt, () => time);
+}
+
+function groupMessage(updateId, {
+  id = chatId, date = now / 1_000, text = 'bonus', bot = false, ...extra
+} = {}) {
+  return {
+    update_id: updateId,
+    message: {
+      message_id: updateId + 1_000, chat: { id, type: 'supergroup', title: group },
+      from: { id: 501, is_bot: bot, first_name: 'Ada' }, date, text, ...extra,
+    },
+  };
 }
 
 function membership(updateId, {
@@ -107,6 +130,7 @@ function mockTransport(t, updates, sends) {
   return {
     offsets: () => poll.mock.calls.map(call => call.arguments[1]),
     messages: () => send.mock.calls.map(call => call.arguments[2].text),
+    parameters: () => send.mock.calls.map(call => call.arguments[2]),
   };
 }
 
@@ -222,4 +246,69 @@ test('a cursor from an old polling session cannot discard a lower new update ID'
   assert.deepEqual(requests.offsets(), [0]);
   assert.deepEqual(requests.messages(), [`Welcome Ada Lovelace to ${group}!`]);
   assert.equal(state().next_offset, 13);
+});
+
+test('welcome and keyword replies share a cursor and select one matching rule per original group message', async t => {
+  configureWelcome();
+  configureKeywords([
+    ['bonus', 'contains', 'Short match'],
+    ['bonus', 'exact', '<Exact> & reply'],
+    ['free bonus', 'contains', 'Long match'],
+    ['gold', 'contains', 'Earlier rule'],
+    ['deal', 'contains', 'Later rule'],
+  ], cutoff + 5);
+  const exact = groupMessage(210, { text: '  ＢＯＮＵＳ  ' });
+  const batch = [
+    exact, membership(200, { date: cutoff }),
+    groupMessage(201, { id: chatId - 1 }), groupMessage(202, { bot: true }),
+    groupMessage(203, { forward_origin: { type: 'user' } }),
+    groupMessage(204, { via_bot: { id: 503, is_bot: true } }),
+    groupMessage(205, { sender_chat: { id: chatId, type: 'supergroup' } }),
+    groupMessage(206, { date: cutoff + 1 }), groupMessage(207, { text: null, caption: 'bonus' }),
+    { update_id: 208, edited_message: groupMessage(208).message },
+    groupMessage(209, { text: 'No matching text' }), exact,
+    groupMessage(211, { text: 'Try a FREE BONUS today', is_topic_message: true, message_thread_id: 27 }),
+    groupMessage(212, { text: 'A deal with gold', message_thread_id: -1 }),
+  ];
+  const requests = mockTransport(t, [ok(batch)], Array(4).fill(successfulSend));
+
+  await tick();
+  assert.deepEqual(requests.offsets(), [0]);
+  assert.deepEqual(requests.messages(), [`Welcome Ada Lovelace to ${group}!`, '<Exact> & reply', 'Long match', 'Earlier rule']);
+  const [welcome, ...replies] = requests.parameters();
+  assert.equal(welcome.reply_parameters, undefined);
+  assert.deepEqual(replies.map(reply => reply.reply_parameters), [1210, 1211, 1212].map(message_id => ({
+    message_id, allow_sending_without_reply: false,
+  })));
+  assert.deepEqual(replies.map(reply => reply.message_thread_id), [undefined, 27, undefined]);
+  assert.equal(state().sent, 1);
+  assert.equal(state().keyword_replies, 3);
+  assert.equal(state().next_offset, 213);
+});
+
+test('keyword-only polling uses the chat token and does not retry an ambiguous reply after reopening SQLite', async t => {
+  configureWelcome({ enabled: false, chatCiphertext: '' });
+  configureKeywords([
+    ['bonus', 'exact', 'Bonus reply'],
+    ['support', 'exact', 'Support reply'],
+  ]);
+  const first = groupMessage(301);
+  const second = groupMessage(302, { text: 'support' });
+  const requests = mockTransport(t, [ok([membership(300), first]), ok([first, second])], [null, successfulSend]);
+
+  await tick();
+  assert.deepEqual(requests.offsets(), [], 'the promotion token must not substitute for a missing chat token');
+  configureWelcome({ enabled: false });
+  await tick();
+  assert.equal(state().next_offset, 302);
+  assert.equal(state().keyword_replies, 0);
+  closeDatabase();
+
+  await tick(now + minute);
+  assert.deepEqual(requests.offsets(), [0, 302]);
+  assert.deepEqual(requests.messages(), ['Bonus reply', 'Support reply']);
+  assert.deepEqual(requests.parameters().map(reply => reply.reply_parameters.message_id), [1301, 1302]);
+  assert.equal(state().sent, 0);
+  assert.equal(state().keyword_replies, 1);
+  assert.equal(state().next_offset, 303);
 });

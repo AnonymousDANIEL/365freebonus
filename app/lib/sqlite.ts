@@ -12,7 +12,7 @@ export function getDataDirectory(): string {
 function migrate(db: DatabaseSync) {
   if (migrated.has(db)) return;
   const readVersion = () => (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
-  if (readVersion() < 7) {
+  if (readVersion() < 8) {
     db.exec("BEGIN IMMEDIATE");
     try {
       // Read again inside the write lock, so concurrent process starts cannot
@@ -107,6 +107,20 @@ function migrate(db: DatabaseSync) {
           last_error TEXT NOT NULL DEFAULT ''
         );
         PRAGMA user_version = 7;
+      `);
+      if (version < 8) db.exec(`
+        ALTER TABLE telegram_promotion_settings ADD COLUMN chat_bot_token_ciphertext TEXT NOT NULL DEFAULT '';
+        ALTER TABLE telegram_promotion_settings ADD COLUMN keyword_enabled INTEGER NOT NULL DEFAULT 0 CHECK (keyword_enabled IN (0, 1));
+        ALTER TABLE telegram_promotion_settings ADD COLUMN keyword_started_at INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE telegram_welcome_state ADD COLUMN keyword_replies INTEGER NOT NULL DEFAULT 0;
+        CREATE TABLE telegram_keyword_rules (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, keyword TEXT NOT NULL, keyword_key TEXT NOT NULL,
+          match_mode TEXT NOT NULL CHECK (match_mode IN ('exact', 'contains')),
+          response TEXT NOT NULL, UNIQUE (keyword_key, match_mode)
+        );
+        UPDATE telegram_promotion_settings SET welcome_enabled = 0, welcome_started_at = 0, welcome_revision = '';
+        DELETE FROM telegram_welcome_state;
+        PRAGMA user_version = 8;
       `);
       db.exec("COMMIT");
     } catch (error) { db.exec("ROLLBACK"); throw error; }

@@ -58,6 +58,7 @@ function requestTelegram<Result>(token: string, method: TelegramMethod | "getUpd
   // Telegram requires the token in the request path. Use Node HTTPS directly so
   // Next's fetch tracing never sees that URL, and keep raw replies private.
   return new Promise(resolve => {
+    const maxReplyLength = method === "getUpdates" ? 524_288 : 65_536;
     const { body, contentType } = upload
       ? multipartPayload(parameters, upload)
       : { body: JSON.stringify(parameters), contentType: "application/json" };
@@ -72,7 +73,7 @@ function requestTelegram<Result>(token: string, method: TelegramMethod | "getUpd
       response.setEncoding("utf8");
       response.on("data", chunk => {
         content += chunk;
-        if (content.length > 65_536) response.destroy();
+        if (content.length > maxReplyLength) response.destroy();
       });
       response.on("end", () => {
         try { resolve(parseReply(content, parseResult)); }
@@ -91,5 +92,5 @@ export function telegramRequest(token: string, method: TelegramMethod, parameter
 }
 
 export function telegramUpdates(token: string, offset: number) {
-  return requestTelegram(token, "getUpdates", { offset, timeout: 10, limit: 10, allowed_updates: ["chat_member"] }, asUpdates);
+  return requestTelegram(token, "getUpdates", { offset, timeout: 10, limit: 10, allowed_updates: ["chat_member", "message"] }, asUpdates);
 }
