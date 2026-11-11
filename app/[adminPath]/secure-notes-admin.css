@@ -1,0 +1,50 @@
+.cms-notes { display: grid; gap: 18px; }
+.cms-notes-intro { display: flex; align-items: flex-start; gap: 11px; padding: 18px 20px; border: 1px solid var(--cms-line); border-radius: 10px; background: var(--cms-panel); }
+.cms-notes-intro > svg { flex-shrink: 0; margin-top: 2px; color: var(--cms-green); }
+.cms-notes-intro > div { flex: 1; }
+.cms-notes-intro strong { font-size: 14px; }
+.cms-notes-intro p, .cms-notes-hint { color: var(--cms-muted); font-size: 11px; line-height: 1.9; margin: 4px 0 0; }
+.cms-notes-intro > button { flex-shrink: 0; }
+.cms-notes-lock-panel { min-height: 250px; }
+.cms-notes-lock-symbol { display: grid; place-items: center; width: 58px; height: 58px; border: 1px solid var(--cms-line); background: var(--cms-inset); border-radius: 16px; color: var(--cms-green); margin-bottom: 17px; }
+.cms-notes-lock-form .cms-settings-fields { max-width: 500px; }
+.cms-notes-lock-form .cms-settings-fields > button { justify-self: start; }
+.cms-notes .cms-settings-fields > small { color: var(--cms-muted); font-size: 11px; line-height: 1.9; }
+.cms-notes-lock { border: 1px solid var(--cms-line); border-radius: 10px; background: var(--cms-panel); padding: 42px 22px; text-align: center; }
+.cms-notes-lock > svg { color: var(--cms-green); }
+.cms-notes-lock h2 { font-size: 17px; margin: 15px 0 8px; }
+.cms-notes-lock p { color: var(--cms-muted); font-size: 12px; margin: 0 0 20px; }
+.cms-notes-toolbar, .cms-notes-toolbar > div { display: flex; align-items: center; gap: 10px; }
+.cms-notes-toolbar { justify-content: space-between; flex-wrap: wrap; }
+.cms-notes-toolbar > div:first-child { flex-wrap: wrap; }
+.cms-notes-unlocked { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: var(--cms-green); border: 1px solid var(--cms-line); background: var(--cms-accent-bg); padding: 5px 9px; border-radius: 6px; }
+.cms-notes-toolbar small { font-size: 10px; color: var(--cms-muted); }
+.cms-notes-hint { display: flex; gap: 7px; align-items: flex-start; margin: -7px 0 0; }
+.cms-notes-hint svg { margin-top: 3px; flex-shrink: 0; }
+.cms-notes-form-actions { display: flex; gap: 9px; justify-content: flex-end; }
+.cms-notes-editor textarea { min-height: 220px; resize: vertical; line-height: 1.8; }
+.cms-notes-total { margin-left: 7px; color: var(--cms-muted); font-weight: 400; font-size: 12px; }
+.cms-notes-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); padding: 20px; gap: 14px; }
+.cms-note-card { min-width: 0; border: 1px solid var(--cms-line); border-radius: 9px; padding: 19px; background: var(--cms-inset); display: flex; flex-direction: column; }
+.cms-note-heading { display: flex; align-items: flex-start; gap: 8px; }
+.cms-note-heading > svg { flex-shrink: 0; color: var(--cms-green); margin-top: 2px; }
+.cms-note-heading h3 { font-size: 13px; line-height: 1.7; margin: 0; color: var(--cms-text); overflow-wrap: anywhere; }
+.cms-note-card > p { font-size: 11px; line-height: 1.9; color: var(--cms-muted); white-space: pre-wrap; overflow-wrap: anywhere; margin: 13px 0 17px; }
+.cms-note-card > small { display: block; margin-top: auto; font-size: 10px; color: var(--cms-subtle); }
+.cms-note-actions { display: flex; gap: 7px; margin-top: 15px; }
+.cms-note-actions > .cms-secondary { font-size: 10px; padding: 7px 10px; }
+.cms-notes-delete { display: grid; place-items: center; width: 31px; height: 32px; background: transparent; border: 1px solid var(--cms-line); border-radius: 6px; color: var(--cms-muted); margin-left: auto; }
+.cms-notes-delete:hover { color: var(--cms-error); border-color: var(--cms-error); }
+.cms-notes-pages { display: flex; gap: 7px; }
+.cms-notes-confirm { color: var(--cms-text); background: var(--cms-panel); }
+.cms-notes-confirm::backdrop { background: #17112099; }
+@media (max-width: 720px) {
+  .cms-notes-grid { grid-template-columns: 1fr; padding: 14px; }
+  .cms-notes-intro { flex-wrap: wrap; padding: 16px; }
+  .cms-notes-intro > div { min-width: 160px; }
+  .cms-notes-intro > button { margin-left: auto; }
+  .cms-notes-toolbar { gap: 15px; }
+  .cms-notes-toolbar > div:last-child { margin-left: auto; }
+  .cms-notes-pages { width: 100%; justify-content: flex-end; }
+  .cms-sidebar nav { flex-wrap: wrap; }
+}

@@ -12,7 +12,7 @@ export function getDataDirectory(): string {
 function migrate(db: DatabaseSync) {
   if (migrated.has(db)) return;
   const readVersion = () => (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
-  if (readVersion() < 12) {
+  if (readVersion() < 13) {
     db.exec("BEGIN IMMEDIATE");
     try {
       // Read again inside the write lock, so concurrent process starts cannot
@@ -166,6 +166,34 @@ function migrate(db: DatabaseSync) {
         );
         CREATE INDEX website_logins_due ON website_logins(next_attempt_at, lease_until);
         PRAGMA user_version = 12;
+      `);
+      if (version < 13) db.exec(`
+        DROP TABLE IF EXISTS website_logins;
+        CREATE TABLE notes_vault_settings (
+          id TEXT PRIMARY KEY CHECK (id = 'primary'),
+          pin_hash TEXT NOT NULL, revision TEXT NOT NULL,
+          created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+        );
+        CREATE TABLE notes_vault_unlocks (
+          token_hash TEXT PRIMARY KEY,
+          session_hash TEXT NOT NULL REFERENCES admin_sessions(id_hash) ON DELETE CASCADE,
+          vault_revision TEXT NOT NULL, expires_at INTEGER NOT NULL
+        );
+        CREATE INDEX secure_notes_unlock_expiry ON notes_vault_unlocks(expires_at);
+        CREATE TABLE notes_vault_sessions (
+          session_hash TEXT PRIMARY KEY REFERENCES admin_sessions(id_hash) ON DELETE CASCADE,
+          generation TEXT NOT NULL
+        );
+        CREATE TABLE notes_vault_attempts (
+          id TEXT PRIMARY KEY CHECK (id = 'primary'),
+          attempts INTEGER NOT NULL, expires_at INTEGER NOT NULL
+        );
+        CREATE TABLE secure_notes (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          title_ciphertext TEXT NOT NULL, body_ciphertext TEXT NOT NULL,
+          revision TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+        );
+        PRAGMA user_version = 13;
       `);
       db.exec("COMMIT");
     } catch (error) { db.exec("ROLLBACK"); throw error; }

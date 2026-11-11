@@ -1,14 +1,14 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { ArrowUpRight, Check, ChevronRight, CircleHelp, ExternalLink, Eye, FileText, ImageIcon, KeyRound, LayoutGrid, LoaderCircle, Megaphone, Plus, Search, Send, Settings2, ShieldCheck, Sparkles, Trash2, Upload, UserRound, X, Pencil, Globe, LogOut, Orbit, Sun, Gamepad2, Moon, Triangle } from "lucide-react";
+import { ArrowUpRight, Check, ChevronRight, CircleHelp, ExternalLink, Eye, FileText, ImageIcon, KeyRound, LayoutGrid, LoaderCircle, Megaphone, Plus, Search, Send, Settings2, ShieldCheck, Sparkles, Trash2, Upload, UserRound, X, Pencil, Globe, LockKeyhole, LogOut, Orbit, Sun, Gamepad2, Moon, Triangle } from "lucide-react";
 import { DEFAULT_PROMOTION_DAYS, effectiveBrandCategory, isBrandPublished, isSafeSocialUrl, isValidPromotionStart, type Brand, type SiteSettings } from "../lib/directory";
 import { isSafeImageUrl, isUploadedImageUrl } from "../lib/image-url";
 import { AdminThemeToggle, useAdminTheme } from "../components/AdminTheme";
 import TelegramGroupSettings from "./TelegramGroupSettings";
 import PopupNoticeSettings from "./PopupNoticeSettings";
 import PasswordSettings from "./PasswordSettings";
-import WebsiteLogins from "./WebsiteLogins";
+import SecureNotes from "./SecureNotes";
 import "./social-contacts-admin.css";
 import "./password-settings-admin.css";
 
@@ -17,7 +17,7 @@ const sections = {
   settings: { title: "网站设置", description: "让首页文字、站名和公告，都保持你的风格。" },
   notices: { title: "弹窗公告", description: "上传公告图片，设置点击链接和展示顺序。" },
   telegram: { title: "Telegram 通知", description: "管理品牌更新的自动通知，查看发送状态。" },
-  websites: { title: "网站自动登录", description: "管理已授权网站的账号、自动登录安排和运行状态。" },
+  notes: { title: "安全笔记", description: "管理私人记录，使用独立 PIN 保护。" },
   password: { title: "更改密码", description: "在后台直接更换管理员密码。" },
 };
 type Section = keyof typeof sections;
@@ -340,7 +340,7 @@ export default function AdminClient({ displayName, signInPath }: { displayName: 
         <button className={section === "settings" ? "active" : ""} aria-current={section === "settings" ? "page" : undefined} onClick={() => setSection("settings")}><Settings2 size={19} />{sections.settings.title}</button>
         <button className={section === "notices" ? "active" : ""} aria-current={section === "notices" ? "page" : undefined} title={sections.notices.title} onClick={() => setSection("notices")}><Megaphone size={19} />{sections.notices.title}</button>
         <button className={section === "telegram" ? "active" : ""} aria-current={section === "telegram" ? "page" : undefined} title={sections.telegram.title} onClick={() => setSection("telegram")}><Send size={19} />{sections.telegram.title}</button>
-        <button className={section === "websites" ? "active" : ""} aria-current={section === "websites" ? "page" : undefined} title={sections.websites.title} onClick={() => setSection("websites")}><Globe size={19} />{sections.websites.title}</button>
+        <button className={section === "notes" ? "active" : ""} aria-current={section === "notes" ? "page" : undefined} title={sections.notes.title} onClick={() => setSection("notes")}><LockKeyhole size={19} />{sections.notes.title}</button>
         <button className={section === "password" ? "active" : ""} aria-current={section === "password" ? "page" : undefined} title={sections.password.title} onClick={() => setSection("password")}><KeyRound size={19} />{sections.password.title}</button>
         <a href="/" target="_blank" rel="noopener"><Globe size={19} />查看前台<ArrowUpRight size={16} className="cms-nav-arrow" /></a>
       </nav>
@@ -355,7 +355,7 @@ export default function AdminClient({ displayName, signInPath }: { displayName: 
         {error && !editing && !deleting && <div className="cms-alert cms-error" role="alert"><span>{error}</span>{sessionExpired && <Reauthenticate signInPath={signInPath} />}<button onClick={() => setError("")} aria-label="关闭错误"><X size={17} /></button></div>}
         {success && <div className="cms-alert cms-success" role="status"><Check size={18} /><span>{success}</span></div>}
         {section === "telegram" ? <TelegramGroupSettings request={request} signInPath={signInPath} /> :
-        section === "websites" ? <WebsiteLogins request={request} signInPath={signInPath} /> :
+        section === "notes" ? <SecureNotes request={request} signInPath={signInPath} /> :
         section === "password" ? <PasswordSettings request={request} signInPath={signInPath} /> :
         section === "notices" ? <PopupNoticeSettings request={request} signInPath={signInPath} uploadImage={uploadAdminImage} UploadButton={ImageUploadButton} /> :
         loading ? <div className="cms-loading"><LoaderCircle size={27} /><p>正在加载你的内容…</p></div> : !loaded ? <div className="cms-empty"><CircleHelp size={29} /><h3>暂时无法加载内容</h3><p>请重新加载，确认服务器中的最新资料。</p><button className="cms-secondary" onClick={load}>重新加载</button></div> : section === "brands" ? <>
