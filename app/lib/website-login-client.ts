@@ -15,7 +15,10 @@ export class WebsiteLoginError extends Error {
 const unsupported = () => new WebsiteLoginError("此网页的登录方式暂不兼容。当前仅支持标准 HTTPS 网页表单，请手动登录或联系网站提供 API。");
 const unsafe = () => new WebsiteLoginError("请使用公开网站的 HTTPS 登录地址，不支持内网、IP 地址、跨站登录或此站点。");
 const manual = () => new WebsiteLoginError("网页需要验证码或双重验证，请先在该网站手动完成登录。");
-const MAX_BODY = 512 * 1024;
+const responseTooLarge = () => new WebsiteLoginError("网页内容超过 4 MB 的安全读取上限，自动登录已暂停，请检查登录或验证地址。");
+// Inline scripts and embedded assets can make ordinary login HTML exceed 512 KiB.
+// Keep a bounded response while allowing these pages; no asset requests are made.
+const MAX_BODY = 4 * 1024 * 1024;
 const MAX_POST = 64 * 1024;
 const BLOCKED = ["syabas99.com", "bintang44.com"];
 
@@ -69,12 +72,12 @@ async function publicRequest(url: URL, method: "GET" | "POST", body: string | un
       const chunks: Buffer[] = [];
       let bytes = 0;
       if (Number(res.headers["content-length"] || 0) > MAX_BODY) {
-        res.destroy(); req.destroy(); reject(new WebsiteLoginError("登录网页内容过大，暂不支持自动登录。")); return;
+        res.destroy(); req.destroy(); reject(responseTooLarge()); return;
       }
       res.on("data", (chunk: Buffer) => {
         bytes += chunk.length;
         if (bytes > MAX_BODY) {
-          res.destroy(); req.destroy(); reject(new WebsiteLoginError("登录网页内容过大，暂不支持自动登录。"));
+          res.destroy(); req.destroy(); reject(responseTooLarge());
         } else chunks.push(chunk);
       });
       res.once("end", () => resolve({ status: res.statusCode || 0, headers: res.headers, body: Buffer.concat(chunks).toString("utf8") }));
@@ -207,7 +210,7 @@ export async function executeWebsiteLogin(input: WebsiteLoginInput, transport: W
       const cookie = activeJar.header(url); if (cookie) headers.Cookie = cookie;
       if (method === "POST") Object.assign(headers, { "Content-Type": "application/x-www-form-urlencoded", "Content-Length": String(Buffer.byteLength(body || "")), Origin: login.origin, Referer: login.href });
       const response = await transport(url, method, body, headers, controller.signal);
-      if (Buffer.byteLength(response.body) > MAX_BODY) throw unsupported();
+      if (Buffer.byteLength(response.body) > MAX_BODY) throw responseTooLarge();
       const rawCookies = response.headers["set-cookie"];
       activeJar.accept(url, Array.isArray(rawCookies) ? rawCookies : rawCookies ? [rawCookies] : []);
       if ([301, 302, 303, 307, 308].includes(response.status)) {

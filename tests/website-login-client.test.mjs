@@ -90,9 +90,32 @@ test('redirect loops, excessive responses and transport exceptions fail with saf
   let calls = 0;
   await assert.rejects(executeWebsiteLogin(input, async () => { calls++; return { status: 302, headers: { location: '/loop' }, body: '' }; }), WebsiteLoginError);
   assert.equal(calls, 6);
-  await assert.rejects(executeWebsiteLogin(input, async () => ok('a'.repeat(512 * 1024 + 1))), WebsiteLoginError);
+  await assert.rejects(executeWebsiteLogin(input, async () => ok('a'.repeat(4 * 1024 * 1024 + 1))), error => error instanceof WebsiteLoginError && error.message.includes('4 MB'));
   const secret = 'fixture-secret-never-in-public-error';
   await assert.rejects(executeWebsiteLogin(input, async () => { throw Error(secret); }), error => error instanceof WebsiteLoginError && !error.message.includes(secret));
+});
+
+test('ordinary login HTML larger than the former512KiB limit can complete authentication', async () => {
+  const largeForm = form + '<!--' + 'a'.repeat(768 * 1024) + '-->';
+  let posts = 0;
+  await executeWebsiteLogin(input, async (_url, method) => {
+    if (method === 'POST') posts++;
+    return ok(posts ? '<h1>Private account overview</h1>' : largeForm);
+  });
+  assert.equal(posts, 1);
+});
+
+test('response safety limit measures UTF8 bytes and rejects oversized HTML before credentials are sent', async () => {
+  const oversized = '界'.repeat(Math.ceil(4 * 1024 * 1024 / 3));
+  assert.ok(oversized.length < 4 * 1024 * 1024);
+  assert.ok(Buffer.byteLength(oversized) > 4 * 1024 * 1024);
+  let calls = 0;
+  await assert.rejects(executeWebsiteLogin(input, async (_url, method) => {
+    calls++;
+    assert.equal(method, 'GET');
+    return ok(oversized);
+  }), error => error instanceof WebsiteLoginError && error.message.includes('4 MB'));
+  assert.equal(calls, 1);
 });
 
 test('anonymous verification may return401, while authenticated verification still requires a successful response', async () => {
