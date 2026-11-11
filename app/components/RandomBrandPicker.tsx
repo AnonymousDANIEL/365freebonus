@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Gamepad2, Moon, Orbit, Shuffle, Sparkles, Sun, Triangle } from 'lucide-react';
+import { Gamepad2, Moon, Orbit, Pause, Play, Shuffle, Sparkles, Sun, Triangle } from 'lucide-react';
 import type { Brand } from '../lib/directory';
 import './random-brand-picker.css';
 
@@ -10,7 +10,7 @@ type Props = { brands: Brand[]; lang: Lang; onPick: (id: string) => void };
 type Reel = { items: Brand[]; start: number; end: number; run: number };
 const DURATION = 1850;
 const CENTER = 4;
-const END = 28;
+const IDLE_SPEED = .45; // Brand widths per second; independent of display refresh rate.
 const icons = { sparkles: Sparkles, orbit: Orbit, sun: Sun, gamepad: Gamepad2, moon: Moon, triangle: Triangle };
 const words = {
   EN: { kicker: 'LET CURIOSITY CHOOSE', title: 'Meet your next favourite.', hint: 'A random pick from All brands', spin: 'Spin random', spinning: 'Spinning…', idle: 'Where will curiosity take you?', choosing: 'Finding a little inspiration…', selected: 'Selected', empty: 'No published brands to pick yet.' },
@@ -21,7 +21,8 @@ const words = {
 function idleReel(pool: Brand[], selectedId?: string): Reel {
   if (!pool.length) return { items: [], start: CENTER, end: CENTER, run: 0 };
   const selected = Math.max(0, pool.findIndex(brand => brand.id === selectedId));
-  return { items: Array.from({ length: 9 }, (_, index) => pool[((selected + index - CENTER) % pool.length + pool.length) % pool.length]), start: CENTER, end: CENTER, run: 0 };
+  // One complete cycle plus both viewport buffers makes wrapping invisible.
+  return { items: Array.from({ length: pool.length + 9 }, (_, index) => pool[((selected + index - CENTER) % pool.length + pool.length) % pool.length]), start: CENTER, end: CENTER, run: 0 };
 }
 
 // Rejection sampling gives every published brand the same chance, including the previous pick.
@@ -38,10 +39,13 @@ export default function RandomBrandPicker({ brands, lang, onPick }: Props) {
   const poolKey = useMemo(() => JSON.stringify(pool.map(brand => [brand.id, brand.name, brand.imageUrl, brand.icon, brand.color])), [pool]);
   const [reel, setReel] = useState<Reel>(() => idleReel(pool));
   const [spinning, setSpinning] = useState(false);
+  const [paused, setPaused] = useState(false);
+  const pausedRef = useRef(false);
   const [selectedId, setSelectedId] = useState<string>();
   const [announcement, setAnnouncement] = useState('');
   const viewportRef = useRef<HTMLDivElement>(null);
   const trackRef = useRef<HTMLDivElement>(null);
+  const idlePosition = useRef(CENTER);
   const running = useRef(false);
   const runNumber = useRef(0);
   const pickNumber = useRef(0);
@@ -70,11 +74,18 @@ export default function RandomBrandPicker({ brands, lang, onPick }: Props) {
     if (!viewport || !track || !reel.items.length) return;
     let frame = 0;
     let progress = 0;
+    let position = reel.start;
+    let lastFrame = 0;
     let stopped = false;
+    let itemWidth = 0;
+    let viewportWidth = 0;
     const place = () => {
-      const width = track.firstElementChild?.getBoundingClientRect().width || 0;
-      const position = reel.start + (reel.end - reel.start) * progress;
-      track.style.transform = `translate3d(${viewport.clientWidth / 2 - (position + .5) * width}px,0,0)`;
+      track.style.transform = `translate3d(${viewportWidth / 2 - (position + .5) * itemWidth}px,0,0)`;
+    };
+    const measure = () => {
+      itemWidth = track.firstElementChild?.getBoundingClientRect().width || 0;
+      viewportWidth = viewport.clientWidth;
+      place();
     };
     const finish = () => {
       if (stopped) return;
@@ -92,12 +103,36 @@ export default function RandomBrandPicker({ brands, lang, onPick }: Props) {
       setReel(idleReel(current.current.pool, winner.id));
       current.current.onPick(winner.id);
     };
-    place();
-    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(place);
+    measure();
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measure);
     observer?.observe(viewport);
+    if (track.firstElementChild) observer?.observe(track.firstElementChild);
     const motion = window.matchMedia('(prefers-reduced-motion: reduce)');
-    const onMotionChange = () => { if (motion.matches && reel.run) finish(); };
+    const idleTick = (now: number) => {
+      if (stopped || motion.matches || document.hidden || !current.current.pool.length) return;
+      if (lastFrame && !pausedRef.current) position += Math.min((now - lastFrame) / 1000, .1) * IDLE_SPEED;
+      lastFrame = now;
+      position = CENTER + (position - CENTER) % current.current.pool.length;
+      idlePosition.current = position;
+      place();
+      frame = requestAnimationFrame(idleTick);
+    };
+    const resumeIdle = () => {
+      if (reel.run || stopped) return;
+      cancelAnimationFrame(frame);
+      lastFrame = 0;
+      if (!motion.matches && !document.hidden) frame = requestAnimationFrame(idleTick);
+    };
+    const onMotionChange = () => {
+      if (motion.matches && reel.run) finish();
+      else resumeIdle();
+    };
     motion.addEventListener('change', onMotionChange);
+    document.addEventListener('visibilitychange', resumeIdle);
+    if (!reel.run) {
+      idlePosition.current = position;
+      resumeIdle();
+    }
     if (reel.run) {
       if (motion.matches) finish();
       else {
@@ -106,6 +141,7 @@ export default function RandomBrandPicker({ brands, lang, onPick }: Props) {
           if (stopped) return;
           const time = Math.min(1, (now - started) / DURATION);
           progress = 1 - (1 - time) ** 3;
+          position = reel.start + (reel.end - reel.start) * progress;
           place();
           if (time < 1) frame = requestAnimationFrame(tick);
           else finish();
@@ -118,6 +154,7 @@ export default function RandomBrandPicker({ brands, lang, onPick }: Props) {
       cancelAnimationFrame(frame);
       observer?.disconnect();
       motion.removeEventListener('change', onMotionChange);
+      document.removeEventListener('visibilitychange', resumeIdle);
     };
   }, [reel]);
 
@@ -137,9 +174,11 @@ export default function RandomBrandPicker({ brands, lang, onPick }: Props) {
     const run = ++runNumber.current;
     pending.current = { id: winner.id, key: poolKey, run };
     const base = idleReel(pool, selectedId);
-    const items = Array.from({ length: END + 5 }, (_, index) => base.items[index % base.items.length]);
-    items[END] = winner;
-    setReel({ items, start: CENTER, end: END, run });
+    const start = idlePosition.current;
+    const end = Math.ceil(start) + 24;
+    const items = Array.from({ length: end + 5 }, (_, index) => base.items[index % pool.length]);
+    items[end] = winner;
+    setReel({ items, start, end, run });
   };
 
   return <section className={`random-brand-picker${spinning ? ' is-spinning' : ''}`} aria-label={t.title}>
@@ -165,9 +204,16 @@ export default function RandomBrandPicker({ brands, lang, onPick }: Props) {
         </div>
         <p className="random-picker-caption">{!pool.length ? t.empty : spinning ? t.choosing : selected ? `${t.selected}: ${selected.name}` : t.idle}</p>
       </div>
-      <button type="button" className="random-picker-button" onClick={spin} disabled={spinning || !pool.length}>
-        <Shuffle size={17} aria-hidden="true" /><span>{spinning ? t.spinning : t.spin}</span>
-      </button>
+      <div className="random-picker-controls">
+        <button type="button" className="random-picker-button" onClick={spin} disabled={spinning || !pool.length}>
+          <Shuffle size={17} aria-hidden="true" /><span>{spinning ? t.spinning : t.spin}</span>
+        </button>
+        {!!pool.length && <button type="button" className="random-picker-motion" disabled={spinning} aria-pressed={paused}
+          aria-label={lang === '中文' ? (paused ? '继续滚动品牌' : '暂停滚动品牌') : lang === 'BM' ? (paused ? 'Sambung pergerakan jenama' : 'Jeda pergerakan jenama') : (paused ? 'Resume brand animation' : 'Pause brand animation')}
+          onClick={() => { pausedRef.current = !pausedRef.current; setPaused(pausedRef.current); }}>
+          {paused ? <Play size={16} aria-hidden="true" /> : <Pause size={16} aria-hidden="true" />}
+        </button>}
+      </div>
     </div>
     <span className="random-picker-announcement" role="status" aria-live="polite" aria-atomic="true">{announcement}</span>
   </section>;
