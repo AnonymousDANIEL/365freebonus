@@ -12,7 +12,7 @@ export function getDataDirectory(): string {
 function migrate(db: DatabaseSync) {
   if (migrated.has(db)) return;
   const readVersion = () => (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
-  if (readVersion() < 11) {
+  if (readVersion() < 12) {
     db.exec("BEGIN IMMEDIATE");
     try {
       // Read again inside the write lock, so concurrent process starts cannot
@@ -149,6 +149,23 @@ function migrate(db: DatabaseSync) {
           updated_at INTEGER NOT NULL
         );
         PRAGMA user_version = 11;
+      `);
+      if (version < 12) db.exec(`
+        CREATE TABLE website_logins (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          name TEXT NOT NULL, login_url TEXT NOT NULL, verify_url TEXT NOT NULL,
+          success_text TEXT NOT NULL, username TEXT NOT NULL, password_ciphertext TEXT NOT NULL,
+          session_ciphertext TEXT NOT NULL DEFAULT '',
+          username_field TEXT NOT NULL DEFAULT '', password_field TEXT NOT NULL DEFAULT '',
+          enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
+          interval_minutes INTEGER NOT NULL DEFAULT 30 CHECK (interval_minutes BETWEEN 15 AND 1440),
+          status TEXT NOT NULL DEFAULT 'idle', message TEXT NOT NULL DEFAULT '',
+          last_attempt_at INTEGER, last_success_at INTEGER, next_attempt_at INTEGER NOT NULL DEFAULT 0,
+          requested INTEGER NOT NULL DEFAULT 0, revision TEXT NOT NULL,
+          lease_id TEXT NOT NULL DEFAULT '', lease_until INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX website_logins_due ON website_logins(next_attempt_at, lease_until);
+        PRAGMA user_version = 12;
       `);
       db.exec("COMMIT");
     } catch (error) { db.exec("ROLLBACK"); throw error; }

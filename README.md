@@ -41,6 +41,8 @@ The volume keeps brands, settings, sessions and login-rate limits across restart
 
 ## Content management
 
+- **网站自动登录** manages authorized accounts on ordinary non-gambling websites. Add a standard HTTPS POST login form, a private verification page on the same origin, and text that appears only after login. Configuration supports optional form field names; JavaScript-only login, CAPTCHA, OTP and cross-site SSO require a dedicated integration or manual handling. The worker verifies an anonymous baseline before accepting the success marker, encrypts credentials and reusable session cookies in `/data`, and never transfers them to a visitor's browser. Enabled entries run at intervals of 15–1440 minutes; failures pause automatic attempts for review. Records are paginated without an application account-count limit. No actual remote login is attempted until an administrator adds and enables or starts an entry. Deleting an entry removes its saved configuration only.
+
 - Add, edit or delete brands; upload is currently through a public image URL.
 - Publish or hide entries, change display order and select homepage features.
 - Use 弹窗公告 in the dashboard to upload a banner, set its click-through URL, and control its visibility and order. Enabled banners rotate every three seconds in a centered 2:1 frame on the homepage.
