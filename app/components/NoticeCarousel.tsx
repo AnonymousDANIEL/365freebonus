@@ -1,6 +1,6 @@
 'use client';
 
-import { ArrowUpRight, Bell, Pause, Play, X } from 'lucide-react';
+import { Bell, X } from 'lucide-react';
 import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import type { KeyboardEvent } from 'react';
 import { isSafeSocialUrl } from '../lib/directory';
@@ -10,9 +10,9 @@ import './notice-carousel.css';
 
 const ROTATION_DELAY = 3000;
 const labels = {
-  en: { heading: 'Announcements', list: 'Choose an announcement', close: 'Close announcements', pause: 'Pause', play: 'Resume', open: 'Open announcement' },
-  ms: { heading: 'Pengumuman', list: 'Pilih pengumuman', close: 'Tutup pengumuman', pause: 'Jeda', play: 'Sambung', open: 'Buka pengumuman' },
-  zh: { heading: '最新公告', list: '选择公告', close: '关闭公告', pause: '暂停', play: '继续', open: '打开公告' },
+  en: { heading: 'Announcements', list: 'Choose an announcement', close: 'Close announcements', open: 'Open announcement' },
+  ms: { heading: 'Pengumuman', list: 'Pilih pengumuman', close: 'Tutup pengumuman', open: 'Buka pengumuman' },
+  zh: { heading: '最新公告', list: '选择公告', close: '关闭公告', open: '打开公告' },
 };
 
 export default function NoticeCarousel({ notices }: { notices: PopupNotice[] }) {
@@ -22,7 +22,7 @@ export default function NoticeCarousel({ notices }: { notices: PopupNotice[] }) 
   const hasNotices = entries.length > 0;
   const [language, setLanguage] = useState<keyof typeof labels>('en');
   const [open, setOpen] = useState(false);
-  const [paused, setPaused] = useState(false);
+  const [reducedMotion, setReducedMotion] = useState(false);
   const [keyboardFocus, setKeyboardFocus] = useState(false);
   const [visible, setVisible] = useState(true);
   const [selected, setSelected] = useState(0);
@@ -43,7 +43,7 @@ export default function NoticeCarousel({ notices }: { notices: PopupNotice[] }) 
     }
 
     const motion = window.matchMedia('(prefers-reduced-motion: reduce)');
-    const syncMotion = () => { if (motion.matches) setPaused(true); };
+    const syncMotion = () => setReducedMotion(motion.matches);
     const syncVisibility = () => setVisible(!document.hidden);
     const syncLanguage = () => {
       const lang = document.documentElement.lang.toLowerCase();
@@ -82,10 +82,10 @@ export default function NoticeCarousel({ notices }: { notices: PopupNotice[] }) 
   }, [open, hasNotices]);
 
   useEffect(() => {
-    if (!open || !visible || paused || keyboardFocus || entries.length < 2) return;
+    if (!open || !visible || reducedMotion || keyboardFocus || entries.length < 2) return;
     const timeout = window.setTimeout(() => setSelected((activeIndex + 1) % entries.length), ROTATION_DELAY);
     return () => window.clearTimeout(timeout);
-  }, [activeIndex, entries.length, keyboardFocus, open, paused, visible]);
+  }, [activeIndex, entries.length, keyboardFocus, open, reducedMotion, visible]);
 
   useEffect(() => {
     if (!open || !visible || entries.length < 2) return;
@@ -142,10 +142,6 @@ export default function NoticeCarousel({ notices }: { notices: PopupNotice[] }) 
           <h2 id={`${prefix}-heading`}>{text.heading}</h2>
         </div>
         <div className="notice-carousel-controls">
-          {entries.length > 1 && <button type="button" className="notice-carousel-play" onClick={() => setPaused(value => !value)}>
-            {paused ? <Play size={15} aria-hidden="true" /> : <Pause size={15} aria-hidden="true" />}
-            <span>{paused ? text.play : text.pause}</span>
-          </button>}
           <button type="button" className="notice-carousel-close" ref={closeRef} onClick={dismiss} aria-label={text.close}><X size={20} aria-hidden="true" /></button>
         </div>
       </header>
@@ -183,7 +179,6 @@ export default function NoticeCarousel({ notices }: { notices: PopupNotice[] }) 
             {notice.id === active.id && <>
               {activeLink ? <a className="notice-carousel-media" href={activeLink} onClick={dismiss} aria-label={`${text.open}: ${notice.title}`}>
                 {open && <img src={notice.imageUrl} alt="" referrerPolicy="no-referrer" />}
-                <span className="notice-carousel-open" aria-hidden="true"><ArrowUpRight size={19} /></span>
               </a> : <div className="notice-carousel-media">{open && <img src={notice.imageUrl} alt={notice.title} referrerPolicy="no-referrer" />}</div>}
               {entries.length > 1 && <div className="notice-carousel-position" aria-hidden="true">{activeIndex + 1} / {entries.length}</div>}
             </>}
