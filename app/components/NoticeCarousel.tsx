@@ -180,7 +180,6 @@ export default function NoticeCarousel({ notices }: { notices: PopupNotice[] }) 
               {activeLink ? <a className="notice-carousel-media" href={activeLink} onClick={dismiss} aria-label={`${text.open}: ${notice.title}`}>
                 {open && <img src={notice.imageUrl} alt="" referrerPolicy="no-referrer" />}
               </a> : <div className="notice-carousel-media">{open && <img src={notice.imageUrl} alt={notice.title} referrerPolicy="no-referrer" />}</div>}
-              {entries.length > 1 && <div className="notice-carousel-position" aria-hidden="true">{activeIndex + 1} / {entries.length}</div>}
             </>}
           </div>)}
         </div>
