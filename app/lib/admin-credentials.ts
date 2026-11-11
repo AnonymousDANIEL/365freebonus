@@ -45,6 +45,7 @@ export async function changeAdminPassword(input: unknown, session: SessionPayloa
       throw new PasswordChangeError(401, "登入已失效，请重新登入后再修改密码。");
     }
     db.prepare("INSERT INTO admin_credentials(id, password_hash, updated_at) VALUES ('primary', ?, ?) ON CONFLICT(id) DO UPDATE SET password_hash=excluded.password_hash, updated_at=excluded.updated_at").run(hash, Date.now());
+    db.exec("DELETE FROM notes_vault_unlocks");
     db.exec("DELETE FROM admin_sessions");
     db.exec("COMMIT");
   } catch (error) { db.exec("ROLLBACK"); throw error; }

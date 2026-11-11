@@ -17,7 +17,7 @@ export function notesResponse(value: unknown, status = 200, token?: string, expi
   const headers: Record<string, string> = { "Cache-Control": "no-store", Vary: "Cookie" };
   if (token !== undefined) {
     const age = token && expiresAt ? Math.max(0, Math.floor((expiresAt - Date.now()) / 1000)) : 0;
-    headers["Set-Cookie"] = `${NOTES_COOKIE}=${token}; Path=/api/admin/notes; HttpOnly; SameSite=Strict; Max-Age=${age}${process.env.NODE_ENV === "production" ? "; Secure" : ""}`;
+    headers["Set-Cookie"] = `${NOTES_COOKIE}=${token}; Path=/api; HttpOnly; SameSite=Strict; Max-Age=${age}${process.env.NODE_ENV === "production" ? "; Secure" : ""}`;
   }
   return Response.json(value, { status, headers });
 }

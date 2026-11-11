@@ -9,6 +9,7 @@ import TelegramGroupSettings from "./TelegramGroupSettings";
 import PopupNoticeSettings from "./PopupNoticeSettings";
 import PasswordSettings from "./PasswordSettings";
 import SecureNotes from "./SecureNotes";
+import NotesActivity from "./NotesActivity";
 import "./social-contacts-admin.css";
 import "./password-settings-admin.css";
 
@@ -332,6 +333,7 @@ export default function AdminClient({ displayName, signInPath }: { displayName: 
   const scheduledCount = brands.length - draftCount - publishedBrands.length;
 
   return <div className="cms-shell" data-admin-theme={theme}>
+    <NotesActivity request={request} />
     <aside className="cms-sidebar">
       <a href="/" className="cms-logo"><span className="cms-logo-symbol">✳</span>{settings?.name || "365freebonus"}<span className="cms-logo-dot">.</span></a>
       <span className="cms-workspace-label">CONTENT WORKSPACE</span>

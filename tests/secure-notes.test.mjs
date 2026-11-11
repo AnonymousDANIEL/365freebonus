@@ -11,13 +11,14 @@ import ts from 'typescript';
 const fixture = mkdtempSync(path.join(tmpdir(), 'secure-notes-'));
 const root = new URL('..', import.meta.url);
 writeFileSync(path.join(fixture, 'package.json'), '{"type":"commonjs"}');
-for (const name of ['app/lib/sqlite', 'app/lib/auth-core', 'app/lib/session-store', 'app/lib/admin-credentials', 'app/lib/directory', 'app/lib/secure-notes', 'app/api/admin/_security', 'app/api/admin/notes/_security', 'app/api/admin/notes/route', 'app/api/admin/notes/vault/route', 'app/api/admin/notes/[id]/route']) {
+for (const name of ['app/lib/sqlite', 'app/lib/auth-core', 'app/lib/session-store', 'app/lib/admin-credentials', 'app/lib/directory', 'app/lib/secure-notes', 'app/api/admin/_security', 'app/api/admin/notes/_security', 'app/api/admin/notes/route', 'app/api/admin/notes/vault/route', 'app/api/admin/notes/[id]/route', 'app/api/auth/logout/route']) {
   const target = path.join(fixture, `${name}.js`);
   mkdirSync(path.dirname(target), { recursive: true });
   writeFileSync(target, ts.transpileModule(readFileSync(new URL(`${name}.ts`, root), 'utf8'), { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, esModuleInterop: true } }).outputText);
 }
 mkdirSync(path.join(fixture, 'node_modules/next'), { recursive: true });
 writeFileSync(path.join(fixture, 'node_modules/next/headers.js'), 'exports.cookies=async()=>({get:name=>globalThis.__secureNotesCookies?.[name]?{value:globalThis.__secureNotesCookies[name]}:undefined});');
+writeFileSync(path.join(fixture, 'node_modules/next/server.js'), 'exports.NextResponse={json(value,options){const response=Response.json(value,options);response.cookies={set(name,value,options){response.headers.append("set-cookie",`${name}=${value}; Path=${options.path}; Max-Age=${options.maxAge}; HttpOnly${options.secure?"; Secure":""}; SameSite=${options.sameSite}`);}};return response;}};');
 writeFileSync(path.join(fixture, 'app/chatgpt-auth.js'), 'exports.authorized=true;exports.getChatGPTUser=async()=>exports.authorized?{userId:"admin"}:null;');
 const require = createRequire(import.meta.url);
 const sqlite = require(path.join(fixture, 'app/lib/sqlite.js'));
@@ -29,6 +30,7 @@ const guard = require(path.join(fixture, 'app/chatgpt-auth.js'));
 const routes = require(path.join(fixture, 'app/api/admin/notes/route.js'));
 const vaultRoute = require(path.join(fixture, 'app/api/admin/notes/vault/route.js'));
 const itemRoute = require(path.join(fixture, 'app/api/admin/notes/[id]/route.js'));
+const logoutRoute = require(path.join(fixture, 'app/api/auth/logout/route.js'));
 const origin = 'https://notes-fixture.example';
 const envNames = ['DATA_DIR','APP_URL','ADMIN_USERNAME','ADMIN_PASSWORD_HASH','SESSION_SECRET','NODE_ENV'];
 const previousEnv = Object.fromEntries(envNames.map(key => [key, process.env[key]]));
@@ -125,16 +127,64 @@ test('notes are encrypted at rest, never returned while locked, and survive a da
   assert.equal(notes.getVaultStatus(admin.payload,token).unlocked,false);
 });
 
-test('unlock is bound to one revocable admin session and has a fixed15 minute expiry', async () => {
+test('remembered authorization survives natural8h admin expiry and re-login until the exact12h idle boundary', async () => {
   const {token,status}=await setup();
+  const createdAt=Date.now();
+  assert.equal(notes.NOTES_UNLOCK_MS,12*60*60*1000);
+  assert.ok(status.expiresAt>admin.payload.exp*1000);
   const other=session();
-  assert.throws(()=>notes.listSecureNotes(other.payload,token),{status:423});
-  assert.ok(status.expiresAt<=Date.now()+notes.NOTES_UNLOCK_MS);
-  assert.equal(notes.getVaultStatus(admin.payload,token,status.expiresAt).unlocked,false);
-  assert.throws(()=>notes.listSecureNotes(admin.payload,token,1,status.expiresAt),{status:423});
+  assert.equal(notes.getVaultStatus(other.payload,token).unlocked,true);
+  const realNow=Date.now;
+  try {
+    Date.now=()=>createdAt+9*60*60*1000;
+    assert.equal(auth.verifySession(admin.token,credentials.getAdminAuthConfig()),null);
+    const relogin=session();
+    assert.equal(sessions.sessionIsActive(admin.payload),false);
+    assert.equal(sqlite.getSqlite().prepare('SELECT COUNT(*) AS count FROM notes_vault_unlocks').get().count,1);
+    assert.equal(notes.getVaultStatus(relogin.payload,token).unlocked,true);
+    Date.now=()=>status.expiresAt-1;
+    assert.equal(notes.getVaultStatus(relogin.payload,token).unlocked,true);
+    Date.now=()=>status.expiresAt;
+    assert.equal(notes.getVaultStatus(relogin.payload,token).unlocked,false);
+    assert.throws(()=>notes.listSecureNotes(relogin.payload,token),{status:423});
+    assert.equal(notes.recordNotesActivity(relogin.payload,token).unlocked,false);
+  } finally {Date.now=realNow;}
+});
+
+test('real activity slides idle expiry; passive reads never extend it and expired tokens cannot be revived', async () => {
+  const {token,status}=await setup();
+  notes.saveSecureNote({title:'Read without touch',body:'Passive'},admin.payload,token);
+  const initial=Date.now();
+  const realNow=Date.now;
+  try {
+    Date.now=()=>initial+60*60*1000;
+    assert.equal(notes.getVaultStatus(admin.payload,token).expiresAt,status.expiresAt);
+    assert.equal(notes.listSecureNotes(admin.payload,token).expiresAt,status.expiresAt);
+    assert.equal(sqlite.getSqlite().prepare('SELECT expires_at FROM notes_vault_unlocks').get().expires_at,status.expiresAt);
+    const renewed=notes.recordNotesActivity(admin.payload,token);
+    assert.equal(renewed.expiresAt,Date.now()+notes.NOTES_UNLOCK_MS);
+    assert.ok(renewed.expiresAt>status.expiresAt);
+    Date.now=()=>renewed.expiresAt;
+    const relogin=session();
+    assert.equal(notes.recordNotesActivity(relogin.payload,token).unlocked,false);
+    assert.equal(sqlite.getSqlite().prepare('SELECT expires_at FROM notes_vault_unlocks').get().expires_at,renewed.expiresAt);
+    assert.equal(notes.recordNotesActivity(relogin.payload,undefined).unlocked,false);
+  } finally {Date.now=realNow;}
+});
+
+test('remember token cannot replace active admin authentication or survive a changed credential fingerprint', async () => {
+  const {token}=await setup();
   sessions.revokeSession(admin.payload);
   assert.throws(()=>notes.getVaultStatus(admin.payload,token),{status:401});
-  assert.equal(sqlite.getSqlite().prepare('SELECT COUNT(*) AS count FROM notes_vault_unlocks').get().count,0);
+  assert.throws(()=>notes.recordNotesActivity(admin.payload,token),{status:401});
+  const other=session();
+  assert.equal(notes.getVaultStatus(other.payload,token).unlocked,true);
+  // Bootstrap password hashes can change without changing the session HMAC key.
+  // The remembered notes binding must include the current password hash too.
+  const changedSalt='abcdef0123456789abcdef0123456789';
+  process.env.ADMIN_PASSWORD_HASH=`scrypt$${changedSalt}$${scryptSync('new-fixture-password',Buffer.from(changedSalt,'hex'),64).toString('hex')}`;
+  assert.equal(notes.getVaultStatus(other.payload,token).unlocked,false);
+  assert.equal(notes.recordNotesActivity(other.payload,token).unlocked,false);
 });
 
 test('PIN change revokes every unlocked session while preserving encrypted notes and disallows oldPIN', async () => {
@@ -212,7 +262,7 @@ test('ciphertext swap/tamper and missing encryption secret fail closed without c
   assert.equal(notes.listSecureNotes(admin.payload,token).total,2);
   const oldSecret=process.env.SESSION_SECRET;
   process.env.SESSION_SECRET='different-fixture-secret-longer-than32-characters';
-  assert.throws(()=>notes.listSecureNotes(admin.payload,token),{status:503});
+  assert.throws(()=>notes.listSecureNotes(admin.payload,token),{status:423});
   process.env.SESSION_SECRET=oldSecret;
   assert.equal(notes.listSecureNotes(admin.payload,token).total,2);
 });
@@ -223,7 +273,8 @@ test('API cookies are HttpOnly Secure scoped; locked routes disclose no titles a
   assert.match(response.headers.get('set-cookie'),/HttpOnly/);
   assert.match(response.headers.get('set-cookie'),/SameSite=Strict/);
   assert.match(response.headers.get('set-cookie'),/; Secure/);
-  assert.match(response.headers.get('set-cookie'),/Path=\/api\/admin\/notes/);
+  assert.match(response.headers.get('set-cookie'),/Path=\/api;/);
+  assert.match(response.headers.get('set-cookie'),/directory_notes_remember=/);
   acceptCookie(response);
   const created=await routes.POST(request('POST',{title:'Sensitive title',body:'Secret body'}));
   assert.equal(created.status,201);
@@ -250,7 +301,7 @@ test('API cookies are HttpOnly Secure scoped; locked routes disclose no titles a
   assert.equal(sqlite.getSqlite().prepare('SELECT COUNT(*) AS count FROM secure_notes').get().count,1);
 });
 
-test('migration13 removes former website credentials and preserves unrelated tables', () => {
+test('migration14 removes former website credentials and preserves unrelated tables', () => {
   closeDatabase();
   const legacyDir=mkdtempSync(path.join(fixture,'legacy-'));
   const filename=path.join(legacyDir,'directory.sqlite');
@@ -260,10 +311,103 @@ test('migration13 removes former website credentials and preserves unrelated tab
   const oldDir=process.env.DATA_DIR;
   process.env.DATA_DIR=legacyDir;
   const db=sqlite.getSqlite();
-  assert.equal(db.prepare('PRAGMA user_version').get().user_version,13);
+  assert.equal(db.prepare('PRAGMA user_version').get().user_version,14);
   assert.equal(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='website_logins'").get(),undefined);
   assert.equal(db.prepare('SELECT marker FROM brands').get().marker,'keep-brand');
   assert.equal(db.prepare('SELECT marker FROM site_settings').get().marker,'keep-settings');
   closeDatabase();
   process.env.DATA_DIR=oldDir;
+});
+
+test('activity API renews only a valid remember cookie and passiveGET never emits a renewal', async () => {
+  const initial=await vaultRoute.POST(request('POST',{action:'setup',pin,confirmPin:pin,currentPassword:password}));
+  acceptCookie(initial);
+  const cookie=globalThis.__secureNotesCookies[notes.NOTES_COOKIE];
+  const status=await initial.json();
+  const realNow=Date.now;
+  try {
+    Date.now=()=>status.expiresAt-notes.NOTES_UNLOCK_MS+1000;
+    const passive=await vaultRoute.GET();
+    assert.equal(passive.headers.get('set-cookie'),null);
+    assert.equal((await passive.json()).expiresAt,status.expiresAt);
+    const active=await vaultRoute.POST(request('POST',{action:'activity'}));
+    const renewed=await active.json();
+    assert.equal(renewed.unlocked,true);
+    assert.equal(renewed.expiresAt,Date.now()+notes.NOTES_UNLOCK_MS);
+    assert.match(active.headers.get('set-cookie'),new RegExp(`^${notes.NOTES_COOKIE}=${cookie}; Path=/api;`));
+    assert.equal(renewed.token,undefined);
+    Date.now=()=>renewed.expiresAt;
+    const relogin=session();
+    globalThis.__secureNotesCookies[auth.SESSION_COOKIE]=relogin.token;
+    const expired=await vaultRoute.POST(request('POST',{action:'activity'}));
+    assert.equal(expired.status,200);
+    assert.equal((await expired.json()).unlocked,false);
+    assert.equal(expired.headers.get('set-cookie'),null);
+    delete globalThis.__secureNotesCookies[notes.NOTES_COOKIE];
+    const absent=await vaultRoute.POST(request('POST',{action:'activity'}));
+    assert.equal((await absent.json()).unlocked,false);
+    assert.equal(absent.headers.get('set-cookie'),null);
+  } finally {Date.now=realNow;}
+});
+
+test('manual lock after re-login and explicitlogout revoke exact tokens issued by an older session', async () => {
+  const {token}=await setup();
+  const relogin=session();
+  notes.lockNotesVault(relogin.payload,token);
+  assert.equal(notes.getVaultStatus(admin.payload,token).unlocked,false);
+  const reopened=await notes.unlockNotesVault({pin},admin.payload);
+  globalThis.__secureNotesCookies={ [auth.SESSION_COOKIE]:relogin.token,[notes.NOTES_COOKIE]:reopened.token };
+  const logout=await logoutRoute.POST(request('POST'));
+  assert.equal(logout.status,200);
+  assert.equal(sessions.sessionIsActive(relogin.payload),false);
+  assert.equal(notes.getVaultStatus(admin.payload,reopened.token).unlocked,false);
+  assert.match(logout.headers.get('set-cookie'),/directory_notes_remember=; Path=\/api; Max-Age=0/);
+  assert.match(logout.headers.get('set-cookie'),/directory_notes_unlock=; Path=\/api\/admin\/notes; Max-Age=0/);
+});
+
+test('logout with missing or expired admin cookie still revokes its exact remember cookie; pendingunlock cannot win', async () => {
+  const {token}=await setup();
+  globalThis.__secureNotesCookies={ [notes.NOTES_COOKIE]:token };
+  assert.equal((await logoutRoute.POST(request('POST'))).status,200);
+  assert.equal(notes.getVaultStatus(admin.payload,token).unlocked,false);
+  const resumed=await notes.unlockNotesVault({pin},admin.payload);
+  globalThis.__secureNotesCookies={ [auth.SESSION_COOKIE]:admin.token,[notes.NOTES_COOKIE]:resumed.token };
+  const pending=notes.unlockNotesVault({pin},admin.payload);
+  await logoutRoute.POST(request('POST'));
+  await assert.rejects(pending,{status:401});
+  const other=session();
+  assert.equal(notes.getVaultStatus(other.payload,resumed.token).unlocked,false);
+});
+
+test('administrator password change revokes remembered authorization without changing the PIN or note encryption', async () => {
+  const {token}=await setup();
+  notes.saveSecureNote({title:'Keep encrypted',body:'Afterpasswordchange'},admin.payload,token);
+  const before=sqlite.getSqlite().prepare('SELECT * FROM notes_vault_settings').get();
+  const expected=credentials.getAdminAuthConfig();
+  await credentials.changeAdminPassword({currentPassword:password,newPassword:'changed-fixture-password',confirmPassword:'changed-fixture-password'},admin.payload,expected);
+  assert.equal(sqlite.getSqlite().prepare('SELECT COUNT(*) AS count FROM notes_vault_unlocks').get().count,0);
+  assert.equal(sqlite.getSqlite().prepare('SELECT pin_hash FROM notes_vault_settings').get().pin_hash,before.pin_hash);
+  const relogin=session();
+  assert.equal(notes.getVaultStatus(relogin.payload,token).unlocked,false);
+  const reopened=await notes.unlockNotesVault({pin},relogin.payload);
+  assert.equal(notes.listSecureNotes(relogin.payload,reopened.token).notes[0].body,'Afterpasswordchange');
+});
+
+test('migration14 revokes v13 ephemeral unlocks while preserving existing PIN and encrypted note ciphertext', async () => {
+  const {token}=await setup();
+  const saved=notes.saveSecureNote({title:'Migration title',body:'Migrationprivate'},admin.payload,token);
+  const db=sqlite.getSqlite();
+  const vaultBefore=db.prepare('SELECT * FROM notes_vault_settings').get();
+  const noteBefore=db.prepare('SELECT * FROM secure_notes WHERE id=?').get(saved.id);
+  db.exec("DROP TABLE notes_vault_unlocks; CREATE TABLE notes_vault_unlocks(token_hash TEXT PRIMARY KEY,session_hash TEXT NOT NULL REFERENCES admin_sessions(id_hash) ON DELETE CASCADE,vault_revision TEXT NOT NULL,expires_at INTEGER NOT NULL); CREATE INDEX secure_notes_unlock_expiry ON notes_vault_unlocks(expires_at); PRAGMA user_version=13;");
+  db.prepare('INSERT INTO notes_vault_unlocks VALUES(?,?,?,?)').run(createHash('sha256').update(token).digest('hex'),auth.sessionIdHash(admin.payload.jti),vaultBefore.revision,Date.now()+900000);
+  closeDatabase();
+  const reopened=sqlite.getSqlite();
+  assert.equal(reopened.prepare('PRAGMA user_version').get().user_version,14);
+  assert.deepEqual(reopened.prepare('SELECT * FROM notes_vault_settings').get(),vaultBefore);
+  assert.deepEqual(reopened.prepare('SELECT * FROM secure_notes WHERE id=?').get(saved.id),noteBefore);
+  assert.equal(reopened.prepare('SELECT COUNT(*) AS count FROM notes_vault_unlocks').get().count,0);
+  assert.equal(reopened.prepare('PRAGMA foreign_key_list(notes_vault_unlocks)').all().length,0);
+  const unlocked=await notes.unlockNotesVault({pin},admin.payload);
+  assert.equal(notes.listSecureNotes(admin.payload,unlocked.token).notes[0].body,'Migrationprivate');
 });

@@ -2,12 +2,12 @@ import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, 
 import { promisify } from "node:util";
 import { verifyCredentials, sessionIdHash, type SessionPayload } from "./auth-core";
 import { getAdminAuthConfig } from "./admin-credentials";
-import { sessionIsActive } from "./session-store";
+import { revokeSession, sessionIsActive } from "./session-store";
 import { getSqlite } from "./sqlite";
 
 const scrypt = promisify(scryptCallback);
-export const NOTES_COOKIE = "directory_notes_unlock";
-export const NOTES_UNLOCK_MS = 15 * 60 * 1000;
+export const NOTES_COOKIE = "directory_notes_remember";
+export const NOTES_UNLOCK_MS = 12 * 60 * 60 * 1000;
 const PIN_WINDOW_MS = 15 * 60 * 1000;
 const PIN_ATTEMPTS = 8;
 const PAGE_SIZE = 20;
@@ -82,16 +82,20 @@ function tokenHash(token: string): string { return createHash("sha256").update(t
 function lockGeneration(session: SessionPayload): string {
   return (getSqlite().prepare("SELECT generation FROM notes_vault_sessions WHERE session_hash=?").get(sessionIdHash(session.jti)) as { generation: string } | undefined)?.generation || "";
 }
+function credentialFingerprint(session: SessionPayload): string {
+  const config = activeAdmin(session);
+  return createHmac("sha256", secretKey("remembered-admin")).update(JSON.stringify([config.username, config.passwordHash, config.secret])).digest("hex");
+}
 function unlockRow(session: SessionPayload, token: string | undefined, current: VaultRow, now: number): UnlockRow | undefined {
   if (!token || !/^[A-Za-z0-9_-]{43}$/.test(token)) return undefined;
-  return getSqlite().prepare("SELECT expires_at FROM notes_vault_unlocks WHERE token_hash=? AND session_hash=? AND vault_revision=? AND expires_at>?").get(tokenHash(token), sessionIdHash(session.jti), current.revision, now) as UnlockRow | undefined;
+  return getSqlite().prepare("SELECT expires_at FROM notes_vault_unlocks WHERE token_hash=? AND credential_fingerprint=? AND vault_revision=? AND expires_at>?").get(tokenHash(token), credentialFingerprint(session), current.revision, now) as UnlockRow | undefined;
 }
 function grantUnlock(session: SessionPayload, current: VaultRow, now: number) {
   const db = getSqlite();
   const token = randomBytes(32).toString("base64url");
-  const expiresAt = Math.min(now + NOTES_UNLOCK_MS, session.exp * 1000);
+  const expiresAt = now + NOTES_UNLOCK_MS;
   db.prepare("DELETE FROM notes_vault_unlocks WHERE expires_at<=? OR session_hash=?").run(now, sessionIdHash(session.jti));
-  db.prepare("INSERT INTO notes_vault_unlocks(token_hash,session_hash,vault_revision,expires_at) VALUES (?,?,?,?)").run(tokenHash(token), sessionIdHash(session.jti), current.revision, expiresAt);
+  db.prepare("INSERT INTO notes_vault_unlocks(token_hash,session_hash,credential_fingerprint,vault_revision,expires_at) VALUES (?,?,?,?,?)").run(tokenHash(token), sessionIdHash(session.jti), credentialFingerprint(session), current.revision, expiresAt);
   return { token, status: { configured: true, unlocked: true, expiresAt } satisfies VaultStatus };
 }
 function requireUnlock(session: SessionPayload, token: string | undefined, now: number): number {
@@ -107,6 +111,33 @@ export function getVaultStatus(session: SessionPayload, token?: string, now = Da
   const current = vault();
   const row = current && unlockRow(session, token, current, now);
   return { configured: Boolean(current), unlocked: Boolean(row), expiresAt: row?.expires_at ?? null };
+}
+// Only explicit, authenticated activity slides the idle expiry. Passive status
+// and note reads never write to the remembered authorization.
+export function recordNotesActivity(session: SessionPayload, token?: string, now?: number): VaultStatus {
+  return writeTransaction(() => {
+    const at = now ?? Date.now();
+    activeAdmin(session);
+    const current = vault();
+    const existing = current && unlockRow(session, token, current, at);
+    if (!current || !existing || !token) return { configured: Boolean(current), unlocked: false, expiresAt: null };
+    const expiresAt = Math.max(existing.expires_at, at + NOTES_UNLOCK_MS);
+    const result = getSqlite().prepare("UPDATE notes_vault_unlocks SET expires_at=? WHERE token_hash=? AND credential_fingerprint=? AND vault_revision=? AND expires_at>?").run(expiresAt, tokenHash(token), credentialFingerprint(session), current.revision, at);
+    return result.changes === 1 ? { configured: true, unlocked: true, expiresAt } : { configured: true, unlocked: false, expiresAt: null };
+  });
+}
+function revokeUnlockRows(session: SessionPayload | null, token?: string) {
+  const db = getSqlite();
+  if (token && /^[A-Za-z0-9_-]{43}$/.test(token)) db.prepare("DELETE FROM notes_vault_unlocks WHERE token_hash=?").run(tokenHash(token));
+  if (session) db.prepare("DELETE FROM notes_vault_unlocks WHERE session_hash=?").run(sessionIdHash(session.jti));
+}
+// Logout may happen after the admin session expired. Revoke the exact supplied
+// remember token even then, without accepting it as administrator authentication.
+export function logoutNotesAndAdmin(session: SessionPayload | null, token?: string) {
+  writeTransaction(() => {
+    revokeUnlockRows(session, token);
+    if (session) revokeSession(session);
+  });
 }
 export async function setupNotesVault(value: unknown, session: SessionPayload, now = Date.now()) {
   const input = checkedObject(value);
@@ -154,7 +185,7 @@ export function lockNotesVault(session: SessionPayload, token?: string): VaultSt
     // unlock verification cannot mint a new token after this lock commits.
     const db = getSqlite();
     db.prepare("INSERT INTO notes_vault_sessions(session_hash,generation) VALUES (?,?) ON CONFLICT(session_hash) DO UPDATE SET generation=excluded.generation").run(sessionIdHash(session.jti), randomUUID());
-    db.prepare("DELETE FROM notes_vault_unlocks WHERE session_hash=?").run(sessionIdHash(session.jti));
+    revokeUnlockRows(session, token);
     return { configured: Boolean(vault()), unlocked: false, expiresAt: null };
   });
 }
@@ -225,7 +256,7 @@ export function saveSecureNote(value: unknown, session: SessionPayload, token?: 
   const input = content(value);
   const expected = id === undefined ? undefined : expectedRevision(input.expectedRevision);
   return writeTransaction(() => {
-    requireUnlock(session, token, now);
+    requireUnlock(session, token, Math.max(now, Date.now()));
     const db = getSqlite();
     const revision = randomUUID();
     if (id === undefined) {
@@ -244,7 +275,7 @@ export function saveSecureNote(value: unknown, session: SessionPayload, token?: 
 export function deleteSecureNote(value: unknown, session: SessionPayload, token: string | undefined, id: number, now = Date.now()) {
   const expected = expectedRevision(checkedObject(value).expectedRevision);
   return writeTransaction(() => {
-    requireUnlock(session, token, now);
+    requireUnlock(session, token, Math.max(now, Date.now()));
     const db = getSqlite();
     const previous = db.prepare("SELECT revision FROM secure_notes WHERE id=?").get(id) as { revision: string } | undefined;
     if (!previous) throw new SecureNotesError(404, "找不到这条笔记。");

@@ -1,5 +1,5 @@
 import { jsonBody } from "../../_security";
-import { changeNotesPin, getVaultStatus, lockNotesVault, SecureNotesError, setupNotesVault, unlockNotesVault } from "../../../../lib/secure-notes";
+import { changeNotesPin, getVaultStatus, lockNotesVault, recordNotesActivity, SecureNotesError, setupNotesVault, unlockNotesVault } from "../../../../lib/secure-notes";
 import { notesContext, notesError, notesResponse } from "../_security";
 
 export const dynamic = "force-dynamic";
@@ -20,6 +20,10 @@ export async function POST(request: Request) {
       return notesResponse(result.status, 200, result.token, result.status.expiresAt);
     }
     if (input.action === "lock") return notesResponse(lockNotesVault(session, token), 200, "", null);
+    if (input.action === "activity") {
+      const status = recordNotesActivity(session, token);
+      return status.unlocked ? notesResponse(status, 200, token, status.expiresAt) : notesResponse(status);
+    }
     if (input.action === "changePin") return notesResponse(await changeNotesPin(input, session, token), 200, "", null);
     throw new SecureNotesError(400, "不支持的安全笔记操作。");
   } catch (error) { return notesError(error); }
