@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Gamepad2, Moon, Orbit, Pause, Play, Shuffle, Sparkles, Sun, Triangle } from 'lucide-react';
+import { Gamepad2, Moon, Orbit, Shuffle, Sparkles, Sun, Triangle } from 'lucide-react';
 import type { Brand } from '../lib/directory';
 import './random-brand-picker.css';
 
@@ -39,8 +39,6 @@ export default function RandomBrandPicker({ brands, lang, onPick }: Props) {
   const poolKey = useMemo(() => JSON.stringify(pool.map(brand => [brand.id, brand.name, brand.imageUrl, brand.icon, brand.color])), [pool]);
   const [reel, setReel] = useState<Reel>(() => idleReel(pool));
   const [spinning, setSpinning] = useState(false);
-  const [paused, setPaused] = useState(false);
-  const pausedRef = useRef(false);
   const [selectedId, setSelectedId] = useState<string>();
   const [announcement, setAnnouncement] = useState('');
   const viewportRef = useRef<HTMLDivElement>(null);
@@ -110,7 +108,7 @@ export default function RandomBrandPicker({ brands, lang, onPick }: Props) {
     const motion = window.matchMedia('(prefers-reduced-motion: reduce)');
     const idleTick = (now: number) => {
       if (stopped || motion.matches || document.hidden || !current.current.pool.length) return;
-      if (lastFrame && !pausedRef.current) position += Math.min((now - lastFrame) / 1000, .1) * IDLE_SPEED;
+      if (lastFrame) position += Math.min((now - lastFrame) / 1000, .1) * IDLE_SPEED;
       lastFrame = now;
       position = CENTER + (position - CENTER) % current.current.pool.length;
       idlePosition.current = position;
@@ -208,11 +206,6 @@ export default function RandomBrandPicker({ brands, lang, onPick }: Props) {
         <button type="button" className="random-picker-button" onClick={spin} disabled={spinning || !pool.length}>
           <Shuffle size={17} aria-hidden="true" /><span>{spinning ? t.spinning : t.spin}</span>
         </button>
-        {!!pool.length && <button type="button" className="random-picker-motion" disabled={spinning} aria-pressed={paused}
-          aria-label={lang === '中文' ? (paused ? '继续滚动品牌' : '暂停滚动品牌') : lang === 'BM' ? (paused ? 'Sambung pergerakan jenama' : 'Jeda pergerakan jenama') : (paused ? 'Resume brand animation' : 'Pause brand animation')}
-          onClick={() => { pausedRef.current = !pausedRef.current; setPaused(pausedRef.current); }}>
-          {paused ? <Play size={16} aria-hidden="true" /> : <Pause size={16} aria-hidden="true" />}
-        </button>}
       </div>
     </div>
     <span className="random-picker-announcement" role="status" aria-live="polite" aria-atomic="true">{announcement}</span>
