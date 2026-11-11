@@ -12,7 +12,7 @@ export function getDataDirectory(): string {
 function migrate(db: DatabaseSync) {
   if (migrated.has(db)) return;
   const readVersion = () => (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
-  if (readVersion() < 10) {
+  if (readVersion() < 11) {
     db.exec("BEGIN IMMEDIATE");
     try {
       // Read again inside the write lock, so concurrent process starts cannot
@@ -141,6 +141,14 @@ function migrate(db: DatabaseSync) {
         );
         CREATE INDEX popup_notices_public_order ON popup_notices(enabled, sort_order, id);
         PRAGMA user_version = 10;
+      `);
+      if (version < 11) db.exec(`
+        CREATE TABLE admin_credentials (
+          id TEXT PRIMARY KEY CHECK (id = 'primary'),
+          password_hash TEXT NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+        PRAGMA user_version = 11;
       `);
       db.exec("COMMIT");
     } catch (error) { db.exec("ROLLBACK"); throw error; }

@@ -31,6 +31,8 @@ Run `node scripts/create-admin.mjs` locally to generate a random password, scryp
 
 If using `.env.local`, escape each `$` in the password hash as `\$` because Next.js expands dotenv variables. Railway variables store the raw value without escaping. `.env*`, database files, dependencies and generated builds are excluded from source control. Admin writes fail closed when authentication has not been configured.
 
+After signing in, use **更改密码** in the dashboard sidebar. Enter the current password, then a new password of 12–128 characters twice. A successful change signs out every device and requires a new login. Only a salted scrypt hash is stored in the private persistent database, and it takes precedence over the bootstrap `ADMIN_PASSWORD_HASH` after the first change. Deployments do not reset it. Keep `SESSION_SECRET` unchanged so saved Telegram credentials remain readable. Recovery of a forgotten password requires an authenticated infrastructure operator; there is no public password-reset endpoint.
+
 ## Railway
 
 The Dockerfile builds a standalone Next.js server with Node.js 24. Connect this repository to one Railway service, mount a persistent volume at `/data`, set `APP_URL` to the Railway or custom domain, and configure the admin variables. Use a single service replica with SQLite. `railway.json` configures `/api/health` and restart behavior. GitHub pushes to the connected branch trigger deployment.

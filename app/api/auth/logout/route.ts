@@ -1,6 +1,7 @@
 import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
-import { authConfig, SESSION_COOKIE, verifySession } from "../../../lib/auth-core";
+import { SESSION_COOKIE, verifySession } from "../../../lib/auth-core";
+import { getAdminAuthConfig } from "../../../lib/admin-credentials";
 import { revokeSession } from "../../../lib/session-store";
 import { apiError, authorizeOrigin } from "../../admin/_security";
 export const dynamic = "force-dynamic";
@@ -8,7 +9,7 @@ export const runtime = "nodejs";
 export async function POST(request: Request) {
   try {
     authorizeOrigin(request);
-    const config = authConfig();
+    const config = getAdminAuthConfig();
     const token = (await cookies()).get(SESSION_COOKIE)?.value;
     const payload = config && verifySession(token, config);
     if (payload) revokeSession(payload);

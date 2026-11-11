@@ -151,6 +151,7 @@ test('upgrading a v9 database adds an empty notices table while preserving exist
   const before = getSqlite();
   // Removing the additive table recreates the schema immediately before v10.
   before.exec(`DROP TABLE popup_notices;
+    DROP TABLE admin_credentials;
     INSERT INTO site_settings (id, name, eyebrow, headline, description, announcement)
       VALUES ('primary', 'Existing site', 'Existing eyebrow', 'Existing headline', 'Existing copy', 'Existing notice');
     INSERT INTO telegram_promotion_settings (id, enabled, chat_id, token_ciphertext)
@@ -160,7 +161,7 @@ test('upgrading a v9 database adds an empty notices table while preserving exist
 
   assert.deepEqual(await readPublicPopupNotices(), []);
   const after = getSqlite();
-  assert.equal(after.prepare('PRAGMA user_version').get().user_version, 10);
+  assert.equal(after.prepare('PRAGMA user_version').get().user_version, 11);
   assert.equal(after.prepare("SELECT announcement FROM site_settings WHERE id = 'primary'").get().announcement, 'Existing notice');
   assert.equal(after.prepare("SELECT token_ciphertext FROM telegram_promotion_settings WHERE id = 'primary'").get().token_ciphertext, 'fixture-ciphertext');
   const created = await responseBody(await route.POST(request('POST', example)), 201);

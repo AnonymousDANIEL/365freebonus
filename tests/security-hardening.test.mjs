@@ -13,7 +13,7 @@ const fixture = mkdtempSync(path.join(tmpdir(), 'directory-security-'));
 writeFileSync(path.join(fixture, 'package.json'), '{"type":"commonjs"}');
 symlinkSync(path.join(project, 'node_modules'), path.join(fixture, 'node_modules'), 'dir');
 for (const source of [
-  'app/lib/sqlite.ts', 'app/lib/directory.ts', 'app/lib/auth-core.ts', 'app/lib/session-store.ts',
+  'app/lib/sqlite.ts', 'app/lib/directory.ts', 'app/lib/auth-core.ts', 'app/lib/session-store.ts', 'app/lib/admin-credentials.ts',
   'app/api/admin/_security.ts', 'app/api/auth/login/route.ts', 'app/api/health/route.ts',
 ]) {
   const target = path.join(fixture, source.replace(/\.ts$/, '.js'));

@@ -16,7 +16,7 @@ writeFileSync(path.join(fixture, 'package.json'), '{"type":"commonjs"}');
 symlinkSync(path.join(project, 'node_modules'), path.join(fixture, 'node_modules'), 'dir');
 for (const source of [
   'app/lib/sqlite.ts', 'app/lib/directory.ts', 'app/lib/server-directory.ts',
-  'app/lib/image-url.ts', 'app/lib/auth-core.ts', 'app/lib/session-store.ts',
+  'app/lib/image-url.ts', 'app/lib/auth-core.ts', 'app/lib/session-store.ts', 'app/lib/admin-credentials.ts',
   'app/chatgpt-auth.ts', 'app/api/admin/_security.ts', 'app/api/admin/_validation.ts',
 ]) {
   const target = path.join(fixture, source.replace(/\.ts$/, '.js'));
@@ -85,7 +85,7 @@ test('new installations have exact multiline hero copy and disabled social chann
   assert.deepEqual(socials(settings), emptySocial);
   assert.equal(Object.getPrototypeOf(settings), Object.prototype);
   assert.deepEqual(JSON.parse(JSON.stringify(settings)), settings);
-  assert.equal(sqlite.getSqlite().prepare('PRAGMA user_version').get().user_version, 10);
+  assert.equal(sqlite.getSqlite().prepare('PRAGMA user_version').get().user_version, 11);
 });
 
 test('v4 migration replaces only exact legacy hero fields and retains site assets, brands and auth data', async () => {
@@ -103,7 +103,7 @@ test('v4 migration replaces only exact legacy hero fields and retains site asset
       process.env.DATA_DIR = dataDir;
       const data = await repository.readDirectory(true);
       const db = sqlite.getSqlite();
-      assert.equal(db.prepare('PRAGMA user_version').get().user_version, 10);
+      assert.equal(db.prepare('PRAGMA user_version').get().user_version, 11);
       assert.equal(data.settings.headline, oldHeadline === legacyHeadline ? headline : oldHeadline);
       assert.equal(data.settings.description, oldDescription === legacyDescription ? description : oldDescription);
       assert.deepEqual(socials(data.settings), emptySocial);

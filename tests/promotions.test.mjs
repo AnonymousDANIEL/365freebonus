@@ -15,7 +15,7 @@ writeFileSync(path.join(fixture, 'package.json'), '{"type":"commonjs"}');
 symlinkSync(path.join(project, 'node_modules'), path.join(fixture, 'node_modules'), 'dir');
 for (const source of [
   'app/lib/sqlite.ts', 'app/lib/directory.ts', 'app/lib/server-directory.ts', 'app/lib/brand-links.ts',
-  'app/lib/image-url.ts', 'app/lib/auth-core.ts', 'app/lib/session-store.ts',
+  'app/lib/image-url.ts', 'app/lib/auth-core.ts', 'app/lib/session-store.ts', 'app/lib/admin-credentials.ts',
   'app/chatgpt-auth.ts', 'app/api/admin/_security.ts', 'app/api/admin/_validation.ts',
 ]) {
   const target = path.join(fixture, source.replace(/\.ts$/, '.js'));
@@ -139,7 +139,7 @@ test('migrations preserve brand data and existing expiry without creating Telegr
       process.env.DATA_DIR = legacyPath;
       const saved = await repository.readDirectory(true, now);
       const upgraded = sqlite.getSqlite();
-      assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version, 10);
+      assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version, 11);
       assert.equal(upgraded.prepare('SELECT COUNT(*) AS count FROM telegram_promotion_outbox').get().count, version >= 5 ? 1 : 0);
       assert.equal(upgraded.prepare('SELECT COUNT(*) AS count FROM telegram_private_contacts').get().count, 0);
       const runtime = upgraded.prepare("SELECT revision, next_offset, last_polled_at, sent, keyword_replies, private_replies FROM telegram_welcome_state WHERE id='primary'").get();

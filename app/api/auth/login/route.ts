@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
-import { authConfig, issueSession, safeReturnPath, SESSION_COOKIE, SESSION_MAX_AGE, verifyCredentials } from "../../../lib/auth-core";
+import { issueSession, safeReturnPath, SESSION_COOKIE, SESSION_MAX_AGE, verifyCredentials } from "../../../lib/auth-core";
+import { getAdminAuthConfig } from "../../../lib/admin-credentials";
 import { clientIpKey, clearLoginAttempts, consumeLoginAttempt, saveSession } from "../../../lib/session-store";
 import { apiError, ApiError, authorizeOrigin, jsonBody } from "../../admin/_security";
 export const dynamic = "force-dynamic";
@@ -10,7 +11,7 @@ function recordLoginEvent(event: "admin_login_failed" | "admin_login_rate_limite
 export async function POST(request: Request) {
   try {
     authorizeOrigin(request);
-    const config = authConfig();
+    const config = getAdminAuthConfig();
     if (!config) throw new ApiError(503, "管理员入口尚未配置完成，请联系网站拥有者。");
     const ipKey = clientIpKey(request);
     const attempt = consumeLoginAttempt(ipKey);
