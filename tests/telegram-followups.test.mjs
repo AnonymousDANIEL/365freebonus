@@ -8,7 +8,7 @@ import ts from 'typescript';
 
 const fixture = mkdtempSync(path.join(tmpdir(), 'telegram-followups-'));
 writeFileSync(path.join(fixture, 'package.json'), '{"type":"commonjs"}');
-for (const name of ['sqlite','telegram-bot','telegram-keywords','telegram-followups','telegram-welcome']) {
+for (const name of ['auth-core', 'brand-links', 'directory', 'image-url', 'image-media', 'telegram-background', 'telegram-brand-card', 'telegram-brand-search', 'sqlite','telegram-bot','telegram-keywords','telegram-followups','telegram-welcome']) {
   writeFileSync(path.join(fixture, `${name}.js`), ts.transpileModule(readFileSync(new URL(`../app/lib/${name}.ts`, import.meta.url), 'utf8'), { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, esModuleInterop:true } }).outputText);
 }
 const require = createRequire(import.meta.url);

@@ -1,13 +1,8 @@
 import { createCipheriv, createDecipheriv, createHmac, randomBytes, randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
-import { getAdminPath } from "./auth-core";
-import { brandAnnouncementPath } from "./brand-links";
-import { isSafeSocialUrl } from "./directory";
-import { MAX_IMAGE_BYTES, openImage } from "./image-media";
-import { isSafeImageUrl, isUploadedImageUrl } from "./image-url";
 import { getSqlite } from "./sqlite";
-import { cleanTelegramBackground } from "./telegram-background";
-import { telegramRequest, type TelegramUpload } from "./telegram-bot";
+import { telegramRequest } from "./telegram-bot";
+import { sendTelegramBrandCard, telegramPublicOrigin } from "./telegram-brand-card";
 import { startTelegramWelcomeWorker } from "./telegram-welcome";
 
 type StoredSettings = {
@@ -52,8 +47,6 @@ type Delivery = {
   category: "Update" | "New";
   image_url: string;
 };
-type PromotionMedia = TelegramUpload | { field: "photo" | "animation"; url: string };
-const mediaMethods = { photo: "sendPhoto", animation: "sendAnimation", document: "sendDocument" } as const;
 
 const TOKEN_FORMAT = /^[1-9]\d{0,15}:[A-Za-z0-9_-]{20,128}$/;
 const USERNAME_FORMAT = /^@[A-Za-z0-9_]{1,32}$/;
@@ -126,13 +119,6 @@ function writeTransaction<T>(db: DatabaseSync, write: () => T): T {
   }
 }
 
-function publicOrigin() {
-  const url = process.env.APP_URL || (process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : "");
-  try {
-    const origin = new URL(url);
-    return ["https:", "http:"].includes(origin.protocol) && !origin.username && !origin.password ? origin.origin : "";
-  } catch { return ""; }
-}
 
 function validChatId(chatId: string) {
   return /^-[1-9]\d{0,15}$/.test(chatId) && Number.isSafeInteger(Number(chatId));
@@ -242,7 +228,7 @@ export function telegramPromotionStatus() {
   const followupError = db.prepare("SELECT last_error FROM telegram_private_followups WHERE last_error <> '' ORDER BY next_attempt_at DESC, chat_id DESC LIMIT 1").get() as { last_error: string } | undefined;
   let lastError = recent?.last_error || "";
   if (settings.enabled && !decryptToken(settings.token_ciphertext)) lastError = "无法读取已保存的机器人 Token，请重新填写。";
-  else if (settings.enabled && !publicOrigin()) lastError = "服务器尚未配置公开网站地址，无法生成公告链接。";
+  else if (settings.enabled && !telegramPublicOrigin()) lastError = "服务器尚未配置公开网站地址，无法生成公告链接。";
   return {
     enabled: settings.enabled === 1, chatId: settings.chat_id, hasToken: Boolean(settings.token_ciphertext), counts, lastError,
     promotionMessage: settings.promotion_message,
@@ -311,7 +297,7 @@ export async function saveTelegramPromotionSettings(input: SettingsInput) {
   }
   if (input.enabled) {
     if (!chatId) throw new TelegramSettingsError("请填写 Telegram 群组或频道的 Chat ID、@用户名或公开链接。");
-    if (!publicOrigin()) throw new TelegramSettingsError("服务器尚未配置公开网站地址，无法生成公告链接。", 503);
+    if (!telegramPublicOrigin()) throw new TelegramSettingsError("服务器尚未配置公开网站地址，无法生成公告链接。", 503);
   }
   const previouslyTargetEnabled = previous.welcome_enabled || previous.keyword_enabled;
   const privateModeChanged = privateEnabled !== (previous.private_enabled === 1);
@@ -401,7 +387,7 @@ function claimDelivery(db: DatabaseSync) {
         AND (last_error <> ? OR next_attempt_at <= ?)`).run(EXPIRED_ERROR, now, now, RATE_LIMIT_ERROR, now);
 
     const settings = storedSettings(db);
-    const origin = publicOrigin();
+    const origin = telegramPublicOrigin();
     if (!settings.enabled || !validChatId(settings.chat_id) || !origin) return null;
     const token = decryptToken(settings.token_ciphertext);
     if (!token) return null;
@@ -421,82 +407,15 @@ function claimDelivery(db: DatabaseSync) {
   });
 }
 
-async function promotionMedia(imageUrl: string, origin: string, slug: string): Promise<PromotionMedia | null> {
-  const value = imageUrl.trim();
-  if (!value) return null;
-  const relative = value.startsWith("/");
-  if (!(relative ? isSafeImageUrl(value) : isSafeSocialUrl(value))) return null;
-  const url = relative ? new URL(value, origin) : new URL(value);
-  if (url.origin !== origin || !isUploadedImageUrl(url.pathname)) {
-    const field = url.pathname.toLowerCase().endsWith(".gif") ? "animation" : "photo";
-    return { field, url: url.href };
-  }
-
-  const fileName = url.pathname.slice("/api/images/".length);
-  try {
-    const image = await openImage(fileName);
-    if (!image) return null;
-    // openImage bounds the stream to the size of the validated upload.
-    const bytes = Buffer.from(await new Response(image.stream).arrayBuffer());
-    if (bytes.length !== image.size) return null;
-    const clean = await cleanTelegramBackground(bytes, image.mime).catch(() => null);
-    if (clean) return { field: "document", fileName: `${slug}.${clean.extension}`, mime: clean.mime, bytes: clean.bytes };
-    if (image.mime === "image/webp") {
-      const { default: sharp } = await import("sharp");
-      const converted = await sharp(bytes, { limitInputPixels: 24_000_000 })
-        .resize({ width: 1600, height: 1600, fit: "inside", withoutEnlargement: true })
-        .flatten({ background: "#ffffff" })
-        .jpeg({ quality: 88 })
-        .toBuffer();
-      if (!converted.length || converted.length > MAX_IMAGE_BYTES) return null;
-      return { field: "photo", fileName: fileName.replace(/\.webp$/, ".jpg"), mime: "image/jpeg", bytes: converted };
-    }
-    return { field: image.mime === "image/gif" ? "animation" : "photo", fileName, mime: image.mime, bytes };
-  } catch { return null; }
-}
-
-function truncatePromotionText(text: string, limit: number): string {
-  return text.length <= limit ? text : `${text.slice(0, limit - 1).replace(/[\uD800-\uDBFF]$/, "").trimEnd()}…`;
-}
 
 export async function deliverTelegramPromotionOnce() {
   const db = getSqlite();
   const delivery = claimDelivery(db);
   if (!delivery) return;
-  const url = new URL(brandAnnouncementPath(delivery.slug, delivery.brand_id, getAdminPath()), delivery.origin);
-  const title = `${delivery.category} · ${delivery.name}`;
-  const tagline = delivery.tagline.trim();
-  const description = delivery.description.trim();
-  // Brand-page links now live in the inline keyboard, including old {link} templates.
-  const fields = { category: delivery.category, name: delivery.name, tagline, description, link: "" };
-  const customText = delivery.message.replace(/\{(category|name|tagline|description|link)\}/g, (_, field: keyof typeof fields) => fields[field]).trim();
-  const content = (customText
-    ? [customText, description && !customText.includes(description) ? description : ""]
-    : [title, tagline, description !== tagline ? description : ""])
-    .filter(Boolean).join("\n\n").split(url.href).join("").replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
-  const text = truncatePromotionText(content || title, 4_096);
-  const brandLink = delivery.link.trim();
-  const replyMarkup = { inline_keyboard: [
-    [{ text: delivery.name, url: url.href }],
-    [{ text: "Visit website", url: new URL("/", delivery.origin).href },
-      ...(isSafeSocialUrl(brandLink) ? [{ text: "Join Now", url: brandLink }] : [])],
-  ] };
-  const sendText = () => telegramRequest(delivery.token, "sendMessage", {
-    chat_id: delivery.chatId, text, reply_markup: replyMarkup, link_preview_options: { is_disabled: true },
-  });
-  const caption = truncatePromotionText(content || title, 1_024);
-  const media = caption ? await promotionMedia(delivery.image_url, delivery.origin, delivery.slug) : null;
-  let response;
-  if (media && caption) {
-    const method = mediaMethods[media.field];
-    const parameters = { chat_id: delivery.chatId, caption, reply_markup: replyMarkup };
-    response = "url" in media
-      ? await telegramRequest(delivery.token, method, { ...parameters, [media.field]: media.url })
-      : await telegramRequest(delivery.token, method, media.field === "document"
-        ? { ...parameters, disable_content_type_detection: true }
-        : parameters, media);
-    if (response && !response.ok && [400, 403].includes(response.code)) response = await sendText();
-  } else response = await sendText();
+  const response = await sendTelegramBrandCard(delivery.token, delivery.chatId, {
+    id: delivery.brand_id, name: delivery.name, slug: delivery.slug, category: delivery.category,
+    tagline: delivery.tagline, description: delivery.description, link: delivery.link, imageUrl: delivery.image_url,
+  }, delivery.origin, { template: delivery.message });
   const now = Date.now();
   const finish = (status: DeliveryStatus, lastError = "", nextAttemptAt = now, messageId: number | null = null) => {
     db.prepare(`UPDATE telegram_promotion_outbox SET status = ?, next_attempt_at = ?, last_error = ?, sent_at = ?, message_id = ?

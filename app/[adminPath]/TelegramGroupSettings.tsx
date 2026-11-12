@@ -437,6 +437,7 @@ export default function TelegramGroupSettings({ request, signInPath }: AdminProp
                 onChange={event => setDraft({ ...draft, chatBot: { ...draft.chatBot, keywordEnabled: event.target.checked } })} />
               启用群组关键词回复
             </label>
+            <small>未命中自定义规则时，自动搜索网页 All 中已上架的品牌。输入至少 2 个字符，支持部分品牌名称或标识，不区分大小写。</small>
             <dl className="cms-telegram-counts" aria-label="聊天机器人运行记录">
               <div><dt>已发送欢迎消息</dt><dd>{config.welcome.sent}</dd></div>
               <div><dt>已发送群组关键词回复</dt><dd>{config.chatBot.keywordReplies}</dd></div>
@@ -448,7 +449,7 @@ export default function TelegramGroupSettings({ request, signInPath }: AdminProp
         <section className="cms-settings-panel" aria-labelledby="telegram-private-title">
           <div>
             <h2 id="telegram-private-title">1 对 1 私聊</h2>
-            <p>用户可以点击 Start 后选择关键词，或直接输入关键词。私聊沿用下方规则，可独立于群组关键词回复开启。</p>
+            <p>用户可以点击 Start 后选择关键词，或直接输入关键词。私聊沿用下方规则，也支持输入部分品牌名称搜索网页 All 的已上架品牌，可独立于群组关键词回复开启。</p>
           </div>
           <div className="cms-settings-fields">
             <label className="cms-telegram-switch">

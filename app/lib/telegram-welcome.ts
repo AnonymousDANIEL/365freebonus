@@ -1,7 +1,11 @@
 import { randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
+import { getAdminPath } from "./auth-core";
+import { brandAnnouncementPath } from "./brand-links";
 import { getSqlite } from "./sqlite";
 import { answerTelegramCallback, telegramRequest, telegramUpdates } from "./telegram-bot";
+import { sendTelegramBrandCard, telegramPublicOrigin } from "./telegram-brand-card";
+import { readPublicTelegramBrand, searchPublicTelegramBrands } from "./telegram-brand-search";
 import { normalizeTelegramKeyword } from "./telegram-keywords";
 import { cancelPrivateFollowupReply, observePrivateFollowupInput, privateFollowupSnapshot, recordPrivateFollowupOutbound, sendDuePrivateFollowups, type FollowupSettings } from "./telegram-followups";
 
@@ -30,6 +34,7 @@ type ChatReply = {
   threadId?: number;
   callbackId?: string;
   buttonRuleId?: number;
+  brandId?: string;
   followupRevision?: string;
   keyboard?: InlineButton[][];
 };
@@ -45,6 +50,7 @@ const PRIVATE_START_URL = "https://t.me/FreeBonus365ChatBot?start=welcome";
 const DEFAULT_PRIVATE_GREETING = "欢迎使用 365 Free Bonus。请选择下方菜单，或直接输入关键词。";
 const DEFAULT_PRIVATE_TEXT_GREETING = "欢迎使用 365 Free Bonus。请直接输入关键词。";
 const MENU_PAGE_SIZE = 8;
+const BRAND_CARD_LEASE_MS = 60_000;
 
 function inTransaction<T>(db: DatabaseSync, operation: () => T): T {
   db.exec("BEGIN IMMEDIATE");
@@ -182,7 +188,44 @@ function keywordResponse(db: DatabaseSync, text: string): { text: string; showBu
   return { text: shorten(rule.response.trim(), 4_096), showButton: rule.show_button === 1 };
 }
 
-function keywordReply(db: DatabaseSync, update: Record<string, unknown>, settings: ChatSettings): ChatReply | null {
+function brandSearchReply(db: DatabaseSync, input: string, target: Pick<ChatReply, "kind" | "chatId" | "messageId" | "threadId">, now: number): ChatReply | null {
+  const origin = telegramPublicOrigin();
+  if (!origin) return null;
+  const matches = searchPublicTelegramBrands(db, input, now);
+  if (!matches.length) return null;
+  if (matches.length === 1) return { ...target, brandId: matches[0].id };
+  const keyboard: InlineButton[][] = matches.slice(0, MENU_PAGE_SIZE).map(brand => [{
+    text: shorten(brand.name, 64),
+    ...(/^[A-Za-z0-9_-]{1,58}$/.test(brand.id)
+      ? { callback_data: `brand:${brand.id}` }
+      : { url: new URL(brandAnnouncementPath(brand.slug, brand.id, getAdminPath()), origin).href }),
+  }]);
+  return { ...target, text: `Found ${matches.length} brands. Choose a brand below.${matches.length > MENU_PAGE_SIZE ? " Showing the first 8; type more of the brand name to narrow your search." : ""}`, keyboard };
+}
+
+function brandCallbackReply(db: DatabaseSync, update: Record<string, unknown>, settings: ChatSettings, now: number): ChatReply | null {
+  const callback = asRecord(update.callback_query);
+  const message = asRecord(callback?.message);
+  const sender = asRecord(callback?.from);
+  if (!callback || !message || !sender || sender.is_bot !== false || !positiveInteger(sender.id)
+    || !positiveInteger(message.message_id) || typeof callback.id !== "string" || !callback.id || callback.id.length > 128
+    || typeof callback.data !== "string") return null;
+  const match = /^brand:([A-Za-z0-9_-]{1,58})$/.exec(callback.data);
+  if (!match) return null;
+  const privateId = privateChatId(message.chat, sender);
+  let target: Pick<ChatReply, "kind" | "chatId" | "messageId" | "threadId">;
+  if (privateId !== null && settings.private_enabled === 1 && isCurrentEvent(message.date, settings.private_started_at)) {
+    target = { kind: "private", chatId: privateId };
+  } else if (settings.keyword_enabled === 1 && targetChat(message.chat, settings) && isCurrentEvent(message.date, settings.keyword_started_at)) {
+    target = { kind: "keyword", chatId: Number(settings.welcome_chat_id), messageId: message.message_id,
+      threadId: message.is_topic_message === true && positiveInteger(message.message_thread_id) ? message.message_thread_id : undefined };
+  } else return null;
+  const brand = readPublicTelegramBrand(db, match[1], now);
+  return { ...target, callbackId: callback.id, ...(brand
+    ? { brandId: brand.id } : { text: "This brand is no longer available. Please search for another brand." }) };
+}
+
+function keywordReply(db: DatabaseSync, update: Record<string, unknown>, settings: ChatSettings, now: number): ChatReply | null {
   if (settings.keyword_enabled !== 1) return null;
   const message = asRecord(update.message);
   if (!message || !isCurrentEvent(message.date, settings.keyword_started_at) || !targetChat(message.chat, settings)) return null;
@@ -190,9 +233,9 @@ function keywordReply(db: DatabaseSync, update: Record<string, unknown>, setting
   if (!sender || sender.is_bot !== false || !positiveInteger(sender.id) || !positiveInteger(message.message_id)) return null;
   const input = originalText(message);
   const matched = input && keywordResponse(db, input);
-  if (!matched) return null;
   const threadId = message.is_topic_message === true && positiveInteger(message.message_thread_id) ? message.message_thread_id : undefined;
-  return { kind: "keyword", chatId: Number(settings.welcome_chat_id), text: matched.text, messageId: message.message_id, threadId };
+  const target = { kind: "keyword" as const, chatId: Number(settings.welcome_chat_id), messageId: message.message_id, threadId };
+  return matched ? { ...target, text: matched.text } : input ? brandSearchReply(db, input, target, now) : null;
 }
 
 function privateChatId(chatValue: unknown, senderValue: unknown): number | null {
@@ -236,7 +279,7 @@ function callbackReply(db: DatabaseSync, update: Record<string, unknown>, settin
   return { kind: "private", chatId, text, callbackId: callback.id, buttonRuleId: id, keyboard: text ? optionsButton("返回选项") : undefined };
 }
 
-function privateReply(db: DatabaseSync, update: Record<string, unknown>, settings: ChatSettings): ChatReply | null {
+function privateReply(db: DatabaseSync, update: Record<string, unknown>, settings: ChatSettings, now: number): ChatReply | null {
   if (settings.private_enabled !== 1) return null;
   if (update.callback_query) return callbackReply(db, update, settings);
   const message = asRecord(update.message);
@@ -249,7 +292,8 @@ function privateReply(db: DatabaseSync, update: Record<string, unknown>, setting
   if (/^\/stop(?:@FreeBonus365ChatBot)?(?:\s|$)/i.test(input.trim())) return { kind: "private", chatId, text: "已暂停自动跟进。发送 /start 可重新开启。" };
   if (/^\/(?:start|menu)(?:@FreeBonus365ChatBot)?(?:\s|$)/i.test(input.trim())) return privateMenu(db, settings, chatId, 0);
   const matched = keywordResponse(db, input);
-  return matched ? { kind: "private", chatId, text: matched.text, keyboard: matched.showButton ? optionsButton("返回选项") : undefined } : null;
+  return matched ? { kind: "private", chatId, text: matched.text, keyboard: matched.showButton ? optionsButton("返回选项") : undefined }
+    : brandSearchReply(db, input, { kind: "private", chatId }, now);
 }
 
 function observeFollowupEvent(db: DatabaseSync, settings: ChatSettings, id: number, update: Record<string, unknown>, reply: ChatReply | null, now: number) {
@@ -278,7 +322,8 @@ function claimUpdate(db: DatabaseSync, claim: PollClaim, id: number, update: Rec
     const result = db.prepare(`UPDATE telegram_welcome_state SET next_offset = ?, lease_until = ?
       WHERE ${ownedState} AND next_offset <= ?`).run(id + 1, now + LEASE_MS, claim.revision, claim.leaseId, id);
     if (!result.changes) return null;
-    const reply = welcomeReply(db, update, settings) ?? keywordReply(db, update, settings) ?? privateReply(db, update, settings);
+    const reply = welcomeReply(db, update, settings) ?? brandCallbackReply(db, update, settings, now)
+      ?? keywordReply(db, update, settings, now) ?? privateReply(db, update, settings, now);
     observeFollowupEvent(db, settings, id, update, reply, now);
     if (reply && reply.chatId > 0) reply.followupRevision = privateFollowupSnapshot(db, reply.chatId);
     return { reply };
@@ -293,6 +338,13 @@ function finishPoll(db: DatabaseSync, claim: PollClaim, nextPollAt = 0, error: s
 
 function retryAt(now: number, seconds: number) {
   return Math.min(Number.MAX_SAFE_INTEGER, now + (seconds > 0 ? Math.max(POLL_MS, seconds * 1_000) : SLOW_RETRY_MS));
+}
+
+function replyScopeActive(db: DatabaseSync, claim: PollClaim, action: ChatReply, now: number): boolean {
+  return Boolean(db.prepare(`SELECT 1 FROM telegram_welcome_state WHERE ${ownedState} AND lease_until > ?
+    AND EXISTS (SELECT 1 FROM telegram_promotion_settings WHERE id = 'primary' AND welcome_revision = ?
+      AND ((? > 0 AND private_enabled = 1) OR (? < 0 AND keyword_enabled = 1 AND welcome_chat_id = ?)))`)
+    .get(claim.revision, claim.leaseId, now, claim.revision, action.chatId, action.chatId, String(action.chatId)));
 }
 
 export async function pollTelegramWelcomeOnce(decryptToken: DecryptToken, clock = Date.now) {
@@ -339,27 +391,40 @@ export async function pollTelegramWelcomeOnce(decryptToken: DecryptToken, clock 
     if (!action) continue;
     if (action.callbackId) {
       await answerTelegramCallback(token, action.callbackId).catch(() => false);
-      if (!action.text) continue;
-      const active = db.prepare(`SELECT 1 FROM telegram_welcome_state WHERE ${ownedState}
-        AND EXISTS (SELECT 1 FROM telegram_promotion_settings
-          WHERE id = 'primary' AND welcome_revision = ? AND private_enabled = 1)`)
-        .get(claim.revision, claim.leaseId, claim.revision);
+      if (!action.text && !action.brandId) continue;
+      const active = replyScopeActive(db, claim, action, clock());
       if (!active) { finishPoll(db, claim); return; }
       // A rule may be hidden or deleted while Telegram acknowledges the click.
       // Do not send an old button's queued answer after that configuration change.
       if (action.buttonRuleId !== undefined && !db.prepare("SELECT 1 FROM telegram_keyword_rules WHERE id = ? AND show_button = 1").get(action.buttonRuleId)) continue;
     }
-    if (!action.text) continue;
+    if (!action.text && !action.brandId) continue;
     if (action.chatId > 0) cancelPrivateFollowupReply(db, action.chatId, action.followupRevision);
     const dispatchAt = clock();
-    const reply = await telegramRequest(token, "sendMessage", {
-      chat_id: action.chatId, text: action.text, link_preview_options: { is_disabled: true },
-      ...(action.keyboard?.length ? { reply_markup: { inline_keyboard: action.keyboard } } : {}),
-      ...(action.messageId === undefined ? {} : {
-        reply_parameters: { message_id: action.messageId, allow_sending_without_reply: false },
-        ...(action.threadId === undefined ? {} : { message_thread_id: action.threadId }),
-      }),
-    }).catch(() => null);
+    const parameters = action.messageId === undefined ? {} : {
+      reply_parameters: { message_id: action.messageId, allow_sending_without_reply: false },
+      ...(action.threadId === undefined ? {} : { message_thread_id: action.threadId }),
+    };
+    let reply;
+    if (action.brandId) {
+      const origin = telegramPublicOrigin();
+      const brand = readPublicTelegramBrand(db, action.brandId, dispatchAt);
+      if (!origin || !brand) continue;
+      const extended = db.prepare(`UPDATE telegram_welcome_state SET lease_until = ? WHERE ${ownedState}`)
+        .run(dispatchAt + BRAND_CARD_LEASE_MS, claim.revision, claim.leaseId);
+      if (!extended.changes) { finishPoll(db, claim); return; }
+      reply = await sendTelegramBrandCard(token, action.chatId, brand, origin, {
+        parameters,
+        beforeSend: () => replyScopeActive(db, claim, action, clock())
+          && readPublicTelegramBrand(db, brand.id, clock()) !== null,
+      }).catch(() => null);
+      if (reply === undefined) continue;
+    } else {
+      reply = await telegramRequest(token, "sendMessage", {
+        ...parameters, chat_id: action.chatId, text: action.text, link_preview_options: { is_disabled: true },
+        ...(action.keyboard?.length ? { reply_markup: { inline_keyboard: action.keyboard } } : {}),
+      }).catch(() => null);
+    }
     if (reply?.ok && Number.isSafeInteger(reply.result.message_id)) {
       if (action.chatId > 0) {
         const date = reply.result.date;

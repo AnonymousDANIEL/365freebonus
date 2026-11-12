@@ -12,7 +12,7 @@ import ts from 'typescript';
 // administrator credentials, production data, or external requests are used.
 const fixture = mkdtempSync(path.join(tmpdir(), 'telegram-promotion-delivery-'));
 writeFileSync(path.join(fixture, 'package.json'), '{"type":"commonjs"}');
-for (const name of ['auth-core', 'brand-links', 'directory', 'image-url', 'sqlite', 'telegram-promotions']) {
+for (const name of ['auth-core', 'brand-links', 'directory', 'image-url', 'sqlite', 'telegram-brand-card', 'telegram-promotions']) {
   writeFileSync(path.join(fixture, `${name}.js`), ts.transpileModule(
     readFileSync(new URL(`../app/lib/${name}.ts`, import.meta.url), 'utf8'),
     { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, esModuleInterop: true } },
@@ -42,6 +42,7 @@ exports.cleanTelegramBackground = async () => exports.cleaned;
 
 const require = createRequire(import.meta.url);
 const promotions = require(path.join(fixture, 'telegram-promotions.js'));
+const { sendTelegramBrandCard } = require(path.join(fixture, 'telegram-brand-card.js'));
 const telegram = require(path.join(fixture, 'telegram-bot.js'));
 const images = require(path.join(fixture, 'image-media.js'));
 const background = require(path.join(fixture, 'telegram-background.js'));
@@ -293,5 +294,57 @@ test('reserved or administrator slugs use the existing brand-anchor route in the
     enqueue({ id, slug });
     await promotions.deliverTelegramPromotionOnce();
     assert.deepEqual(buttons(telegram.calls.at(-1).parameters), expectedButtons({ page: `${origin}/#brand-card-${id}` }));
+  }
+});
+
+
+const publicCard = {
+  id: 'card-id', name: 'Syabas99', slug: 'syabas99', category: 'All',
+  tagline: '', description: 'Public brand introduction.',
+  link: 'https://brand.example/join?source=directory', imageUrl: 'https://images.example/logo.png',
+};
+
+test('brand-card authorization may cancel before preparation or after media preparation without sending', async () => {
+  let checks = 0;
+  const before = await sendTelegramBrandCard(token, chatId, publicCard, origin, {
+    beforeSend: () => { checks++; return false; },
+  });
+  assert.equal(before, undefined);
+  assert.equal(checks, 1);
+  assert.equal(telegram.calls.length, 0);
+
+  checks = 0;
+  const after = await sendTelegramBrandCard(token, chatId, publicCard, origin, {
+    beforeSend: () => ++checks < 2,
+  });
+  assert.equal(after, undefined);
+  assert.equal(checks, 2);
+  assert.equal(telegram.calls.length, 0);
+});
+
+test('brand-card authorization is checked again before rejected-media text fallback', async () => {
+  let checks = 0;
+  telegram.responses.push({ ok: false, code: 400, retryAfter: 0 });
+  const response = await sendTelegramBrandCard(token, chatId, publicCard, origin, {
+    beforeSend: () => ++checks < 3,
+  });
+  assert.equal(response, undefined);
+  assert.equal(checks, 3);
+  assert.equal(telegram.calls.length, 1);
+  assert.equal(telegram.calls[0].method, 'sendPhoto');
+});
+
+test('All brand cards omit a promotion label and preserve topic/reply parameters on media and fallback', async () => {
+  telegram.responses.push({ ok: false, code: 400, retryAfter: 0 }, { ok: true, result: { message_id: 321 } });
+  const parameters = { message_thread_id: 77, reply_parameters: { message_id: 88, allow_sending_without_reply: false } };
+  const result = await sendTelegramBrandCard(token, chatId, publicCard, origin, { parameters });
+  assert.equal(result.ok, true);
+  assert.equal(telegram.calls.length, 2);
+  for (const call of telegram.calls) {
+    assert.equal(call.parameters.message_thread_id, 77);
+    assert.deepEqual(call.parameters.reply_parameters, parameters.reply_parameters);
+    const copy = call.parameters.caption ?? call.parameters.text;
+    assert.equal(copy, 'Syabas99\n\nPublic brand introduction.');
+    assert.deepEqual(buttons(call.parameters), expectedButtons());
   }
 });
