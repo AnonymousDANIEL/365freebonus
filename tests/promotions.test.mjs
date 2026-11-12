@@ -204,6 +204,38 @@ test('optional/legacy category inputs default to All and duration validation per
   assert.deepEqual([saved.category, saved.promotionDays, saved.promotionStartsAt, saved.promotionExpiresAt], ['All', null, null, null]);
 });
 
+test('admin and public brand descriptions preserve the same 4000-character multiline copy across saves', async () => {
+  const id = 'description-roundtrip';
+  const descriptionFor = heading => {
+    const beginning = `${heading}\n\n中文介绍 🎁 **原样文字**\n  保留段落内的空格\n\nhttps://brand.example/${'long-path-'.repeat(30)}\n\n`;
+    const ending = '\n\n最后一段：继续发现 ✨';
+    return beginning + 'A'.repeat(4000 - Array.from(beginning).length - Array.from(ending).length) + ending;
+  };
+  const original = descriptionFor('Original introduction');
+  const latest = descriptionFor('Updated introduction');
+  assert.equal(Array.from(original).length, 4000);
+  assert.equal(Array.from(latest).length, 4000);
+
+  const input = brandInput.parse(fields(example(id, { category: 'All', published: true, description: original })));
+  const saved = repository.createBrand({ ...input, id }, now);
+  assert.equal(saved.description, original);
+  assert.equal(sqlite.getSqlite().prepare('SELECT description FROM brands WHERE id=?').get(id).description, original);
+  for (const includeDrafts of [true, false]) {
+    const payload = await repository.readDirectory(includeDrafts, now);
+    assert.equal(payload.brands.find(brand => brand.id === id).description, original);
+  }
+
+  const update = brandInput.parse({ ...fields(saved), description: latest });
+  const updated = repository.updateBrand(id, update, now + 1);
+  assert.equal(updated.description, latest);
+  assert.equal(sqlite.getSqlite().prepare('SELECT description FROM brands WHERE id=?').get(id).description, latest);
+  for (const includeDrafts of [true, false]) {
+    const payload = await repository.readDirectory(includeDrafts, now + 1);
+    assert.equal(payload.brands.find(brand => brand.id === id).description, latest);
+  }
+  assert.equal(brandInput.safeParse({ ...fields(updated), description: latest + 'x' }).success, false);
+});
+
 test('public categories expire at the exact deadline while the published brand remains and admin sees the configured promotion', async () => {
   const saved = repository.createBrand(example('expires', { category: 'Update', promotionDays: 1, promotionExpiresAt: now + 900 * day }), now);
   assert.equal(saved.promotionExpiresAt, now + day, 'server must ignore a supplied expiry timestamp');

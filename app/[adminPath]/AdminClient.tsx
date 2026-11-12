@@ -235,6 +235,9 @@ export default function AdminClient({ displayName, signInPath }: { displayName: 
   }
   async function saveBrand(event: React.FormEvent) {
     event.preventDefault(); if (!editing || busy) return;
+    if (Array.from(editing.description.trim()).length > 4000) {
+      setError("详细介绍最多 4,000 个字符，请缩短后保存。"); return;
+    }
     if (editing.category !== "All" && (!Number.isInteger(editing.promotionDays) || (editing.promotionDays ?? 0) < 1 || (editing.promotionDays ?? 0) > 365)) {
       setError("展示天数请输入 1 至 365 的整数。"); return;
     }
@@ -449,7 +452,7 @@ export default function AdminClient({ displayName, signInPath }: { displayName: 
           修改开始时间或展示天数后，将重新计算到期时间。
         </p>}
       </>}
-      <label className="cms-wide">一句话介绍<input required maxLength={160} value={editing.tagline} onChange={event => setEditing({ ...editing, tagline: event.target.value })} placeholder="介绍这个品牌的独特之处" /></label><label className="cms-wide">详细介绍<textarea rows={4} maxLength={2000} value={editing.description} onChange={event => setEditing({ ...editing, description: event.target.value })} /></label><label>品牌图标<select value={editing.icon} onChange={event => setEditing({ ...editing, icon: event.target.value })}>{[["sparkles", "星光"], ["orbit", "轨道"], ["sun", "太阳"], ["gamepad", "游戏"], ["moon", "月亮"], ["triangle", "三角"]].map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select><small>未填写图片时使用。</small></label><label>主题颜色<div className="cms-color-field"><input type="color" value={/^#[0-9a-f]{6}$/i.test(editing.color) ? editing.color : "#d3b477"} onChange={event => setEditing({ ...editing, color: event.target.value })} aria-label="选择主题颜色" /><input required pattern="#[0-9a-fA-F]{6}" maxLength={7} value={editing.color} onChange={event => setEditing({ ...editing, color: event.target.value })} /></div></label><div className="cms-wide cms-brand-photo">
+      <label className="cms-wide">一句话介绍<input required maxLength={160} value={editing.tagline} onChange={event => setEditing({ ...editing, tagline: event.target.value })} placeholder="介绍这个品牌的独特之处" /></label><label className="cms-wide">详细介绍<textarea rows={6} value={editing.description} onChange={event => setEditing({ ...editing, description: event.target.value })} /><small>前台按保存的原文显示，保留换行和空行。</small><small>{Array.from(editing.description.trim()).length} / 4000</small></label><label>品牌图标<select value={editing.icon} onChange={event => setEditing({ ...editing, icon: event.target.value })}>{[["sparkles", "星光"], ["orbit", "轨道"], ["sun", "太阳"], ["gamepad", "游戏"], ["moon", "月亮"], ["triangle", "三角"]].map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select><small>未填写图片时使用。</small></label><label>主题颜色<div className="cms-color-field"><input type="color" value={/^#[0-9a-f]{6}$/i.test(editing.color) ? editing.color : "#d3b477"} onChange={event => setEditing({ ...editing, color: event.target.value })} aria-label="选择主题颜色" /><input required pattern="#[0-9a-fA-F]{6}" maxLength={7} value={editing.color} onChange={event => setEditing({ ...editing, color: event.target.value })} /></div></label><div className="cms-wide cms-brand-photo">
         <div className="cms-image-actions"><ImageUploadButton label="上传品牌照片" uploading={uploading === "brand"} onUpload={file => uploadPhoto("brand", file)} /></div>
         <small className="cms-photo-hint">支持 JPG、PNG、GIF、WebP，每张最多 5 MB。上传后点击「保存品牌」生效。</small>
         {brandPhotoName && <div className="cms-image-filename" role="status"><Check size={14} />已上传 {brandPhotoName}</div>}
