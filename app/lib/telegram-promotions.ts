@@ -47,6 +47,8 @@ type Delivery = {
   name: string;
   slug: string;
   tagline: string;
+  description: string;
+  link: string;
   category: "Update" | "New";
   image_url: string;
 };
@@ -406,7 +408,7 @@ function claimDelivery(db: DatabaseSync) {
     const blocked = db.prepare(`SELECT 1 FROM telegram_promotion_outbox WHERE next_attempt_at > ?
       AND (status = 'sending' OR last_error = ?) LIMIT 1`).get(now, RATE_LIMIT_ERROR);
     if (blocked) return null;
-    const row = db.prepare(`SELECT o.brand_id, o.revision, o.attempts, b.name, b.slug, b.tagline, b.category, b.image_url
+    const row = db.prepare(`SELECT o.brand_id, o.revision, o.attempts, b.name, b.slug, b.tagline, b.description, b.link, b.category, b.image_url
       FROM telegram_promotion_outbox o JOIN brands b ON b.id = o.brand_id
       WHERE o.status = 'pending' AND o.next_attempt_at <= ? AND b.published = 1 AND b.category IN ('Update', 'New')
         AND (b.publish_at IS NULL OR b.publish_at <= ?)
@@ -453,36 +455,41 @@ async function promotionMedia(imageUrl: string, origin: string, slug: string): P
   } catch { return null; }
 }
 
-function promotionCaption(title: string, tagline: string, link: string): string | null {
-  const required = `${title}\n\n${link}`;
-  const remaining = 1024 - required.length - 2;
-  if (required.length > 1024) return null;
-  if (!tagline || remaining < 1) return required;
-  const summary = tagline.length <= remaining
-    ? tagline
-    : `${tagline.slice(0, remaining - 1).replace(/[\uD800-\uDBFF]$/, "").trimEnd()}…`;
-  return `${title}\n\n${summary}\n\n${link}`;
+function truncatePromotionText(text: string, limit: number): string {
+  return text.length <= limit ? text : `${text.slice(0, limit - 1).replace(/[\uD800-\uDBFF]$/, "").trimEnd()}…`;
 }
 
-async function deliverPromotion() {
+export async function deliverTelegramPromotionOnce() {
   const db = getSqlite();
   const delivery = claimDelivery(db);
   if (!delivery) return;
   const url = new URL(brandAnnouncementPath(delivery.slug, delivery.brand_id, getAdminPath()), delivery.origin);
   const title = `${delivery.category} · ${delivery.name}`;
   const tagline = delivery.tagline.trim();
-  const fields = { category: delivery.category, name: delivery.name, tagline, link: url.href };
-  const customText = delivery.message.replace(/\{(category|name|tagline|link)\}/g, (_, field: keyof typeof fields) => fields[field]).trim();
-  const text = customText.length > 4_096
-    ? `${customText.slice(0, 4_095).replace(/[\uD800-\uDBFF]$/, "")}…`
-    : customText || [title, tagline, url.href].filter(Boolean).join("\n\n");
-  const sendText = () => telegramRequest(delivery.token, "sendMessage", { chat_id: delivery.chatId, text, link_preview_options: { is_disabled: true } });
-  const caption = customText ? (customText.length <= 1_024 ? customText : null) : promotionCaption(title, tagline, url.href);
+  const description = delivery.description.trim();
+  // Brand-page links now live in the inline keyboard, including old {link} templates.
+  const fields = { category: delivery.category, name: delivery.name, tagline, description, link: "" };
+  const customText = delivery.message.replace(/\{(category|name|tagline|description|link)\}/g, (_, field: keyof typeof fields) => fields[field]).trim();
+  const content = (customText
+    ? [customText, description && !customText.includes(description) ? description : ""]
+    : [title, tagline, description !== tagline ? description : ""])
+    .filter(Boolean).join("\n\n").split(url.href).join("").replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+  const text = truncatePromotionText(content || title, 4_096);
+  const brandLink = delivery.link.trim();
+  const replyMarkup = { inline_keyboard: [
+    [{ text: delivery.name, url: url.href }],
+    [{ text: "Visit website", url: new URL("/", delivery.origin).href },
+      ...(isSafeSocialUrl(brandLink) ? [{ text: "Join Now", url: brandLink }] : [])],
+  ] };
+  const sendText = () => telegramRequest(delivery.token, "sendMessage", {
+    chat_id: delivery.chatId, text, reply_markup: replyMarkup, link_preview_options: { is_disabled: true },
+  });
+  const caption = truncatePromotionText(content || title, 1_024);
   const media = caption ? await promotionMedia(delivery.image_url, delivery.origin, delivery.slug) : null;
   let response;
   if (media && caption) {
     const method = mediaMethods[media.field];
-    const parameters = { chat_id: delivery.chatId, caption };
+    const parameters = { chat_id: delivery.chatId, caption, reply_markup: replyMarkup };
     response = "url" in media
       ? await telegramRequest(delivery.token, method, { ...parameters, [media.field]: media.url })
       : await telegramRequest(delivery.token, method, media.field === "document"
@@ -529,7 +536,7 @@ export function startTelegramPromotionWorker() {
     if (running) return;
     running = true;
     try {
-      await deliverPromotion();
+      await deliverTelegramPromotionOnce();
       reportedError = false;
     } catch {
       if (!reportedError) console.error("Telegram promotion worker could not process its outbox.");

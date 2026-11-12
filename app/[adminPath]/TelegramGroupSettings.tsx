@@ -387,8 +387,9 @@ export default function TelegramGroupSettings({ request, signInPath }: AdminProp
             <label>品牌通知文案
               <textarea rows={4} maxLength={messageLimit} value={draft.promotionMessage} placeholder="留空使用默认通知文案"
                 onChange={event => setDraft({ ...draft, promotionMessage: event.target.value })} />
-              <small>可用 {"{category}、{name}、{tagline}、{link}"}。留空使用默认文案。</small>
-              <small>替换变量后超过 1,024 个字符时发送纯文本。</small>
+              <small>可用 {"{category}、{name}、{tagline}、{description}"}。留空使用默认文案，自动加入品牌详细介绍。</small>
+              <small>通知附带品牌名称、Visit website 和 Join Now 按钮；Join Now 使用品牌链接，未填写时隐藏。原 {"{link}"} 不再显示文字链接。</small>
+              <small>图片或 GIF 文案超过 1,024 个字符时自动缩短，完整介绍可点击品牌名称查看。</small>
               <small>{draft.promotionMessage.length} / {messageLimit}</small>
             </label>
             <dl className="cms-telegram-counts" aria-label="品牌通知记录">
