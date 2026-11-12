@@ -139,7 +139,8 @@ test('migration15 preserves existing keyword rules as visible buttons', () => {
   mkdirSync(legacyDataDir);
   const filename = path.join(legacyDataDir, 'directory.sqlite');
   const legacy = new DatabaseSync(filename);
-  legacy.exec(`CREATE TABLE telegram_keyword_rules (
+  legacy.exec(`CREATE TABLE telegram_promotion_settings(id TEXT PRIMARY KEY);
+  CREATE TABLE telegram_keyword_rules (
     id INTEGER PRIMARY KEY AUTOINCREMENT, keyword TEXT NOT NULL, keyword_key TEXT NOT NULL,
     match_mode TEXT NOT NULL, response TEXT NOT NULL, UNIQUE(keyword_key, match_mode)
   ); INSERT INTO telegram_keyword_rules VALUES(7,'Existing keyword','existing keyword','contains','Existing reply');
@@ -148,7 +149,7 @@ test('migration15 preserves existing keyword rules as visible buttons', () => {
   try {
     process.env.DATA_DIR = legacyDataDir;
     const upgraded = getSqlite();
-    assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version, 15);
+    assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version, 16);
     assert.deepEqual({ ...upgraded.prepare('SELECT * FROM telegram_keyword_rules WHERE id=7').get() }, {
       id: 7, keyword: 'Existing keyword', keyword_key: 'existing keyword', match_mode: 'contains', response: 'Existing reply', show_button: 1,
     });

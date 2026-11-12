@@ -3,9 +3,10 @@ import type { DatabaseSync } from "node:sqlite";
 import { getSqlite } from "./sqlite";
 import { answerTelegramCallback, telegramRequest, telegramUpdates } from "./telegram-bot";
 import { normalizeTelegramKeyword } from "./telegram-keywords";
+import { cancelPrivateFollowupReply, observePrivateFollowupInput, privateFollowupSnapshot, recordPrivateFollowupOutbound, sendDuePrivateFollowups, type FollowupSettings } from "./telegram-followups";
 
 type DecryptToken = (ciphertext: string) => string;
-type ChatSettings = {
+type ChatSettings = FollowupSettings & {
   chat_bot_token_ciphertext: string;
   welcome_enabled: number;
   welcome_chat_id: string;
@@ -29,6 +30,7 @@ type ChatReply = {
   threadId?: number;
   callbackId?: string;
   buttonRuleId?: number;
+  followupRevision?: string;
   keyboard?: InlineButton[][];
 };
 
@@ -59,7 +61,8 @@ function inTransaction<T>(db: DatabaseSync, operation: () => T): T {
 function readSettings(db: DatabaseSync) {
   return db.prepare(`SELECT chat_bot_token_ciphertext, welcome_enabled, welcome_chat_id, welcome_message,
     welcome_started_at, welcome_revision, keyword_enabled, keyword_started_at,
-    private_enabled, private_started_at, private_start_message
+    private_enabled, private_started_at, private_start_message,
+    private_followup_enabled, private_followup_message, private_followup_started_at, private_followup_revision
     FROM telegram_promotion_settings WHERE id = 'primary'`).get() as ChatSettings | undefined;
 }
 
@@ -243,9 +246,27 @@ function privateReply(db: DatabaseSync, update: Record<string, unknown>, setting
   db.prepare("INSERT OR IGNORE INTO telegram_private_contacts (user_id) VALUES (?)").run(chatId);
   const input = originalText(message);
   if (!input) return null;
+  if (/^\/stop(?:@FreeBonus365ChatBot)?(?:\s|$)/i.test(input.trim())) return { kind: "private", chatId, text: "已暂停自动跟进。发送 /start 可重新开启。" };
   if (/^\/(?:start|menu)(?:@FreeBonus365ChatBot)?(?:\s|$)/i.test(input.trim())) return privateMenu(db, settings, chatId, 0);
   const matched = keywordResponse(db, input);
   return matched ? { kind: "private", chatId, text: matched.text, keyboard: matched.showButton ? optionsButton("返回选项") : undefined } : null;
+}
+
+function observeFollowupEvent(db: DatabaseSync, settings: ChatSettings, id: number, update: Record<string, unknown>, reply: ChatReply | null, now: number) {
+  if (settings.private_enabled !== 1) return;
+  // Callback acknowledgments alone are not visible replies. A recognized
+  // callback cancels pending followup only when its answer is dispatched below.
+  if (update.callback_query) return;
+  const message = asRecord(update.message);
+  if (!message || !positiveInteger(message.message_id) || !isCurrentEvent(message.date, settings.private_started_at)) return;
+  const chatId = privateChatId(message.chat, message.from);
+  if (chatId === null || message.sender_chat != null || message.via_bot != null || message.is_automatic_forward === true) return;
+  const content = typeof message.text === "string" || ["photo", "animation", "audio", "document", "sticker", "video", "video_note", "voice", "contact", "location"].some(key => message[key] != null);
+  if (!content) return;
+  const input = originalText(message)?.trim() || "";
+  const command = /^\/stop(?:@FreeBonus365ChatBot)?(?:\s|$)/i.test(input) ? "stop"
+    : /^\/start(?:@FreeBonus365ChatBot)?(?:\s|$)/i.test(input) ? "start" : undefined;
+  observePrivateFollowupInput(db, settings, { chatId, updateId: id, messageId: message.message_id, at: Number(message.date) * 1000, unmatched: !reply, command });
 }
 
 function claimUpdate(db: DatabaseSync, claim: PollClaim, id: number, update: Record<string, unknown>, now: number) {
@@ -258,6 +279,8 @@ function claimUpdate(db: DatabaseSync, claim: PollClaim, id: number, update: Rec
       WHERE ${ownedState} AND next_offset <= ?`).run(id + 1, now + LEASE_MS, claim.revision, claim.leaseId, id);
     if (!result.changes) return null;
     const reply = welcomeReply(db, update, settings) ?? keywordReply(db, update, settings) ?? privateReply(db, update, settings);
+    observeFollowupEvent(db, settings, id, update, reply, now);
+    if (reply && reply.chatId > 0) reply.followupRevision = privateFollowupSnapshot(db, reply.chatId);
     return { reply };
   });
 }
@@ -327,6 +350,8 @@ export async function pollTelegramWelcomeOnce(decryptToken: DecryptToken, clock 
       if (action.buttonRuleId !== undefined && !db.prepare("SELECT 1 FROM telegram_keyword_rules WHERE id = ? AND show_button = 1").get(action.buttonRuleId)) continue;
     }
     if (!action.text) continue;
+    if (action.chatId > 0) cancelPrivateFollowupReply(db, action.chatId, action.followupRevision);
+    const dispatchAt = clock();
     const reply = await telegramRequest(token, "sendMessage", {
       chat_id: action.chatId, text: action.text, link_preview_options: { is_disabled: true },
       ...(action.keyboard?.length ? { reply_markup: { inline_keyboard: action.keyboard } } : {}),
@@ -336,6 +361,11 @@ export async function pollTelegramWelcomeOnce(decryptToken: DecryptToken, clock 
       }),
     }).catch(() => null);
     if (reply?.ok && Number.isSafeInteger(reply.result.message_id)) {
+      if (action.chatId > 0) {
+        const date = reply.result.date;
+        inTransaction(db, () => recordPrivateFollowupOutbound(db, action.chatId, Number(reply.result.message_id),
+          typeof date === "number" && Number.isSafeInteger(date) && date > 0 ? date * 1000 : dispatchAt));
+      }
       db.prepare(`UPDATE telegram_welcome_state SET sent = sent + ?, keyword_replies = keyword_replies + ?,
         private_replies = private_replies + ?, last_error = '' WHERE ${ownedState}`)
         .run(Number(action.kind === "welcome"), Number(action.kind === "keyword"), Number(action.kind === "private"), claim.revision, claim.leaseId);
@@ -359,6 +389,7 @@ export async function pollTelegramWelcomeOnce(decryptToken: DecryptToken, clock 
       return;
     }
   }
+  if (updates.result.length === 0) await sendDuePrivateFollowups(db, claim, token, clock, 1);
   finishPoll(db, claim);
 }
 

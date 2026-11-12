@@ -5,7 +5,13 @@ import { Check, LoaderCircle, Pencil, Plus, Trash2 } from "lucide-react";
 import "./telegram-keywords-admin.css";
 
 type WelcomeDraft = { enabled: boolean; chatId: string; message: string };
-type ChatBotPreferences = { keywordEnabled: boolean; privateEnabled: boolean; privateStartMessage: string };
+type FollowupPreferences = { enabled: boolean; message: string };
+type FollowupStatus = FollowupPreferences & {
+  delayMinutes: 60;
+  counts: { pending: number; sent: number; failed: number; unknown: number; cancelled: number };
+  lastError: string;
+};
+type ChatBotPreferences = { keywordEnabled: boolean; privateEnabled: boolean; privateStartMessage: string; followup: FollowupPreferences };
 type TelegramConfig = {
   enabled: boolean;
   chatId: string;
@@ -14,7 +20,7 @@ type TelegramConfig = {
   counts: { pending: number; sending: number; sent: number; failed: number; unknown: number; skipped: number };
   lastError: string;
   welcome: WelcomeDraft & { sent: number; lastPolledAt: number | null; lastError: string };
-  chatBot: ChatBotPreferences & { hasToken: boolean; keywordReplies: number; privateReplies: number };
+  chatBot: Omit<ChatBotPreferences, "followup"> & { hasToken: boolean; keywordReplies: number; privateReplies: number; followup: FollowupStatus };
 };
 type TelegramDraft = Pick<TelegramConfig, "enabled" | "chatId" | "promotionMessage"> & {
   token: string;
@@ -35,7 +41,7 @@ const messageLimit = 2000;
 const initialDraft: TelegramDraft = {
   enabled: false, chatId: "", token: "", promotionMessage: "",
   welcome: { enabled: false, chatId: "", message: "" },
-  chatBot: { token: "", keywordEnabled: false, privateEnabled: false, privateStartMessage: "" },
+  chatBot: { token: "", keywordEnabled: false, privateEnabled: false, privateStartMessage: "", followup: { enabled: false, message: "" } },
 };
 const initialKeyword: KeywordDraft = { keyword: "", matchMode: "exact", response: "", showButton: true };
 const keywordModes = [
@@ -44,6 +50,7 @@ const keywordModes = [
 ] as const;
 const matchLabels = { exact: "完全匹配", contains: "包含关键词" } as const;
 const deliveryLabels = { pending: "待发送", sending: "发送中", sent: "已发送", failed: "发送失败", unknown: "待确认", skipped: "已跳过" } as const;
+const followupLabels = { pending: "待跟进", sent: "已发送", failed: "发送失败", unknown: "待确认", cancelled: "无需跟进 / 已取消" } as const;
 const pollTimeFormat = new Intl.DateTimeFormat("zh-CN", {
   timeZone: "Asia/Kuala_Lumpur", year: "numeric", month: "2-digit", day: "2-digit",
   hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23",
@@ -56,6 +63,7 @@ function draftFromConfig({ enabled, chatId, promotionMessage, welcome, chatBot }
     chatBot: {
       token: "", keywordEnabled: chatBot.keywordEnabled,
       privateEnabled: chatBot.privateEnabled, privateStartMessage: chatBot.privateStartMessage,
+      followup: { enabled: chatBot.followup?.enabled ?? false, message: chatBot.followup?.message ?? "" },
     },
   };
 }
@@ -260,7 +268,7 @@ export default function TelegramGroupSettings({ request, signInPath }: AdminProp
     if (!config || loading || saving || refreshing) return;
     const chatId = draft.chatId.trim();
     const token = draft.token.trim();
-    const { token: chatTokenInput, keywordEnabled, privateEnabled, privateStartMessage } = draft.chatBot;
+    const { token: chatTokenInput, keywordEnabled, privateEnabled, privateStartMessage, followup } = draft.chatBot;
     const chatToken = chatTokenInput.trim();
     const welcome = { ...draft.welcome, chatId: draft.welcome.chatId.trim(), message: draft.welcome.message.trim() };
     const targetRequired = welcome.enabled || keywordEnabled;
@@ -284,6 +292,14 @@ export default function TelegramGroupSettings({ request, signInPath }: AdminProp
       setNotice({ message: "请填写入群欢迎文案。", error: true });
       return;
     }
+    if (followup.enabled && !privateEnabled) {
+      setNotice({ message: "请先启用 1 对 1 私聊，再开启未识别消息自动跟进。", error: true });
+      return;
+    }
+    if (followup.enabled && !followup.message.trim()) {
+      setNotice({ message: "请填写未识别消息的自动跟进文案。", error: true });
+      return;
+    }
     setSaving(true);
     setNotice(null);
     try {
@@ -292,7 +308,11 @@ export default function TelegramGroupSettings({ request, signInPath }: AdminProp
         chatId,
         promotionMessage: draft.promotionMessage.trim(),
         welcome,
-        chatBot: { keywordEnabled, privateEnabled, privateStartMessage: privateStartMessage.trim(), ...(chatToken ? { token: chatToken } : {}) },
+        chatBot: {
+          keywordEnabled, privateEnabled, privateStartMessage: privateStartMessage.trim(),
+          followup: { enabled: followup.enabled, message: followup.message.trim() },
+          ...(chatToken ? { token: chatToken } : {}),
+        },
         ...(token ? { token } : {}),
       });
       setConfig(result);
@@ -432,7 +452,10 @@ export default function TelegramGroupSettings({ request, signInPath }: AdminProp
           <div className="cms-settings-fields">
             <label className="cms-telegram-switch">
               <input type="checkbox" role="switch" checked={draft.chatBot.privateEnabled}
-                onChange={event => setDraft({ ...draft, chatBot: { ...draft.chatBot, privateEnabled: event.target.checked } })} />
+                onChange={event => setDraft({ ...draft, chatBot: {
+                  ...draft.chatBot, privateEnabled: event.target.checked,
+                  followup: { ...draft.chatBot.followup, enabled: event.target.checked && draft.chatBot.followup.enabled },
+                } })} />
               启用 1 对 1 私聊
             </label>
             <label>私聊 Start 问候语
@@ -449,6 +472,39 @@ export default function TelegramGroupSettings({ request, signInPath }: AdminProp
             <dl className="cms-telegram-counts" aria-label="私聊运行记录">
               <div><dt>已发送私聊回复</dt><dd>{config.chatBot.privateReplies}</dd></div>
             </dl>
+          </div>
+        </section>
+        <section className="cms-settings-panel cms-telegram-followup" aria-labelledby="telegram-followup-title">
+          <div>
+            <h2 id="telegram-followup-title">未识别消息自动跟进</h2>
+            <p>根据本系统记录的机器人私聊消息判断。顾客消息未匹配关键字时，等待 1 小时后自动发送跟进文案。</p>
+            <span className={`cms-telegram-status${config.chatBot.privateEnabled && config.chatBot.followup?.enabled ? " cms-telegram-enabled" : ""}`}>
+              {config.chatBot.followup?.enabled ? (config.chatBot.privateEnabled ? "已启用" : "私聊已停用") : "已停用"}
+            </span>
+          </div>
+          <div className="cms-settings-fields">
+            <label className="cms-telegram-switch">
+              <input type="checkbox" role="switch" checked={draft.chatBot.followup.enabled}
+                onChange={event => setDraft({ ...draft, chatBot: { ...draft.chatBot, followup: { ...draft.chatBot.followup, enabled: event.target.checked } } })} />
+              启用未识别消息自动跟进
+            </label>
+            {!draft.chatBot.privateEnabled && <small className="cms-telegram-followup-note">需同时开启上方的“1 对 1 私聊”。</small>}
+            <div className="cms-telegram-followup-delay"><strong>等待时间</strong><span>最后一条未识别消息后 1 小时</span></div>
+            <label>自动跟进文案
+              <textarea rows={4} maxLength={messageLimit} required={draft.chatBot.followup.enabled}
+                value={draft.chatBot.followup.message} placeholder="例如：您好，还有什么可以帮您的吗？您也可以输入 /menu 查看选项。"
+                onChange={event => setDraft({ ...draft, chatBot: { ...draft.chatBot, followup: { ...draft.chatBot.followup, message: event.target.value } } })} />
+              <small>{draft.chatBot.followup.message.length} / {messageLimit} · 纯文字回复</small>
+            </label>
+            <div className="cms-telegram-followup-note">
+              <p>顾客再发未识别消息会重新计算 1 小时；机器人已回复则取消待发跟进。每条最后未识别消息只跟进一次，不会每小时重复发送。</p>
+              <p>启用跟进、更改跟进文案、切换私聊或更换聊天机器人后，仅处理新收到的消息，原有待发跟进会取消。</p>
+              <p>顾客可发送 /stop 暂停自动跟进，发送 /start 重新开启。</p>
+            </div>
+            <dl className="cms-telegram-counts" aria-label="各私聊当前跟进状态">
+              {Object.entries(followupLabels).map(([key, label]) => <div key={key}><dt>{label}</dt><dd>{config.chatBot.followup?.counts[key as keyof FollowupStatus["counts"]] ?? 0}</dd></div>)}
+            </dl>
+            {config.chatBot.followup?.lastError && <p className="cms-telegram-last-error">最近跟进异常 · {config.chatBot.followup.lastError}</p>}
           </div>
         </section>
         <div className="cms-settings-fields">

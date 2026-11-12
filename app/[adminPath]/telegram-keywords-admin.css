@@ -9,6 +9,12 @@
 .cms-shell .cms-telegram-keyword-empty { margin: 0; padding: 14px 0 0; border-top: 1px solid var(--cms-line); color: var(--cms-muted); font-size: 11px; }
 .cms-shell .cms-telegram-keyword-editor { padding: 18px; border: 1px solid var(--cms-line); border-radius: 9px; background: var(--cms-inset); }
 .cms-shell .cms-telegram-keyword-editor label > small { font-size: 10px; line-height: 1.8; color: var(--cms-muted); }
+.cms-shell .cms-telegram-followup-delay { display: flex; align-items: baseline; flex-wrap: wrap; gap: 7px 14px; padding: 13px 15px; border: 1px solid var(--cms-line); border-radius: 8px; background: var(--cms-inset); font-size: 11px; }
+.cms-shell .cms-telegram-followup-delay strong { font-size: 11px; font-weight: 600; }
+.cms-shell .cms-telegram-followup-delay span { color: var(--cms-muted); }
+.cms-shell .cms-telegram-followup-note { color: var(--cms-muted); font-size: 10px; line-height: 1.9; }
+.cms-shell .cms-telegram-followup-note p { max-width: none; margin: 0; font-size: inherit; }
+.cms-shell .cms-telegram-followup-note p + p { margin-top: 6px; }
 @media (max-width: 760px) {
   .cms-shell .cms-telegram-keyword-group { padding: 14px; }
   .cms-shell .cms-telegram-keyword-group-heading { flex-direction: column; gap: 10px; }

@@ -144,6 +144,7 @@ const privateChat = { privateEnabled: true, privateStartMessage };
 const initialChatStatus = {
   hasToken: false, keywordEnabled: false, keywordReplies: 0,
   privateEnabled: false, privateStartMessage: '', privateReplies: 0,
+  followup: { enabled: false, message: '', delayMinutes: 60, counts: { pending: 0, sent: 0, failed: 0, unknown: 0, cancelled: 0 }, lastError: '' },
 };
 const keywordChatStatus = { ...initialChatStatus, hasToken: true, keywordEnabled: true };
 
@@ -166,6 +167,10 @@ test('Telegram settings reject invalid nested shapes and unknown fields before t
     { ...base, chatBot: { keywordEnabled: 0 } },
     { ...base, chatBot: { keywordEnabled: false, privateEnabled: 'true' } },
     { ...base, chatBot: { keywordEnabled: false, privateStartMessage: 'a'.repeat(2_001) } },
+    { ...base, chatBot: { keywordEnabled: false, followup: null } },
+    { ...base, chatBot: { keywordEnabled: false, followup: { enabled: 'true', message: 'Reply' } } },
+    { ...base, chatBot: { keywordEnabled: false, followup: { enabled: false, message: 'a'.repeat(2_001) } } },
+    { ...base, chatBot: { keywordEnabled: false, followup: { enabled: false, message: '', delayMinutes: 1 } } },
   ]) {
     await put(invalid, 400);
     assert.deepEqual(settingsRow(), before, 'schema rejection must not mutate saved settings');
@@ -421,4 +426,71 @@ test('independent token rotations preserve the other bot and clear contacts only
   assert.deepEqual(replacement.chatBot, { ...keywordChatStatus, ...privateChat });
   assert.equal(runtimeRow(), undefined);
   assert.deepEqual(contacts(), []);
+});
+
+test('unmatched followup requires private chat and a nonempty template, then saves without a group', async () => {
+  const base = { enabled: false, chatId: '', chatBot: { token: chatToken, keywordEnabled: false, privateEnabled: true } };
+  const missingPrivate = await put({ ...base, chatBot: { ...base.chatBot, privateEnabled: false, followup: { enabled: true, message: 'Can we help?' } } }, 400);
+  assert.match(missingPrivate.error, /私聊/);
+  const missingText = await put({ ...base, chatBot: { ...base.chatBot, followup: { enabled: true, message: '  ' } } }, 400);
+  assert.match(missingText.error, /文案/);
+  assert.equal(telegram.calls.length, 0);
+  const configured = await put({ ...base, chatBot: { ...base.chatBot, followup: { enabled: true, message: '  Can we help?  ' } } });
+  assert.deepEqual(configured.chatBot.followup, { ...initialChatStatus.followup, enabled: true, message: 'Can we help?' });
+  const saved = settingsRow();
+  assert.equal(saved.private_followup_enabled, 1);
+  assert.ok(saved.private_followup_started_at > 0);
+  assert.ok(saved.private_followup_revision);
+  assert.deepEqual(telegram.calls.map(call => call.method).sort(), ['getMe', 'getWebhookInfo']);
+});
+
+test('legacy saves preserve followup settings and cursor while template edits cancel only waiting followups', async () => {
+  const base = { enabled: false, chatId: '', chatBot: { token: chatToken, keywordEnabled: false, privateEnabled: true, followup: { enabled: true, message: 'First followup.' } } };
+  await put(base);
+  const first = settingsRow();
+  const progress = recordChatProgress(first.welcome_revision);
+  const insert = database.prepare("INSERT INTO telegram_private_followups(chat_id,revision,settings_revision,customer_update_id,due_at,next_attempt_at,status,lease_id,lease_until) VALUES(?,?,?,?,?,?,?,?,?)");
+  insert.run(123456701, 'row-one', first.private_followup_revision, 50, 1234, 1234, 'pending', '', 0);
+  insert.run(123456702, 'row-two', first.private_followup_revision, 51, 1234, 1234, 'sending', 'lease', 9999);
+  insert.run(123456703, 'row-three', first.private_followup_revision, 52, 1234, 1234, 'sent', '', 0);
+  const unchanged = await put({ enabled: false, chatId: '' });
+  assert.deepEqual(settingsRow(), first);
+  assert.equal(unchanged.chatBot.followup.counts.pending, 2);
+  assert.equal(unchanged.chatBot.followup.counts.sent, 1);
+  assert.deepEqual(runtimeRow(), progress);
+  const updated = await put({ enabled: false, chatId: '', chatBot: { keywordEnabled: false, followup: { enabled: true, message: 'New followup.' } } });
+  const current = settingsRow();
+  assert.notEqual(current.private_followup_revision, first.private_followup_revision);
+  assert.equal(current.chat_bot_token_ciphertext, first.chat_bot_token_ciphertext);
+  assert.equal(current.welcome_revision, first.welcome_revision);
+  assert.deepEqual(runtimeRow(), progress);
+  assert.deepEqual(database.prepare('SELECT status,lease_id,lease_until,next_attempt_at FROM telegram_private_followups ORDER BY chat_id').all().map(row => ({...row})), [
+    { status: 'cancelled', lease_id: '', lease_until: 0, next_attempt_at: 0 },
+    { status: 'cancelled', lease_id: '', lease_until: 0, next_attempt_at: 0 },
+    { status: 'sent', lease_id: '', lease_until: 0, next_attempt_at: 1234 },
+  ]);
+  assert.equal(updated.chatBot.followup.counts.cancelled, 2);
+  assert.equal(JSON.stringify(updated).includes('123456701'), false);
+  assert.equal(JSON.stringify(updated).includes('row-one'), false);
+  const disabled = await put({ enabled: false, chatId: '', chatBot: { keywordEnabled: false, privateEnabled: false } });
+  assert.equal(disabled.chatBot.followup.enabled, false, 'legacy clients can still disable private chat');
+  assert.equal(settingsRow().private_followup_started_at, 0);
+  assert.equal(disabled.chatBot.followup.message, 'New followup.');
+});
+
+test('followup status exposes aggregates only and token rotation cancels pending work', async () => {
+  const base = { enabled: false, chatId: '', chatBot: { token: chatToken, keywordEnabled: false, privateEnabled: true, followup: { enabled: true, message: 'Followup.' } } };
+  await put(base);
+  const first = settingsRow();
+  database.prepare("INSERT INTO telegram_private_followups(chat_id,settings_revision,status,last_error) VALUES(?,?,?,?)").run(234567891, first.private_followup_revision, 'unknown', 'Telegram 未确认发送结果。');
+  database.prepare("INSERT INTO telegram_private_followups(chat_id,settings_revision,status) VALUES(?,?,?)").run(234567892, first.private_followup_revision, 'pending');
+  const status = await get();
+  assert.deepEqual(status.chatBot.followup.counts, { pending: 1, sent: 0, failed: 0, unknown: 1, cancelled: 0 });
+  assert.equal(status.chatBot.followup.lastError, 'Telegram 未确认发送结果。');
+  for (const sensitive of ['234567891','234567892',first.chat_bot_token_ciphertext,chatToken]) assert.equal(JSON.stringify(status).includes(sensitive), false);
+  const rotated = await put({ enabled: false, chatId: '', chatBot: { token: rotatedChatToken, keywordEnabled: false } });
+  assert.notEqual(settingsRow().private_followup_revision, first.private_followup_revision);
+  assert.equal(rotated.chatBot.followup.enabled, true);
+  assert.equal(rotated.chatBot.followup.counts.pending, 0);
+  assert.equal(rotated.chatBot.followup.counts.cancelled, 1);
 });

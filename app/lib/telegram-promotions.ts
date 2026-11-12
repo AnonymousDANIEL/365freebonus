@@ -26,6 +26,10 @@ type StoredSettings = {
   private_enabled: number;
   private_started_at: number;
   private_start_message: string;
+  private_followup_enabled: number;
+  private_followup_message: string;
+  private_followup_started_at: number;
+  private_followup_revision: string;
 };
 type SettingsInput = {
   enabled: boolean;
@@ -33,7 +37,7 @@ type SettingsInput = {
   token?: string;
   promotionMessage?: string;
   welcome?: { enabled: boolean; chatId: string; message: string };
-  chatBot?: { token?: string; keywordEnabled: boolean; privateEnabled?: boolean; privateStartMessage?: string };
+  chatBot?: { token?: string; keywordEnabled: boolean; privateEnabled?: boolean; privateStartMessage?: string; followup?: { enabled: boolean; message: string } };
 };
 type DeliveryStatus = "pending" | "sending" | "sent" | "failed" | "unknown" | "skipped";
 type Delivery = {
@@ -96,13 +100,15 @@ function decryptToken(stored: string) {
 function storedSettings(db: DatabaseSync): StoredSettings {
   return db.prepare(`SELECT enabled, chat_id, token_ciphertext, chat_bot_token_ciphertext, promotion_message, welcome_enabled,
     welcome_chat_id, welcome_message, welcome_started_at, welcome_revision, keyword_enabled, keyword_started_at,
-    private_enabled, private_started_at, private_start_message
+    private_enabled, private_started_at, private_start_message,
+    private_followup_enabled, private_followup_message, private_followup_started_at, private_followup_revision
     FROM telegram_promotion_settings WHERE id = 'primary'`).get() as StoredSettings | undefined
     ?? {
       enabled: 0, chat_id: "", token_ciphertext: "", chat_bot_token_ciphertext: "", promotion_message: "",
       welcome_enabled: 0, welcome_chat_id: "", welcome_message: "", welcome_started_at: 0, welcome_revision: "",
       keyword_enabled: 0, keyword_started_at: 0,
       private_enabled: 0, private_started_at: 0, private_start_message: "",
+      private_followup_enabled: 0, private_followup_message: "", private_followup_started_at: 0, private_followup_revision: "",
     };
 }
 
@@ -225,6 +231,13 @@ export function telegramPromotionStatus() {
   const welcome = db.prepare("SELECT sent, keyword_replies, private_replies, last_polled_at, last_error FROM telegram_welcome_state WHERE id = 'primary' AND revision = ?")
     .get(settings.welcome_revision) as { sent: number; keyword_replies: number; private_replies: number; last_polled_at: number; last_error: string } | undefined;
   const chatEnabled = settings.welcome_enabled || settings.keyword_enabled || settings.private_enabled;
+  const followupCounts = { pending: 0, sent: 0, failed: 0, unknown: 0, cancelled: 0 };
+  const followupRows = db.prepare("SELECT status, COUNT(*) AS count FROM telegram_private_followups GROUP BY status").all() as { status: string; count: number }[];
+  for (const row of followupRows) {
+    const status = row.status === "sending" ? "pending" : row.status;
+    if (status in followupCounts) followupCounts[status as keyof typeof followupCounts] += row.count;
+  }
+  const followupError = db.prepare("SELECT last_error FROM telegram_private_followups WHERE last_error <> '' ORDER BY next_attempt_at DESC, chat_id DESC LIMIT 1").get() as { last_error: string } | undefined;
   let lastError = recent?.last_error || "";
   if (settings.enabled && !decryptToken(settings.token_ciphertext)) lastError = "无法读取已保存的机器人 Token，请重新填写。";
   else if (settings.enabled && !publicOrigin()) lastError = "服务器尚未配置公开网站地址，无法生成公告链接。";
@@ -237,6 +250,13 @@ export function telegramPromotionStatus() {
       privateEnabled: settings.private_enabled === 1,
       privateStartMessage: settings.private_start_message,
       privateReplies: welcome?.private_replies ?? 0,
+      followup: {
+        enabled: settings.private_followup_enabled === 1,
+        message: settings.private_followup_message,
+        delayMinutes: 60,
+        counts: followupCounts,
+        lastError: followupError?.last_error || "",
+      },
     },
     welcome: {
       enabled: settings.welcome_enabled === 1, chatId: settings.welcome_chat_id, message: settings.welcome_message,
@@ -270,6 +290,11 @@ export async function saveTelegramPromotionSettings(input: SettingsInput) {
   const keywordEnabled = input.chatBot?.keywordEnabled ?? (previous.keyword_enabled === 1);
   const privateEnabled = input.chatBot?.privateEnabled ?? (previous.private_enabled === 1);
   const privateStartMessage = input.chatBot?.privateStartMessage?.trim() ?? previous.private_start_message;
+  const followupEnabled = input.chatBot?.followup?.enabled ?? (privateEnabled && previous.private_followup_enabled === 1);
+  const followupMessage = input.chatBot?.followup?.message.trim() ?? previous.private_followup_message;
+  if (followupEnabled && !privateEnabled) throw new TelegramSettingsError("请先启用 1 对 1 私聊，再开启未识别消息跟进。");
+  if (followupEnabled && !followupMessage) throw new TelegramSettingsError("请输入未识别消息的跟进文案。");
+  if (followupMessage.length > 2_000) throw new TelegramSettingsError("跟进文案最多 2000 个字符。");
   const targetEnabled = welcomeEnabled || keywordEnabled;
   const chatEnabled = targetEnabled || privateEnabled;
   const welcomeMessage = input.welcome?.message.trim() ?? previous.welcome_message;
@@ -288,6 +313,8 @@ export async function saveTelegramPromotionSettings(input: SettingsInput) {
   }
   const previouslyTargetEnabled = previous.welcome_enabled || previous.keyword_enabled;
   const privateModeChanged = privateEnabled !== (previous.private_enabled === 1);
+  const followupChanged = followupEnabled !== (previous.private_followup_enabled === 1)
+    || followupMessage !== previous.private_followup_message || privateModeChanged || chatTokenChanged;
   const channelWelcome = welcomeEnabled && privateEnabled && !keywordEnabled;
   const previouslyChannelWelcome = previous.welcome_enabled === 1 && previous.private_enabled === 1 && previous.keyword_enabled === 0;
   const validateTarget = targetEnabled && (!previouslyTargetEnabled || welcomeChatId !== previous.welcome_chat_id
@@ -327,13 +354,21 @@ export async function saveTelegramPromotionSettings(input: SettingsInput) {
     const welcomeStartedAt = welcomeEnabled ? (!current.welcome_enabled || groupChanged || chatTokenChanged || privateModeChanged ? now : current.welcome_started_at) : 0;
     const keywordStartedAt = keywordEnabled ? (!current.keyword_enabled || groupChanged || chatTokenChanged ? now : current.keyword_started_at) : 0;
     const privateStartedAt = privateEnabled ? (!current.private_enabled || chatTokenChanged ? now : current.private_started_at) : 0;
+    const followupStartedAt = followupEnabled ? (followupChanged ? now : current.private_followup_started_at) : 0;
+    const followupRevision = followupChanged ? randomUUID() : current.private_followup_revision;
+    if (followupChanged) {
+      db.prepare(`UPDATE telegram_private_followups SET status='cancelled', due_at=0, next_attempt_at=0,
+        lease_id='', lease_until=0, last_error='' WHERE status IN ('pending','sending')`).run();
+      if (chatTokenChanged && chatBotId !== previousChatToken.split(":", 1)[0]) db.exec("DELETE FROM telegram_private_followups");
+    }
     let welcomeRevision = chatTokenChanged ? "" : current.welcome_revision;
     if (chatEnabled && !welcomeRevision) welcomeRevision = randomUUID();
     db.prepare(`INSERT INTO telegram_promotion_settings (
       id, enabled, chat_id, token_ciphertext, promotion_message, welcome_enabled,
       welcome_chat_id, welcome_message, welcome_started_at, welcome_revision,
-      chat_bot_token_ciphertext, keyword_enabled, keyword_started_at, private_enabled, private_started_at, private_start_message
-    ) VALUES ('primary', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      chat_bot_token_ciphertext, keyword_enabled, keyword_started_at, private_enabled, private_started_at, private_start_message,
+      private_followup_enabled, private_followup_message, private_followup_started_at, private_followup_revision
+    ) VALUES ('primary', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET enabled = excluded.enabled, chat_id = excluded.chat_id,
       token_ciphertext = excluded.token_ciphertext, promotion_message = excluded.promotion_message,
       welcome_enabled = excluded.welcome_enabled, welcome_chat_id = excluded.welcome_chat_id,
@@ -341,10 +376,15 @@ export async function saveTelegramPromotionSettings(input: SettingsInput) {
       welcome_revision = excluded.welcome_revision, chat_bot_token_ciphertext = excluded.chat_bot_token_ciphertext,
       keyword_enabled = excluded.keyword_enabled, keyword_started_at = excluded.keyword_started_at,
       private_enabled = excluded.private_enabled, private_started_at = excluded.private_started_at,
-      private_start_message = excluded.private_start_message`)
+      private_start_message = excluded.private_start_message,
+      private_followup_enabled = excluded.private_followup_enabled,
+      private_followup_message = excluded.private_followup_message,
+      private_followup_started_at = excluded.private_followup_started_at,
+      private_followup_revision = excluded.private_followup_revision`)
       .run(Number(input.enabled), chatId, ciphertext, promotionMessage, Number(welcomeEnabled),
         welcomeChatId, welcomeMessage, welcomeStartedAt, welcomeRevision, chatCiphertext, Number(keywordEnabled), keywordStartedAt,
-        Number(privateEnabled), privateStartedAt, privateStartMessage);
+        Number(privateEnabled), privateStartedAt, privateStartMessage,
+        Number(followupEnabled), followupMessage, followupStartedAt, followupRevision);
   });
   return telegramPromotionStatus();
 }

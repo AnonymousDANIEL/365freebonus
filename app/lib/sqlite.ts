@@ -12,7 +12,7 @@ export function getDataDirectory(): string {
 function migrate(db: DatabaseSync) {
   if (migrated.has(db)) return;
   const readVersion = () => (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
-  if (readVersion() < 15) {
+  if (readVersion() < 16) {
     db.exec("BEGIN IMMEDIATE");
     try {
       // Read again inside the write lock, so concurrent process starts cannot
@@ -209,6 +209,26 @@ function migrate(db: DatabaseSync) {
       if (version < 15) db.exec(`
         ALTER TABLE telegram_keyword_rules ADD COLUMN show_button INTEGER NOT NULL DEFAULT 1 CHECK (show_button IN (0, 1));
         PRAGMA user_version = 15;
+      `);
+      if (version < 16) db.exec(`
+        ALTER TABLE telegram_promotion_settings ADD COLUMN private_followup_enabled INTEGER NOT NULL DEFAULT 0 CHECK (private_followup_enabled IN (0, 1));
+        ALTER TABLE telegram_promotion_settings ADD COLUMN private_followup_message TEXT NOT NULL DEFAULT '';
+        ALTER TABLE telegram_promotion_settings ADD COLUMN private_followup_started_at INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE telegram_promotion_settings ADD COLUMN private_followup_revision TEXT NOT NULL DEFAULT '';
+        CREATE TABLE telegram_private_followups (
+          chat_id INTEGER PRIMARY KEY,
+          revision TEXT NOT NULL DEFAULT '', settings_revision TEXT NOT NULL DEFAULT '',
+          customer_update_id INTEGER NOT NULL DEFAULT 0, customer_message_id INTEGER NOT NULL DEFAULT 0,
+          customer_at INTEGER NOT NULL DEFAULT 0, due_at INTEGER NOT NULL DEFAULT 0,
+          status TEXT NOT NULL DEFAULT 'cancelled' CHECK (status IN ('pending', 'sending', 'sent', 'failed', 'unknown', 'cancelled')),
+          attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at INTEGER NOT NULL DEFAULT 0,
+          lease_id TEXT NOT NULL DEFAULT '', lease_until INTEGER NOT NULL DEFAULT 0,
+          last_error TEXT NOT NULL DEFAULT '', sent_at INTEGER,
+          last_outbound_at INTEGER NOT NULL DEFAULT 0, last_outbound_message_id INTEGER NOT NULL DEFAULT 0,
+          opted_out INTEGER NOT NULL DEFAULT 0 CHECK (opted_out IN (0, 1))
+        );
+        CREATE INDEX telegram_private_followups_due ON telegram_private_followups(status, next_attempt_at, due_at);
+        PRAGMA user_version = 16;
       `);
       db.exec("COMMIT");
     } catch (error) { db.exec("ROLLBACK"); throw error; }
