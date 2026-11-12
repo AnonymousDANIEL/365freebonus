@@ -139,7 +139,7 @@ test('migrations preserve brand data and existing expiry without creating Telegr
       process.env.DATA_DIR = legacyPath;
       const saved = await repository.readDirectory(true, now);
       const upgraded = sqlite.getSqlite();
-      assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version, 14);
+      assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version, 15);
       assert.equal(upgraded.prepare('SELECT COUNT(*) AS count FROM telegram_promotion_outbox').get().count, version >= 5 ? 1 : 0);
       assert.equal(upgraded.prepare('SELECT COUNT(*) AS count FROM telegram_private_contacts').get().count, 0);
       const runtime = upgraded.prepare("SELECT revision, next_offset, last_polled_at, sent, keyword_replies, private_replies FROM telegram_welcome_state WHERE id='primary'").get();
@@ -148,7 +148,7 @@ test('migrations preserve brand data and existing expiry without creating Telegr
       } : undefined);
       const rules = upgraded.prepare('SELECT * FROM telegram_keyword_rules ORDER BY id').all().map(rule => ({ ...rule }));
       assert.deepEqual(rules, hasChatBot ? [
-        { id: 7, keyword: 'Bonus', keyword_key: 'bonus', match_mode: 'exact', response: 'Existing keyword response' },
+        { id: 7, keyword: 'Bonus', keyword_key: 'bonus', match_mode: 'exact', response: 'Existing keyword response', show_button: 1 },
       ] : []);
       if (version >= 6) {
         const settings = upgraded.prepare("SELECT * FROM telegram_promotion_settings WHERE id='primary'").get();

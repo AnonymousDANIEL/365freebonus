@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Check, LoaderCircle, Pencil, Plus, Trash2 } from "lucide-react";
+import "./telegram-keywords-admin.css";
 
 type WelcomeDraft = { enabled: boolean; chatId: string; message: string };
 type ChatBotPreferences = { keywordEnabled: boolean; privateEnabled: boolean; privateStartMessage: string };
@@ -20,7 +21,7 @@ type TelegramDraft = Pick<TelegramConfig, "enabled" | "chatId" | "promotionMessa
   welcome: WelcomeDraft;
   chatBot: ChatBotPreferences & { token: string };
 };
-type KeywordRule = { id: number; keyword: string; matchMode: "exact" | "contains"; response: string };
+type KeywordRule = { id: number; keyword: string; matchMode: "exact" | "contains"; response: string; showButton: boolean };
 type KeywordDraft = Omit<KeywordRule, "id"> & { id?: number };
 type Notice = { message: string; error?: boolean; sessionExpired?: boolean };
 type AdminRequest = <T>(path: string, method?: string, body?: unknown) => Promise<T>;
@@ -36,7 +37,11 @@ const initialDraft: TelegramDraft = {
   welcome: { enabled: false, chatId: "", message: "" },
   chatBot: { token: "", keywordEnabled: false, privateEnabled: false, privateStartMessage: "" },
 };
-const initialKeyword: KeywordDraft = { keyword: "", matchMode: "exact", response: "" };
+const initialKeyword: KeywordDraft = { keyword: "", matchMode: "exact", response: "", showButton: true };
+const keywordModes = [
+  { showButton: true, title: "按键关键字", description: "显示在 1 对 1 私聊菜单，顾客点击按键或输入关键字都能获得回复。", add: "添加按键关键字", empty: "尚未添加按键关键字。" },
+  { showButton: false, title: "文字关键字（不显示按键）", description: "只根据顾客输入的关键字回复，不显示为菜单按键，回复也不附带按键。", add: "添加文字关键字", empty: "尚未添加文字关键字。" },
+] as const;
 const matchLabels = { exact: "完全匹配", contains: "包含关键词" } as const;
 const deliveryLabels = { pending: "待发送", sending: "发送中", sent: "已发送", failed: "发送失败", unknown: "待确认", skipped: "已跳过" } as const;
 const pollTimeFormat = new Intl.DateTimeFormat("zh-CN", {
@@ -78,13 +83,21 @@ function TelegramKeywordRules({ request, signInPath }: AdminProps) {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [reload, setReload] = useState(0);
+  const editorRef = useRef<HTMLFormElement>(null);
+  const editorOpen = Boolean(editing);
+
+  useEffect(() => {
+    if (!editorOpen) return;
+    editorRef.current?.scrollIntoView({ block: "nearest" });
+    editorRef.current?.querySelector<HTMLInputElement>("input")?.focus({ preventScroll: true });
+  }, [editorOpen, editing?.id]);
 
   useEffect(() => {
     let active = true;
     setLoading(true);
     setNotice(null);
     request<{ rules: KeywordRule[] }>(keywordsEndpoint).then(result => {
-      if (active) setRules(result.rules);
+      if (active) setRules(result.rules.map(rule => ({ ...rule, showButton: rule.showButton !== false })));
     }).catch(error => {
       if (active) setNotice(requestFailure(error));
     }).finally(() => {
@@ -96,7 +109,7 @@ function TelegramKeywordRules({ request, signInPath }: AdminProps) {
   async function saveRule(event: FormEvent) {
     event.preventDefault();
     if (!editing || busy) return;
-    const { id, matchMode } = editing;
+    const { id, matchMode, showButton } = editing;
     const keyword = editing.keyword.trim();
     const response = editing.response.trim();
     if (!keyword || !response) {
@@ -106,7 +119,7 @@ function TelegramKeywordRules({ request, signInPath }: AdminProps) {
     setBusy(true);
     setNotice(null);
     try {
-      const payload = { keyword, matchMode, response };
+      const payload = { keyword, matchMode, response, showButton };
       const result = await request<{ rule: KeywordRule }>(keywordsEndpoint, id === undefined ? "POST" : "PUT",
         id === undefined ? payload : { id, ...payload });
       setRules(current => {
@@ -114,7 +127,7 @@ function TelegramKeywordRules({ request, signInPath }: AdminProps) {
         return id === undefined ? [...list, result.rule] : list.map(rule => rule.id === id ? result.rule : rule);
       });
       setEditing(null);
-      setNotice({ message: "关键词规则已保存。" });
+      setNotice({ message: showButton ? "按键关键字已保存。在 Telegram 发送 /menu 可查看最新按键。" : "文字关键字已保存，顾客输入匹配内容后会自动回复。" });
     } catch (error) {
       setNotice(requestFailure(error));
     } finally {
@@ -146,15 +159,23 @@ function TelegramKeywordRules({ request, signInPath }: AdminProps) {
     <div className="cms-settings-panel">
       <div>
         <h2 id="telegram-keywords-title">关键词回复规则</h2>
-        <p>规则独立保存，供指定群组和 1 对 1 私聊使用。两项可分别开启。</p>
+        <p>按键与文字规则分开管理。两类规则都支持群组和私聊文字匹配，显示按键的设置仅用于 1 对 1 私聊菜单。</p>
       </div>
       <div className="cms-settings-fields">
         <TelegramNotice notice={notice} signInPath={signInPath} />
         {loading ? <p className="cms-telegram-loading" role="status"><LoaderCircle size={16} className="cms-spin" />正在加载关键词规则…</p> : rules === null ?
           <div><button type="button" className="cms-secondary" onClick={() => setReload(previous => previous + 1)}>重新加载规则</button></div> : <>
-            {editing ? <form className="cms-settings-form" onSubmit={saveRule}>
+            {editing && <form ref={editorRef} className="cms-settings-form cms-telegram-keyword-editor" onSubmit={saveRule}>
               <fieldset className="cms-settings-fields" disabled={busy}>
-                <h3>{editing.id === undefined ? "添加关键词规则" : "编辑关键词规则"}</h3>
+                <h3>{editing.id === undefined ? (editing.showButton ? "添加按键关键字" : "添加文字关键字") : "编辑关键词规则"}</h3>
+                <label>显示方式
+                  <select value={editing.showButton ? "button" : "text"}
+                    onChange={event => setEditing({ ...editing, showButton: event.target.value === "button" })}>
+                    <option value="button">按键关键字</option>
+                    <option value="text">文字关键字（不显示按键）</option>
+                  </select>
+                  <small>更改显示方式后，保存即可将规则移到对应分类；文字匹配方式保持独立。</small>
+                </label>
                 <div className="cms-form-grid">
                   <label>关键词
                     <input required maxLength={keywordLimit} value={editing.keyword} placeholder="例如 bonus"
@@ -176,20 +197,33 @@ function TelegramKeywordRules({ request, signInPath }: AdminProps) {
                   <button className="cms-secondary" type="button" onClick={() => setEditing(null)}>取消</button>
                 </div>
               </fieldset>
-            </form> : <div><button type="button" className="cms-secondary" disabled={busy} onClick={() => openRule(initialKeyword)}><Plus size={16} />添加关键词规则</button></div>}
-            {rules.length ? <ul className="cms-brand-panel cms-telegram-keyword-list">
-              {rules.map(rule => <li key={rule.id}>
-                <div className="cms-telegram-keyword-summary">
-                  <strong>{rule.keyword}</strong>
-                  <small>{matchLabels[rule.matchMode]}</small>
-                  <p>{rule.response}</p>
-                </div>
-                <div className="cms-row-actions">
-                  <button type="button" disabled={busy || Boolean(editing)} aria-label={`编辑规则 ${rule.keyword}`} onClick={() => openRule(rule)}><Pencil size={15} /></button>
-                  <button type="button" className="cms-delete" disabled={busy || Boolean(editing)} aria-label={`删除规则 ${rule.keyword}`} onClick={() => void deleteRule(rule)}><Trash2 size={15} /></button>
-                </div>
-              </li>)}
-            </ul> : <p>尚未添加关键词规则。</p>}
+            </form>}
+            <div className="cms-telegram-keyword-groups">
+              {keywordModes.map(mode => {
+                const groupedRules = rules.filter(rule => rule.showButton === mode.showButton);
+                const groupId = mode.showButton ? "telegram-button-keywords" : "telegram-text-keywords";
+                return <section className="cms-telegram-keyword-group" key={groupId} aria-labelledby={groupId}>
+                  <div className="cms-telegram-keyword-group-heading">
+                    <div><h3 id={groupId}>{mode.title}<span className="cms-telegram-keyword-count">{groupedRules.length}</span></h3><p>{mode.description}</p></div>
+                    <button type="button" className="cms-secondary" disabled={busy || Boolean(editing)}
+                      onClick={() => openRule({ ...initialKeyword, showButton: mode.showButton })}><Plus size={16} />{mode.add}</button>
+                  </div>
+                  {groupedRules.length ? <ul className="cms-brand-panel cms-telegram-keyword-list">
+                    {groupedRules.map(rule => <li key={rule.id}>
+                      <div className="cms-telegram-keyword-summary">
+                        <strong>{rule.keyword}</strong>
+                        <small>{matchLabels[rule.matchMode]}</small>
+                        <p>{rule.response}</p>
+                      </div>
+                      <div className="cms-row-actions">
+                        <button type="button" disabled={busy || Boolean(editing)} aria-label={`编辑规则 ${rule.keyword}`} onClick={() => openRule(rule)}><Pencil size={15} /></button>
+                        <button type="button" className="cms-delete" disabled={busy || Boolean(editing)} aria-label={`删除规则 ${rule.keyword}`} onClick={() => void deleteRule(rule)}><Trash2 size={15} /></button>
+                      </div>
+                    </li>)}
+                  </ul> : <p className="cms-telegram-keyword-empty">{mode.empty}</p>}
+                </section>;
+              })}
+            </div>
           </>}
       </div>
     </div>

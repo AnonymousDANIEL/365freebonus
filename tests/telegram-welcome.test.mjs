@@ -68,8 +68,8 @@ function configureWelcome({
 function configureKeywords(rules, startedAt = cutoff, enabled = true) {
   const db = getSqlite();
   db.prepare("UPDATE telegram_promotion_settings SET keyword_enabled = ?, keyword_started_at = ? WHERE id = 'primary'").run(Number(enabled), startedAt);
-  const insert = db.prepare('INSERT INTO telegram_keyword_rules (keyword, keyword_key, match_mode, response) VALUES (?, ?, ?, ?)');
-  for (const [keyword, mode, response] of rules) insert.run(keyword, keyword, mode, response);
+  const insert = db.prepare('INSERT INTO telegram_keyword_rules (keyword, keyword_key, match_mode, response, show_button) VALUES (?, ?, ?, ?, ?)');
+  for (const [keyword, mode, response, showButton = true] of rules) insert.run(keyword, keyword, mode, response, Number(showButton));
 }
 
 function configurePrivate({ enabled = true, startMessage = 'Choose a topic' } = {}) {
@@ -389,6 +389,7 @@ test('private-only polling answers start, menu navigation, and keywords with gro
 test('known group joiners receive a DM and a rejected DM clears the contact for subsequent joins', async t => {
   configureWelcome();
   configurePrivate();
+  configureKeywords([['bonus', 'exact', 'Bonus reply']]);
   const batch = [
     privateMessage(500, { text: 'Hi' }), membership(501, { userId: privateChatId }),
     membership(502, { userId: privateChatId + 1 }), membership(503, { userId: privateChatId }),
@@ -419,6 +420,7 @@ test('channel joins send only to known private contacts with both features enabl
   const channelId = chatId - 10;
   configureWelcome({ groupChatId: channelId });
   configurePrivate();
+  configureKeywords([['bonus', 'exact', 'Bonus reply']]);
   const channelJoin = (updateId, userId) => membership(updateId, { id: channelId, type: 'channel', userId });
   const requests = mockTransport(t, [ok([
     privateMessage(600, { text: 'Hi' }), channelJoin(601, privateChatId + 1), channelJoin(602, privateChatId),
@@ -432,4 +434,75 @@ test('channel joins send only to known private contacts with both features enabl
   configurePrivate({ enabled: false });
   await tick(now + minute);
   assert.equal(requests.messages().length, 1);
+});
+
+test('private menus paginate only button rules while both modes still reply to typed keywords', async t => {
+  configureWelcome();
+  configurePrivate();
+  configureKeywords(Array.from({ length: 20 }, (_, index) => [
+    `topic ${index + 1}`, 'exact', `Answer ${index + 1}`, index % 2 === 1,
+  ]));
+  const requests = mockTransport(t, [ok([
+    privateMessage(800, { text: '/start' }), privateCallback(801, 'dm:page:1'),
+    privateCallback(802, 'dm:rule:1'), privateCallback(803, 'dm:rule:18'),
+    privateMessage(804, { text: 'topic 1' }), groupMessage(805, { text: 'topic 1' }),
+    privateMessage(806, { text: 'topic 2' }),
+  ])], Array(6).fill(successfulSend), { chatIds: [privateChatId, chatId] });
+  const acknowledged = t.mock.method(transport, 'answerTelegramCallback', async () => true);
+  await tick();
+  const [menu, secondPage, buttonAnswer, hiddenAnswer, groupAnswer, typedButtonAnswer] = requests.parameters();
+  const buttons = payload => payload.reply_markup.inline_keyboard.flat().map(button => button.callback_data);
+  assert.deepEqual(buttons(menu), [...Array.from({ length: 8 }, (_, index) => `dm:rule:${(index + 1) * 2}`), 'dm:page:1']);
+  assert.deepEqual(buttons(secondPage), ['dm:rule:18', 'dm:rule:20', 'dm:page:0']);
+  assert.equal(buttonAnswer.text, 'Answer 18');
+  assert.equal(hiddenAnswer.text, 'Answer 1');
+  assert.equal(hiddenAnswer.reply_markup, undefined, 'text-only replies do not attach a return button');
+  assert.equal(groupAnswer.text, 'Answer 1');
+  assert.equal(groupAnswer.reply_markup, undefined);
+  assert.equal(typedButtonAnswer.text, 'Answer 2');
+  assert.deepEqual(buttons(typedButtonAnswer), ['dm:page:0']);
+  assert.equal(acknowledged.mock.calls.length, 3, 'hidden stale callback is still acknowledged');
+  assert.equal(state().private_replies, 5);
+  assert.equal(state().keyword_replies, 1);
+});
+
+test('text-only private rules keep exact matching priority and never create an empty button menu', async t => {
+  configureWelcome();
+  configurePrivate({ startMessage: '' });
+  configureKeywords([
+    ['bonus', 'exact', 'Private exact reply', false],
+    ['bon', 'contains', 'Private contains reply', false],
+  ]);
+  const requests = mockTransport(t, [ok([
+    privateMessage(900, { text: '/start' }), privateMessage(901, { text: '/menu' }),
+    membership(902, { userId: privateChatId }), privateMessage(903, { text: 'bonus' }),
+    privateCallback(904, 'dm:rule:1'), groupMessage(905, { text: 'bonus' }),
+  ])], Array(5).fill(successfulSend), { chatIds: [privateChatId, chatId] });
+  const acknowledged = t.mock.method(transport, 'answerTelegramCallback', async () => true);
+  await tick();
+  const replies = requests.parameters();
+  assert.equal(replies.length, 5);
+  assert.match(replies[0].text, /输入关键词/);
+  assert.match(replies[1].text, /输入关键词/);
+  assert.match(replies[2].text, /^Welcome/);
+  assert.equal(replies[3].text, 'Private exact reply');
+  assert.equal(replies[4].text, 'Private exact reply');
+  assert.ok(replies.every(reply => reply.reply_markup === undefined));
+  assert.equal(acknowledged.mock.calls.length, 1);
+  assert.equal(state().sent, 1);
+  assert.equal(state().private_replies, 3);
+});
+
+test('a rule hidden while its old button callback is being acknowledged does not send a queued answer', async t => {
+  configureWelcome({ enabled: false });
+  configurePrivate();
+  configureKeywords([['bonus', 'exact', 'Do not send after hiding']], cutoff, false);
+  const requests = mockTransport(t, [ok([privateCallback(1000, 'dm:rule:1')])], [], { chatIds: [privateChatId] });
+  t.mock.method(transport, 'answerTelegramCallback', async () => {
+    getSqlite().prepare('UPDATE telegram_keyword_rules SET show_button=0 WHERE id=1').run();
+    return true;
+  });
+  await tick();
+  assert.deepEqual(requests.messages(), []);
+  assert.equal(state().private_replies, 0);
 });

@@ -306,12 +306,12 @@ test('migration14 removes former website credentials and preserves unrelated tab
   const legacyDir=mkdtempSync(path.join(fixture,'legacy-'));
   const filename=path.join(legacyDir,'directory.sqlite');
   const legacy=new DatabaseSync(filename);
-  legacy.exec("CREATE TABLE admin_sessions(id_hash TEXT PRIMARY KEY,username TEXT,expires_at INTEGER); CREATE TABLE website_logins(id INTEGER PRIMARY KEY,password_ciphertext TEXT); INSERT INTO website_logins VALUES(1,'old-encrypted-credential'); CREATE TABLE brands(marker TEXT); INSERT INTO brands VALUES('keep-brand'); CREATE TABLE site_settings(marker TEXT); INSERT INTO site_settings VALUES('keep-settings'); PRAGMA user_version=12;");
+  legacy.exec("CREATE TABLE admin_sessions(id_hash TEXT PRIMARY KEY,username TEXT,expires_at INTEGER); CREATE TABLE telegram_keyword_rules(id INTEGER PRIMARY KEY AUTOINCREMENT,keyword TEXT NOT NULL,keyword_key TEXT NOT NULL,match_mode TEXT NOT NULL,response TEXT NOT NULL,UNIQUE(keyword_key,match_mode)); CREATE TABLE website_logins(id INTEGER PRIMARY KEY,password_ciphertext TEXT); INSERT INTO website_logins VALUES(1,'old-encrypted-credential'); CREATE TABLE brands(marker TEXT); INSERT INTO brands VALUES('keep-brand'); CREATE TABLE site_settings(marker TEXT); INSERT INTO site_settings VALUES('keep-settings'); PRAGMA user_version=12;");
   legacy.close();
   const oldDir=process.env.DATA_DIR;
   process.env.DATA_DIR=legacyDir;
   const db=sqlite.getSqlite();
-  assert.equal(db.prepare('PRAGMA user_version').get().user_version,14);
+  assert.equal(db.prepare('PRAGMA user_version').get().user_version,15);
   assert.equal(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='website_logins'").get(),undefined);
   assert.equal(db.prepare('SELECT marker FROM brands').get().marker,'keep-brand');
   assert.equal(db.prepare('SELECT marker FROM site_settings').get().marker,'keep-settings');
@@ -399,11 +399,11 @@ test('migration14 revokes v13 ephemeral unlocks while preserving existing PIN an
   const db=sqlite.getSqlite();
   const vaultBefore=db.prepare('SELECT * FROM notes_vault_settings').get();
   const noteBefore=db.prepare('SELECT * FROM secure_notes WHERE id=?').get(saved.id);
-  db.exec("DROP TABLE notes_vault_unlocks; CREATE TABLE notes_vault_unlocks(token_hash TEXT PRIMARY KEY,session_hash TEXT NOT NULL REFERENCES admin_sessions(id_hash) ON DELETE CASCADE,vault_revision TEXT NOT NULL,expires_at INTEGER NOT NULL); CREATE INDEX secure_notes_unlock_expiry ON notes_vault_unlocks(expires_at); PRAGMA user_version=13;");
+  db.exec("ALTER TABLE telegram_keyword_rules DROP COLUMN show_button; DROP TABLE notes_vault_unlocks; CREATE TABLE notes_vault_unlocks(token_hash TEXT PRIMARY KEY,session_hash TEXT NOT NULL REFERENCES admin_sessions(id_hash) ON DELETE CASCADE,vault_revision TEXT NOT NULL,expires_at INTEGER NOT NULL); CREATE INDEX secure_notes_unlock_expiry ON notes_vault_unlocks(expires_at); PRAGMA user_version=13;");
   db.prepare('INSERT INTO notes_vault_unlocks VALUES(?,?,?,?)').run(createHash('sha256').update(token).digest('hex'),auth.sessionIdHash(admin.payload.jti),vaultBefore.revision,Date.now()+900000);
   closeDatabase();
   const reopened=sqlite.getSqlite();
-  assert.equal(reopened.prepare('PRAGMA user_version').get().user_version,14);
+  assert.equal(reopened.prepare('PRAGMA user_version').get().user_version,15);
   assert.deepEqual(reopened.prepare('SELECT * FROM notes_vault_settings').get(),vaultBefore);
   assert.deepEqual(reopened.prepare('SELECT * FROM secure_notes WHERE id=?').get(saved.id),noteBefore);
   assert.equal(reopened.prepare('SELECT COUNT(*) AS count FROM notes_vault_unlocks').get().count,0);

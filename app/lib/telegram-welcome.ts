@@ -28,6 +28,7 @@ type ChatReply = {
   messageId?: number;
   threadId?: number;
   callbackId?: string;
+  buttonRuleId?: number;
   keyboard?: InlineButton[][];
 };
 
@@ -40,6 +41,7 @@ const RATE_LIMIT_ERROR = "Telegram 正在限制发送频率，稍后重试。";
 const INVALID_TOKEN_ERROR = "无法使用 Telegram 机器人 Token，请检查设置。";
 const PRIVATE_START_URL = "https://t.me/FreeBonus365ChatBot?start=welcome";
 const DEFAULT_PRIVATE_GREETING = "欢迎使用 365 Free Bonus。请选择下方菜单，或直接输入关键词。";
+const DEFAULT_PRIVATE_TEXT_GREETING = "欢迎使用 365 Free Bonus。请直接输入关键词。";
 const MENU_PAGE_SIZE = 8;
 
 function inTransaction<T>(db: DatabaseSync, operation: () => T): T {
@@ -134,6 +136,10 @@ function optionsButton(text: string): InlineButton[][] {
   return [[{ text, callback_data: "dm:page:0" }]];
 }
 
+function hasButtonRules(db: DatabaseSync): boolean {
+  return Boolean(db.prepare("SELECT 1 FROM telegram_keyword_rules WHERE show_button = 1 LIMIT 1").get());
+}
+
 function welcomeReply(db: DatabaseSync, update: Record<string, unknown>, settings: ChatSettings): ChatReply | null {
   if (settings.welcome_enabled !== 1) return null;
   const change = asRecord(update.chat_member);
@@ -148,7 +154,7 @@ function welcomeReply(db: DatabaseSync, update: Record<string, unknown>, setting
   const text = shorten(settings.welcome_message.replace(/\{(name|group)\}/g, (_, key) => key === "name" ? name : group).trim(), 4_096);
   if (!text) return null;
   if (privateEnabled && db.prepare("SELECT 1 FROM telegram_private_contacts WHERE user_id = ?").get(user.id)) {
-    return { kind: "welcome", chatId: user.id, text, keyboard: optionsButton("查看选项") };
+    return { kind: "welcome", chatId: user.id, text, keyboard: hasButtonRules(db) ? optionsButton("查看选项") : undefined };
   }
   if (chat.type === "channel") return null;
   return {
@@ -162,15 +168,15 @@ function originalText(message: Record<string, unknown>): string | null {
   return typeof message.text === "string" ? message.text : null;
 }
 
-function keywordResponse(db: DatabaseSync, text: string): string | null {
+function keywordResponse(db: DatabaseSync, text: string): { text: string; showButton: boolean } | null {
   const key = normalizeTelegramKeyword(text);
   if (!key) return null;
-  const rule = db.prepare(`SELECT response FROM telegram_keyword_rules
+  const rule = db.prepare(`SELECT response, show_button FROM telegram_keyword_rules
     WHERE (match_mode = 'exact' AND keyword_key = ?)
       OR (match_mode = 'contains' AND keyword_key <> '' AND instr(?, keyword_key) > 0)
     ORDER BY match_mode = 'exact' DESC, length(keyword_key) DESC, id ASC LIMIT 1`).get(key, key);
   if (typeof rule?.response !== "string" || !rule.response.trim()) return null;
-  return shorten(rule.response.trim(), 4_096);
+  return { text: shorten(rule.response.trim(), 4_096), showButton: rule.show_button === 1 };
 }
 
 function keywordReply(db: DatabaseSync, update: Record<string, unknown>, settings: ChatSettings): ChatReply | null {
@@ -180,10 +186,10 @@ function keywordReply(db: DatabaseSync, update: Record<string, unknown>, setting
   const sender = asRecord(message.from);
   if (!sender || sender.is_bot !== false || !positiveInteger(sender.id) || !positiveInteger(message.message_id)) return null;
   const input = originalText(message);
-  const text = input && keywordResponse(db, input);
-  if (!text) return null;
+  const matched = input && keywordResponse(db, input);
+  if (!matched) return null;
   const threadId = message.is_topic_message === true && positiveInteger(message.message_thread_id) ? message.message_thread_id : undefined;
-  return { kind: "keyword", chatId: Number(settings.welcome_chat_id), text, messageId: message.message_id, threadId };
+  return { kind: "keyword", chatId: Number(settings.welcome_chat_id), text: matched.text, messageId: message.message_id, threadId };
 }
 
 function privateChatId(chatValue: unknown, senderValue: unknown): number | null {
@@ -194,7 +200,7 @@ function privateChatId(chatValue: unknown, senderValue: unknown): number | null 
 }
 
 function privateMenu(db: DatabaseSync, settings: ChatSettings, chatId: number, page: number): ChatReply {
-  const rules = db.prepare("SELECT id, keyword FROM telegram_keyword_rules ORDER BY id LIMIT ? OFFSET ?")
+  const rules = db.prepare("SELECT id, keyword FROM telegram_keyword_rules WHERE show_button = 1 ORDER BY id LIMIT ? OFFSET ?")
     .all(MENU_PAGE_SIZE + 1, page * MENU_PAGE_SIZE) as { id: number; keyword: string }[];
   if (page > 0 && !rules.length) return privateMenu(db, settings, chatId, 0);
   const keyboard: InlineButton[][] = rules.slice(0, MENU_PAGE_SIZE).map(rule => [
@@ -204,7 +210,7 @@ function privateMenu(db: DatabaseSync, settings: ChatSettings, chatId: number, p
   if (page > 0) pagination.push({ text: "上一页", callback_data: `dm:page:${page - 1}` });
   if (rules.length > MENU_PAGE_SIZE) pagination.push({ text: "下一页", callback_data: `dm:page:${page + 1}` });
   if (pagination.length) keyboard.push(pagination);
-  const text = shorten(settings.private_start_message.trim() || DEFAULT_PRIVATE_GREETING, 4_096);
+  const text = shorten(settings.private_start_message.trim() || (rules.length ? DEFAULT_PRIVATE_GREETING : DEFAULT_PRIVATE_TEXT_GREETING), 4_096);
   return { kind: "private", chatId, text, keyboard };
 }
 
@@ -222,9 +228,9 @@ function callbackReply(db: DatabaseSync, update: Record<string, unknown>, settin
     if (id > Math.floor(Number.MAX_SAFE_INTEGER / MENU_PAGE_SIZE)) return null;
     return { ...privateMenu(db, settings, chatId, id), callbackId: callback.id };
   }
-  const rule = db.prepare("SELECT response FROM telegram_keyword_rules WHERE id = ?").get(id);
+  const rule = db.prepare("SELECT response FROM telegram_keyword_rules WHERE id = ? AND show_button = 1").get(id);
   const text = typeof rule?.response === "string" ? shorten(rule.response.trim(), 4_096) : "";
-  return { kind: "private", chatId, text, callbackId: callback.id, keyboard: text ? optionsButton("返回选项") : undefined };
+  return { kind: "private", chatId, text, callbackId: callback.id, buttonRuleId: id, keyboard: text ? optionsButton("返回选项") : undefined };
 }
 
 function privateReply(db: DatabaseSync, update: Record<string, unknown>, settings: ChatSettings): ChatReply | null {
@@ -238,8 +244,8 @@ function privateReply(db: DatabaseSync, update: Record<string, unknown>, setting
   const input = originalText(message);
   if (!input) return null;
   if (/^\/(?:start|menu)(?:@FreeBonus365ChatBot)?(?:\s|$)/i.test(input.trim())) return privateMenu(db, settings, chatId, 0);
-  const text = keywordResponse(db, input);
-  return text ? { kind: "private", chatId, text, keyboard: optionsButton("返回选项") } : null;
+  const matched = keywordResponse(db, input);
+  return matched ? { kind: "private", chatId, text: matched.text, keyboard: matched.showButton ? optionsButton("返回选项") : undefined } : null;
 }
 
 function claimUpdate(db: DatabaseSync, claim: PollClaim, id: number, update: Record<string, unknown>, now: number) {
@@ -316,6 +322,9 @@ export async function pollTelegramWelcomeOnce(decryptToken: DecryptToken, clock 
           WHERE id = 'primary' AND welcome_revision = ? AND private_enabled = 1)`)
         .get(claim.revision, claim.leaseId, claim.revision);
       if (!active) { finishPoll(db, claim); return; }
+      // A rule may be hidden or deleted while Telegram acknowledges the click.
+      // Do not send an old button's queued answer after that configuration change.
+      if (action.buttonRuleId !== undefined && !db.prepare("SELECT 1 FROM telegram_keyword_rules WHERE id = ? AND show_button = 1").get(action.buttonRuleId)) continue;
     }
     if (!action.text) continue;
     const reply = await telegramRequest(token, "sendMessage", {

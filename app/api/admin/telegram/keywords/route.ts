@@ -11,6 +11,7 @@ const ruleInput = z.object({
   keyword: z.string().trim().min(1).max(120).refine(keyword => normalizeTelegramKeyword(keyword).length > 0, "请输入关键词。"),
   matchMode: z.enum(["exact", "contains"]),
   response: z.string().trim().min(1).max(2_000),
+  showButton: z.boolean().optional(),
 }).strict();
 const updateInput = ruleInput.extend({ id });
 const deleteInput = z.object({ id }).strict();

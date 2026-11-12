@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
+import { DatabaseSync } from 'node:sqlite';
 
 const fixture = mkdtempSync(path.join(tmpdir(), 'telegram-keywords-'));
 const origin = 'https://directory.example';
@@ -70,7 +71,7 @@ const ruleInput = { keyword: 'Help', matchMode: 'exact', response: '请联系管
 test('keyword CRUD returns public rules in ID order and reports missing records', async () => {
   assert.deepEqual(await request('GET', undefined, 200), { rules: [] });
   const { rule: first } = await request('POST', { ...ruleInput, keyword: '  Ｈｅｌｐ  ', response: '  请联系管理员。  ' }, 201);
-  assert.deepEqual(first, { id: first.id, ...ruleInput, keyword: 'Ｈｅｌｐ' });
+  assert.deepEqual(first, { id: first.id, ...ruleInput, keyword: 'Ｈｅｌｐ', showButton: true });
   assert.ok(Number.isSafeInteger(first.id) && first.id > 0);
   assert.equal(db.prepare('SELECT keyword_key FROM telegram_keyword_rules WHERE id = ?').get(first.id).keyword_key, 'help');
 
@@ -108,6 +109,7 @@ test('keyword operations require an admin session and mutations validate origin 
   for (const invalid of [
     { keyword: '   ' }, { keyword: 'a'.repeat(121) }, { response: ' ' },
     { response: 'a'.repeat(2_001) }, { matchMode: 'prefix' }, { unknown: true },
+    { showButton: 0 }, { showButton: 'false' }, { showButton: null },
   ]) await request('POST', { ...ruleInput, ...invalid }, 400);
   for (const id of [0, -1, 1.2, '1', Number.MAX_SAFE_INTEGER + 1]) {
     await request('DELETE', { id }, 400);
@@ -115,4 +117,42 @@ test('keyword operations require an admin session and mutations validate origin 
   }
   await request('DELETE', { id: 1, unknown: true }, 400);
   assert.deepEqual(await request('GET', undefined, 200), { rules: [] });
+});
+
+test('keyword button modes persist as booleans; old-client updates preserve text-only rules', async () => {
+  const { rule: textOnly } = await request('POST', { ...ruleInput, showButton: false }, 201);
+  assert.equal(textOnly.showButton, false);
+  assert.equal(db.prepare('SELECT show_button FROM telegram_keyword_rules WHERE id=?').get(textOnly.id).show_button, 0);
+  const { rule: preserved } = await request('PUT', { id: textOnly.id, ...ruleInput, response: 'Changed text' }, 200);
+  assert.equal(preserved.showButton, false);
+  const { rule: shown } = await request('PUT', { ...preserved, showButton: true }, 200);
+  assert.equal(shown.showButton, true);
+  const { rule: hidden } = await request('PUT', { ...shown, showButton: false }, 200);
+  assert.equal(hidden.showButton, false);
+  await request('PUT', { ...hidden, showButton: 'false' }, 400);
+  assert.deepEqual((await request('GET', undefined, 200)).rules, [hidden]);
+});
+
+test('migration15 preserves existing keyword rules as visible buttons', () => {
+  const originalDataDir = process.env.DATA_DIR;
+  const legacyDataDir = path.join(fixture, 'legacy-version14');
+  mkdirSync(legacyDataDir);
+  const filename = path.join(legacyDataDir, 'directory.sqlite');
+  const legacy = new DatabaseSync(filename);
+  legacy.exec(`CREATE TABLE telegram_keyword_rules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, keyword TEXT NOT NULL, keyword_key TEXT NOT NULL,
+    match_mode TEXT NOT NULL, response TEXT NOT NULL, UNIQUE(keyword_key, match_mode)
+  ); INSERT INTO telegram_keyword_rules VALUES(7,'Existing keyword','existing keyword','contains','Existing reply');
+  PRAGMA user_version=14;`);
+  legacy.close();
+  try {
+    process.env.DATA_DIR = legacyDataDir;
+    const upgraded = getSqlite();
+    assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version, 15);
+    assert.deepEqual({ ...upgraded.prepare('SELECT * FROM telegram_keyword_rules WHERE id=7').get() }, {
+      id: 7, keyword: 'Existing keyword', keyword_key: 'existing keyword', match_mode: 'contains', response: 'Existing reply', show_button: 1,
+    });
+    upgraded.close();
+    globalThis.__directorySqlite?.delete(filename);
+  } finally { process.env.DATA_DIR = originalDataDir; }
 });
