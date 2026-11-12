@@ -96,11 +96,11 @@ function promotionStart(input: number | null | undefined, previous: number | nul
   return input;
 }
 
-function enqueuePromotion(db: ReturnType<typeof getSqlite>, brandId: string) {
-  db.prepare(`INSERT INTO telegram_promotion_outbox (brand_id, revision) VALUES (?, ?)
+function enqueuePromotion(db: ReturnType<typeof getSqlite>, brandId: string, now: number) {
+  db.prepare(`INSERT INTO telegram_promotion_outbox (brand_id, revision, created_at) VALUES (?, ?, ?)
     ON CONFLICT(brand_id) DO UPDATE SET revision=excluded.revision, status='pending',
-      attempts=0, next_attempt_at=0, last_error='', sent_at=NULL, message_id=NULL
-  `).run(brandId, randomUUID());
+      attempts=0, next_attempt_at=0, last_error='', sent_at=NULL, message_id=NULL, created_at=excluded.created_at
+  `).run(brandId, randomUUID(), now);
 }
 
 export function createBrand(input: BrandWriteInput & { id: string }, now = Date.now()): Brand {
@@ -116,7 +116,7 @@ export function createBrand(input: BrandWriteInput & { id: string }, now = Date.
   db.exec("BEGIN IMMEDIATE");
   try {
     db.prepare("INSERT INTO brands (id, name, slug, category, tagline, description, color, icon, image_url, featured, published, sort_order, link, promotion_days, promotion_expires_at, promotion_starts_at, publish_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(...brandValues(brand));
-    if (category !== "All") enqueuePromotion(db, brand.id);
+    if (category !== "All") enqueuePromotion(db, brand.id, now);
     db.exec("COMMIT");
     return brand;
   } catch (error) { db.exec("ROLLBACK"); throw error; }
@@ -161,7 +161,13 @@ export function updateBrand(id: string, input: BrandWriteInput, now = Date.now()
     // requests preserve the first deadline, including retries after expiry.
     db.prepare("UPDATE brands SET name=?, slug=?, category=?, tagline=?, description=?, color=?, icon=?, image_url=?, featured=?, published=?, sort_order=?, link=?, promotion_days=?, promotion_expires_at=?, promotion_starts_at=?, publish_at=? WHERE id=?").run(...brandValues(brand).slice(1), id);
     if (category === "All") db.prepare("DELETE FROM telegram_promotion_outbox WHERE brand_id=?").run(id);
-    else if (assignmentChanged || reactivated) enqueuePromotion(db, id);
+    else if (assignmentChanged || reactivated) enqueuePromotion(db, id, now);
+    else if (!previous.published && published) {
+      // First publication is a fresh availability event for private subscribers,
+      // even when the draft's promotion revision was created much earlier.
+      // Preserve that revision/status so completed deliveries stay deduplicated.
+      db.prepare("UPDATE telegram_promotion_outbox SET created_at=? WHERE brand_id=?").run(now, id);
+    }
     db.exec("COMMIT");
     return brand;
   } catch (error) { db.exec("ROLLBACK"); throw error; }

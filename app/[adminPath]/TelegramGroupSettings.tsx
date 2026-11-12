@@ -11,7 +11,8 @@ type FollowupStatus = FollowupPreferences & {
   counts: { pending: number; sent: number; failed: number; unknown: number; cancelled: number };
   lastError: string;
 };
-type ChatBotPreferences = { keywordEnabled: boolean; privateEnabled: boolean; privateStartMessage: string; followup: FollowupPreferences };
+type UpdatesStatus = { enabled: boolean; counts: { pending: number; sending: number; sent: number; failed: number; unknown: number; cancelled: number }; lastError: string };
+type ChatBotPreferences = { keywordEnabled: boolean; privateEnabled: boolean; privateStartMessage: string; followup: FollowupPreferences; updates: { enabled: boolean } };
 type TelegramConfig = {
   enabled: boolean;
   chatId: string;
@@ -20,7 +21,7 @@ type TelegramConfig = {
   counts: { pending: number; sending: number; sent: number; failed: number; unknown: number; skipped: number };
   lastError: string;
   welcome: WelcomeDraft & { sent: number; lastPolledAt: number | null; lastError: string };
-  chatBot: Omit<ChatBotPreferences, "followup"> & { hasToken: boolean; keywordReplies: number; privateReplies: number; followup: FollowupStatus };
+  chatBot: Omit<ChatBotPreferences, "followup" | "updates"> & { hasToken: boolean; keywordReplies: number; privateReplies: number; followup: FollowupStatus; updates: UpdatesStatus };
 };
 type TelegramDraft = Pick<TelegramConfig, "enabled" | "chatId" | "promotionMessage"> & {
   token: string;
@@ -41,7 +42,7 @@ const messageLimit = 2000;
 const initialDraft: TelegramDraft = {
   enabled: false, chatId: "", token: "", promotionMessage: "",
   welcome: { enabled: false, chatId: "", message: "" },
-  chatBot: { token: "", keywordEnabled: false, privateEnabled: false, privateStartMessage: "", followup: { enabled: false, message: "" } },
+  chatBot: { token: "", keywordEnabled: false, privateEnabled: false, privateStartMessage: "", followup: { enabled: false, message: "" }, updates: { enabled: false } },
 };
 const initialKeyword: KeywordDraft = { keyword: "", matchMode: "exact", response: "", showButton: true };
 const keywordModes = [
@@ -64,6 +65,7 @@ function draftFromConfig({ enabled, chatId, promotionMessage, welcome, chatBot }
       token: "", keywordEnabled: chatBot.keywordEnabled,
       privateEnabled: chatBot.privateEnabled, privateStartMessage: chatBot.privateStartMessage,
       followup: { enabled: chatBot.followup?.enabled ?? false, message: chatBot.followup?.message ?? "" },
+      updates: { enabled: chatBot.updates?.enabled ?? false },
     },
   };
 }
@@ -268,7 +270,7 @@ export default function TelegramGroupSettings({ request, signInPath }: AdminProp
     if (!config || loading || saving || refreshing) return;
     const chatId = draft.chatId.trim();
     const token = draft.token.trim();
-    const { token: chatTokenInput, keywordEnabled, privateEnabled, privateStartMessage, followup } = draft.chatBot;
+    const { token: chatTokenInput, keywordEnabled, privateEnabled, privateStartMessage, followup, updates } = draft.chatBot;
     const chatToken = chatTokenInput.trim();
     const welcome = { ...draft.welcome, chatId: draft.welcome.chatId.trim(), message: draft.welcome.message.trim() };
     const targetRequired = welcome.enabled || keywordEnabled;
@@ -292,6 +294,10 @@ export default function TelegramGroupSettings({ request, signInPath }: AdminProp
       setNotice({ message: "请填写入群欢迎文案。", error: true });
       return;
     }
+    if (updates.enabled && !privateEnabled) {
+      setNotice({ message: "请先启用 1 对 1 私聊，再开启私聊品牌更新通知。", error: true });
+      return;
+    }
     if (followup.enabled && !privateEnabled) {
       setNotice({ message: "请先启用 1 对 1 私聊，再开启未识别消息自动跟进。", error: true });
       return;
@@ -311,6 +317,7 @@ export default function TelegramGroupSettings({ request, signInPath }: AdminProp
         chatBot: {
           keywordEnabled, privateEnabled, privateStartMessage: privateStartMessage.trim(),
           followup: { enabled: followup.enabled, message: followup.message.trim() },
+          updates: { enabled: updates.enabled },
           ...(chatToken ? { token: chatToken } : {}),
         },
         ...(token ? { token } : {}),
@@ -457,6 +464,7 @@ export default function TelegramGroupSettings({ request, signInPath }: AdminProp
                 onChange={event => setDraft({ ...draft, chatBot: {
                   ...draft.chatBot, privateEnabled: event.target.checked,
                   followup: { ...draft.chatBot.followup, enabled: event.target.checked && draft.chatBot.followup.enabled },
+                  updates: { enabled: event.target.checked && draft.chatBot.updates.enabled },
                 } })} />
               启用 1 对 1 私聊
             </label>
@@ -474,6 +482,29 @@ export default function TelegramGroupSettings({ request, signInPath }: AdminProp
             <dl className="cms-telegram-counts" aria-label="私聊运行记录">
               <div><dt>已发送私聊回复</dt><dd>{config.chatBot.privateReplies}</dd></div>
             </dl>
+          </div>
+        </section>
+        <section className="cms-settings-panel" aria-labelledby="telegram-private-updates-title">
+          <div>
+            <h2 id="telegram-private-updates-title">私聊品牌更新通知</h2>
+            <p>网页 Update / New 品牌上线时，由 @FreeBonus365ChatBot 自动私聊通知已主动开启机器人的顾客。</p>
+            <span className={`cms-telegram-status${config.chatBot.privateEnabled && config.chatBot.updates?.enabled ? " cms-telegram-enabled" : ""}`}>
+              {config.chatBot.updates?.enabled ? (config.chatBot.privateEnabled ? "已启用" : "私聊已停用") : "已停用"}
+            </span>
+          </div>
+          <div className="cms-settings-fields">
+            <label className="cms-telegram-switch">
+              <input type="checkbox" role="switch" checked={draft.chatBot.updates.enabled} disabled={!draft.chatBot.privateEnabled}
+                onChange={event => setDraft({ ...draft, chatBot: { ...draft.chatBot, updates: { enabled: event.target.checked } } })} />
+              启用私聊品牌更新通知
+            </label>
+            {!draft.chatBot.privateEnabled && <small>需先开启上方的“1 对 1 私聊”。</small>}
+            <small>通知沿用上方品牌通知文案，附带品牌图片、介绍及品牌名称、🌐 Visit website、🚀 Join Now 按钮。</small>
+            <small>仅发送启用后新上线的 Update / New，不补发历史通知。顾客需先主动开始私聊，可发送 /stop 停止自动通知，/start 重新开启。</small>
+            <dl className="cms-telegram-counts" aria-label="私聊品牌通知发送记录">
+              {Object.entries({ pending: "待发送", sending: "发送中", sent: "已发送", failed: "发送失败", unknown: "待确认", cancelled: "已取消" }).map(([key, label]) => <div key={key}><dt>{label}</dt><dd>{config.chatBot.updates?.counts[key as keyof UpdatesStatus["counts"]] ?? 0}</dd></div>)}
+            </dl>
+            {config.chatBot.updates?.lastError && <p className="cms-telegram-last-error">最近私聊品牌通知异常 · {config.chatBot.updates.lastError}</p>}
           </div>
         </section>
         <section className="cms-settings-panel cms-telegram-followup" aria-labelledby="telegram-followup-title">

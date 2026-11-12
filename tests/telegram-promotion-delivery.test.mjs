@@ -12,7 +12,7 @@ import ts from 'typescript';
 // administrator credentials, production data, or external requests are used.
 const fixture = mkdtempSync(path.join(tmpdir(), 'telegram-promotion-delivery-'));
 writeFileSync(path.join(fixture, 'package.json'), '{"type":"commonjs"}');
-for (const name of ['auth-core', 'brand-links', 'directory', 'image-url', 'sqlite', 'telegram-brand-card', 'telegram-promotions']) {
+for (const name of ['auth-core', 'brand-links', 'directory', 'image-url', 'sqlite', 'telegram-brand-card', 'telegram-followups', 'telegram-private-updates', 'telegram-promotions']) {
   writeFileSync(path.join(fixture, `${name}.js`), ts.transpileModule(
     readFileSync(new URL(`../app/lib/${name}.ts`, import.meta.url), 'utf8'),
     { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, esModuleInterop: true } },
@@ -123,7 +123,7 @@ function buttons(parameters) {
 function expectedButtons({ name = 'Syabas99', page = brandPage, link = 'https://brand.example/join?source=directory' } = {}) {
   return [
     [{ text: name, url: page }],
-    [{ text: 'Visit website', url: `${origin}/` }, ...(link ? [{ text: 'Join Now', url: link }] : [])],
+    [{ text: '🌐 Visit website', url: `${origin}/` }, ...(link ? [{ text: '🚀 Join Now', url: link }] : [])],
   ];
 }
 

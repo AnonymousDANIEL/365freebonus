@@ -386,6 +386,89 @@ test('private-only polling answers start, menu navigation, and keywords with gro
   assert.equal(state().next_offset, 408);
 });
 
+test('private contacts enroll for future updates once and repeated start/menu messages preserve their cutoff', async t => {
+  configureWelcome({ enabled: false, groupChatId: '' });
+  configurePrivate();
+  configureKeywords([['topic', 'exact', 'A helpful reply']], cutoff, false);
+  const requests = mockTransport(t, [
+    ok([privateMessage(1_000)]),
+    ok([privateMessage(1_001, { text: '/menu' })]),
+    ok([privateMessage(1_002, { text: 'topic' })]),
+    ok([privateMessage(1_003)]),
+    ok([privateMessage(1_004, { text: 'unmatched message' })]),
+  ], Array(4).fill(successfulSend), { chatIds: [privateChatId] });
+  const contact = () => getSqlite().prepare('SELECT updates_enabled, updates_started_at FROM telegram_private_contacts WHERE user_id=?').get(privateChatId);
+
+  await tick(now);
+  assert.deepEqual({ ...contact() }, { updates_enabled: 1, updates_started_at: now });
+  for (const elapsed of [1_000, 2_000, 3_000, 4_000]) {
+    await tick(now + elapsed);
+    assert.deepEqual({ ...contact() }, { updates_enabled: 1, updates_started_at: now }, 'ordinary interaction must not move the enrollment cutoff');
+  }
+  assert.equal(requests.parameters().length, 4);
+});
+
+test('stop persists notification opt-out and cancels pending updates until an explicit start resumes future updates', async t => {
+  configureWelcome({ enabled: false, groupChatId: '' });
+  configurePrivate();
+  configureKeywords([['topic', 'exact', 'A helpful reply']], cutoff, false);
+  const requests = mockTransport(t, [
+    ok([privateMessage(1_100)]),
+    ok([privateMessage(1_101, { text: '/stop' })]),
+    ok([privateMessage(1_102, { text: '/menu' })]),
+    ok([privateMessage(1_103, { text: 'topic' })]),
+    ok([privateMessage(1_104, { text: 'unmatched message' })]),
+    ok([privateMessage(1_105)]),
+    ok([privateMessage(1_106)]),
+  ], Array(6).fill(successfulSend), { chatIds: [privateChatId] });
+  const contact = () => getSqlite().prepare('SELECT updates_enabled, updates_started_at FROM telegram_private_contacts WHERE user_id=?').get(privateChatId);
+  const delivery = id => getSqlite().prepare('SELECT status FROM telegram_private_brand_updates WHERE user_id=?').get(id)?.status;
+
+  await tick(now);
+  const db = getSqlite();
+  assert.equal(db.prepare("SELECT private_followup_enabled FROM telegram_promotion_settings WHERE id='primary'").get().private_followup_enabled, 0);
+  db.prepare(`INSERT INTO brands (id,name,slug,category,tagline,description,color,icon)
+    VALUES ('consent-brand','Consent brand','consent-brand','New','','','#aabbcc','sparkles')`).run();
+  db.prepare('INSERT INTO telegram_private_contacts(user_id,updates_started_at) VALUES (?,?)').run(privateChatId + 1, now);
+  const insert = db.prepare(`INSERT INTO telegram_private_brand_updates
+    (brand_id,promotion_revision,user_id,settings_revision,status) VALUES ('consent-brand','fixture-promotion',?,'fixture-settings','pending')`);
+  insert.run(privateChatId); insert.run(privateChatId + 1);
+
+  await tick(now + 1_000);
+  assert.deepEqual({ ...contact() }, { updates_enabled: 0, updates_started_at: now });
+  assert.equal(delivery(privateChatId), 'cancelled');
+  assert.equal(delivery(privateChatId + 1), 'pending', 'another customer’s pending notice must remain untouched');
+  assert.match(requests.messages()[1], /自动跟进和品牌更新通知/);
+  closeDatabase();
+  for (const elapsed of [2_000, 3_000, 4_000]) {
+    await tick(now + elapsed);
+    assert.deepEqual({ ...contact() }, { updates_enabled: 0, updates_started_at: now }, 'menu and ordinary messages must not re-subscribe the customer');
+  }
+  await tick(now + 5_000);
+  assert.deepEqual({ ...contact() }, { updates_enabled: 1, updates_started_at: now + 5_000 });
+  assert.equal(delivery(privateChatId), 'cancelled', 'resuming must not revive a historical cancelled notice');
+  await tick(now + 6_000);
+  assert.equal(contact().updates_started_at, now + 5_000, 'repeated start must preserve the new enrollment cutoff');
+});
+
+test('recreating a previously blocked contact preserves an earlier stop until explicit start', async t => {
+  configureWelcome({ enabled: false, groupChatId: '' });
+  configurePrivate();
+  configureKeywords([['topic', 'exact', 'A helpful reply']], cutoff, false);
+  getSqlite().prepare("INSERT INTO telegram_private_followups(chat_id,revision,opted_out) VALUES (?,'prior-stop',1)").run(privateChatId);
+  mockTransport(t, [
+    ok([privateMessage(1_200, { text: 'topic' })]),
+    ok([privateMessage(1_201)]),
+  ], Array(2).fill(successfulSend), { chatIds: [privateChatId] });
+  const contact = () => getSqlite().prepare('SELECT updates_enabled,updates_started_at FROM telegram_private_contacts WHERE user_id=?').get(privateChatId);
+
+  await tick(now);
+  assert.deepEqual({ ...contact() }, { updates_enabled: 0, updates_started_at: now });
+  await tick(now + 1_000);
+  assert.deepEqual({ ...contact() }, { updates_enabled: 1, updates_started_at: now + 1_000 });
+  assert.equal(getSqlite().prepare('SELECT opted_out FROM telegram_private_followups WHERE chat_id=?').get(privateChatId).opted_out, 0);
+});
+
 test('known group joiners receive a DM and a rejected DM clears the contact for subsequent joins', async t => {
   configureWelcome();
   configurePrivate();

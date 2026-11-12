@@ -87,8 +87,8 @@ export async function sendTelegramBrandCard(token: string, chatId: number, brand
   const brandLink = brand.link.trim();
   const replyMarkup = { inline_keyboard: [
     [{ text: brand.name, url: url.href }],
-    [{ text: "Visit website", url: new URL("/", origin).href },
-      ...(isSafeSocialUrl(brandLink) ? [{ text: "Join Now", url: brandLink }] : [])],
+    [{ text: "🌐 Visit website", url: new URL("/", origin).href },
+      ...(isSafeSocialUrl(brandLink) ? [{ text: "🚀 Join Now", url: brandLink }] : [])],
   ] };
   const canSend = () => options.beforeSend?.() ?? true;
   const sendText = () => {

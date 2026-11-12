@@ -20,6 +20,7 @@ const configInput = z.object({
     keywordEnabled: z.boolean(),
     privateEnabled: z.boolean().optional(),
     privateStartMessage: z.string().trim().max(2_000).optional(),
+    updates: z.object({ enabled: z.boolean() }).strict().optional(),
     followup: z.object({
       enabled: z.boolean(),
       message: z.string().trim().max(2_000),

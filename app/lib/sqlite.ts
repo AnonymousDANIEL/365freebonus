@@ -12,7 +12,7 @@ export function getDataDirectory(): string {
 function migrate(db: DatabaseSync) {
   if (migrated.has(db)) return;
   const readVersion = () => (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
-  if (readVersion() < 16) {
+  if (readVersion() < 17) {
     db.exec("BEGIN IMMEDIATE");
     try {
       // Read again inside the write lock, so concurrent process starts cannot
@@ -230,6 +230,43 @@ function migrate(db: DatabaseSync) {
         CREATE INDEX telegram_private_followups_due ON telegram_private_followups(status, next_attempt_at, due_at);
         PRAGMA user_version = 16;
       `);
+      if (version < 17) {
+        db.exec(`
+          ALTER TABLE telegram_promotion_settings ADD COLUMN private_updates_enabled INTEGER NOT NULL DEFAULT 0 CHECK (private_updates_enabled IN (0, 1));
+          ALTER TABLE telegram_promotion_settings ADD COLUMN private_updates_started_at INTEGER NOT NULL DEFAULT 0;
+          ALTER TABLE telegram_promotion_settings ADD COLUMN private_updates_revision TEXT NOT NULL DEFAULT '';
+          ALTER TABLE telegram_private_contacts ADD COLUMN updates_enabled INTEGER NOT NULL DEFAULT 1 CHECK (updates_enabled IN (0, 1));
+          ALTER TABLE telegram_private_contacts ADD COLUMN updates_started_at INTEGER NOT NULL DEFAULT 0;
+          ALTER TABLE telegram_promotion_outbox ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0;
+          CREATE TABLE telegram_private_brand_updates (
+            brand_id TEXT NOT NULL REFERENCES brands(id) ON DELETE CASCADE,
+            promotion_revision TEXT NOT NULL, user_id INTEGER NOT NULL,
+            settings_revision TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'sending', 'sent', 'failed', 'unknown', 'cancelled')),
+            attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at INTEGER NOT NULL DEFAULT 0,
+            lease_id TEXT NOT NULL DEFAULT '', lease_until INTEGER NOT NULL DEFAULT 0,
+            last_error TEXT NOT NULL DEFAULT '', sent_at INTEGER, message_id INTEGER,
+            PRIMARY KEY (brand_id, promotion_revision, user_id)
+          );
+          CREATE INDEX telegram_private_brand_updates_due ON telegram_private_brand_updates(status, next_attempt_at);
+          CREATE TABLE telegram_private_updates_state (
+            id TEXT PRIMARY KEY CHECK (id = 'primary'),
+            next_send_at INTEGER NOT NULL DEFAULT 0,
+            lease_id TEXT NOT NULL DEFAULT '', lease_until INTEGER NOT NULL DEFAULT 0
+          );
+          INSERT INTO telegram_private_updates_state (id) VALUES ('primary');
+          UPDATE telegram_private_contacts SET updates_enabled = 0 WHERE EXISTS (
+            SELECT 1 FROM telegram_private_followups f WHERE f.chat_id = telegram_private_contacts.user_id AND f.opted_out = 1
+          );
+        `);
+        // This owner-requested feature begins with future notices only. Existing
+        // outbox rows remain timestamp zero so migration cannot announce history.
+        db.prepare(`UPDATE telegram_promotion_settings SET private_updates_enabled = 1,
+          private_updates_started_at = ?, private_updates_revision = lower(hex(randomblob(16)))
+          WHERE private_enabled = 1 AND chat_bot_token_ciphertext <> ''`)
+          .run(Date.now());
+        db.exec("PRAGMA user_version = 17;");
+      }
       db.exec("COMMIT");
     } catch (error) { db.exec("ROLLBACK"); throw error; }
   }

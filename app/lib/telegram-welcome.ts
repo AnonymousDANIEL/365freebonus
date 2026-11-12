@@ -286,11 +286,21 @@ function privateReply(db: DatabaseSync, update: Record<string, unknown>, setting
   if (!message || !positiveInteger(message.message_id) || !isCurrentEvent(message.date, settings.private_started_at)) return null;
   const chatId = privateChatId(message.chat, message.from);
   if (chatId === null) return null;
-  db.prepare("INSERT OR IGNORE INTO telegram_private_contacts (user_id) VALUES (?)").run(chatId);
+  db.prepare(`INSERT OR IGNORE INTO telegram_private_contacts (user_id, updates_enabled, updates_started_at)
+    SELECT ?, NOT EXISTS (SELECT 1 FROM telegram_private_followups WHERE chat_id = ? AND opted_out = 1), ?`)
+    .run(chatId, chatId, now);
   const input = originalText(message);
   if (!input) return null;
-  if (/^\/stop(?:@FreeBonus365ChatBot)?(?:\s|$)/i.test(input.trim())) return { kind: "private", chatId, text: "已暂停自动跟进。发送 /start 可重新开启。" };
-  if (/^\/(?:start|menu)(?:@FreeBonus365ChatBot)?(?:\s|$)/i.test(input.trim())) return privateMenu(db, settings, chatId, 0);
+  if (/^\/stop(?:@FreeBonus365ChatBot)?(?:\s|$)/i.test(input.trim())) {
+    db.prepare("UPDATE telegram_private_contacts SET updates_enabled = 0 WHERE user_id = ?").run(chatId);
+    db.prepare("UPDATE telegram_private_brand_updates SET status = 'cancelled' WHERE user_id = ? AND status = 'pending'").run(chatId);
+    return { kind: "private", chatId, text: "已暂停自动跟进和品牌更新通知。发送 /start 可重新开启。" };
+  }
+  if (/^\/start(?:@FreeBonus365ChatBot)?(?:\s|$)/i.test(input.trim())) {
+    db.prepare("UPDATE telegram_private_contacts SET updates_enabled = 1, updates_started_at = ? WHERE user_id = ? AND updates_enabled = 0").run(now, chatId);
+    return privateMenu(db, settings, chatId, 0);
+  }
+  if (/^\/menu(?:@FreeBonus365ChatBot)?(?:\s|$)/i.test(input.trim())) return privateMenu(db, settings, chatId, 0);
   const matched = keywordResponse(db, input);
   return matched ? { kind: "private", chatId, text: matched.text, keyboard: matched.showButton ? optionsButton("返回选项") : undefined }
     : brandSearchReply(db, input, { kind: "private", chatId }, now);

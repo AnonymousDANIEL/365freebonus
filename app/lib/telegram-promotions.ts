@@ -4,6 +4,7 @@ import { getSqlite } from "./sqlite";
 import { telegramRequest } from "./telegram-bot";
 import { sendTelegramBrandCard, telegramPublicOrigin } from "./telegram-brand-card";
 import { startTelegramWelcomeWorker } from "./telegram-welcome";
+import { cancelPrivateBrandUpdates, privateBrandUpdateStatus, startTelegramPrivateUpdatesWorker } from "./telegram-private-updates";
 
 type StoredSettings = {
   enabled: number;
@@ -21,6 +22,9 @@ type StoredSettings = {
   private_enabled: number;
   private_started_at: number;
   private_start_message: string;
+  private_updates_enabled: number;
+  private_updates_started_at: number;
+  private_updates_revision: string;
   private_followup_enabled: number;
   private_followup_message: string;
   private_followup_started_at: number;
@@ -32,7 +36,7 @@ type SettingsInput = {
   token?: string;
   promotionMessage?: string;
   welcome?: { enabled: boolean; chatId: string; message: string };
-  chatBot?: { token?: string; keywordEnabled: boolean; privateEnabled?: boolean; privateStartMessage?: string; followup?: { enabled: boolean; message: string } };
+  chatBot?: { token?: string; keywordEnabled: boolean; privateEnabled?: boolean; privateStartMessage?: string; updates?: { enabled: boolean }; followup?: { enabled: boolean; message: string } };
 };
 type DeliveryStatus = "pending" | "sending" | "sent" | "failed" | "unknown" | "skipped";
 type Delivery = {
@@ -96,6 +100,7 @@ function storedSettings(db: DatabaseSync): StoredSettings {
   return db.prepare(`SELECT enabled, chat_id, token_ciphertext, chat_bot_token_ciphertext, promotion_message, welcome_enabled,
     welcome_chat_id, welcome_message, welcome_started_at, welcome_revision, keyword_enabled, keyword_started_at,
     private_enabled, private_started_at, private_start_message,
+    private_updates_enabled, private_updates_started_at, private_updates_revision,
     private_followup_enabled, private_followup_message, private_followup_started_at, private_followup_revision
     FROM telegram_promotion_settings WHERE id = 'primary'`).get() as StoredSettings | undefined
     ?? {
@@ -103,6 +108,7 @@ function storedSettings(db: DatabaseSync): StoredSettings {
       welcome_enabled: 0, welcome_chat_id: "", welcome_message: "", welcome_started_at: 0, welcome_revision: "",
       keyword_enabled: 0, keyword_started_at: 0,
       private_enabled: 0, private_started_at: 0, private_start_message: "",
+      private_updates_enabled: 0, private_updates_started_at: 0, private_updates_revision: "",
       private_followup_enabled: 0, private_followup_message: "", private_followup_started_at: 0, private_followup_revision: "",
     };
 }
@@ -238,6 +244,7 @@ export function telegramPromotionStatus() {
       privateEnabled: settings.private_enabled === 1,
       privateStartMessage: settings.private_start_message,
       privateReplies: welcome?.private_replies ?? 0,
+      updates: { enabled: settings.private_updates_enabled === 1, ...privateBrandUpdateStatus(db) },
       followup: {
         enabled: settings.private_followup_enabled === 1,
         message: settings.private_followup_message,
@@ -278,6 +285,9 @@ export async function saveTelegramPromotionSettings(input: SettingsInput) {
   const keywordEnabled = input.chatBot?.keywordEnabled ?? (previous.keyword_enabled === 1);
   const privateEnabled = input.chatBot?.privateEnabled ?? (previous.private_enabled === 1);
   const privateStartMessage = input.chatBot?.privateStartMessage?.trim() ?? previous.private_start_message;
+  const updatesEnabled = input.chatBot?.updates?.enabled ?? (privateEnabled && previous.private_updates_enabled === 1);
+  if (updatesEnabled && !privateEnabled) throw new TelegramSettingsError("请先启用 1 对 1 私聊，再开启私聊品牌更新通知。");
+  if (updatesEnabled && !telegramPublicOrigin()) throw new TelegramSettingsError("服务器尚未配置公开网站地址，无法生成私聊品牌通知链接。", 503);
   const followupEnabled = input.chatBot?.followup?.enabled ?? (privateEnabled && previous.private_followup_enabled === 1);
   const followupMessage = input.chatBot?.followup?.message.trim() ?? previous.private_followup_message;
   if (followupEnabled && !privateEnabled) throw new TelegramSettingsError("请先启用 1 对 1 私聊，再开启未识别消息跟进。");
@@ -301,6 +311,9 @@ export async function saveTelegramPromotionSettings(input: SettingsInput) {
   }
   const previouslyTargetEnabled = previous.welcome_enabled || previous.keyword_enabled;
   const privateModeChanged = privateEnabled !== (previous.private_enabled === 1);
+  const chatIdentityChanged = chatTokenChanged && chatBotId !== previousChatToken.split(":", 1)[0];
+  const updatesChanged = updatesEnabled !== (previous.private_updates_enabled === 1) || chatIdentityChanged
+    || (updatesEnabled && (!previous.private_updates_revision || previous.private_updates_started_at <= 0));
   const followupChanged = followupEnabled !== (previous.private_followup_enabled === 1)
     || followupMessage !== previous.private_followup_message || privateModeChanged || chatTokenChanged;
   const channelWelcome = welcomeEnabled && privateEnabled && !keywordEnabled;
@@ -338,7 +351,11 @@ export async function saveTelegramPromotionSettings(input: SettingsInput) {
       db.prepare("DELETE FROM telegram_welcome_state WHERE id = 'primary'").run();
       if (chatBotId !== previousChatToken.split(":", 1)[0]) db.exec("DELETE FROM telegram_private_contacts");
     }
-    const now = Math.floor(Date.now() / 1_000);
+    const nowMs = Date.now();
+    const now = Math.floor(nowMs / 1_000);
+    const updatesStartedAt = updatesEnabled ? (updatesChanged ? nowMs : current.private_updates_started_at) : 0;
+    const updatesRevision = updatesChanged ? randomUUID() : current.private_updates_revision;
+    if (updatesChanged || !updatesEnabled) cancelPrivateBrandUpdates(db);
     const welcomeStartedAt = welcomeEnabled ? (!current.welcome_enabled || groupChanged || chatTokenChanged || privateModeChanged ? now : current.welcome_started_at) : 0;
     const keywordStartedAt = keywordEnabled ? (!current.keyword_enabled || groupChanged || chatTokenChanged ? now : current.keyword_started_at) : 0;
     const privateStartedAt = privateEnabled ? (!current.private_enabled || chatTokenChanged ? now : current.private_started_at) : 0;
@@ -355,8 +372,9 @@ export async function saveTelegramPromotionSettings(input: SettingsInput) {
       id, enabled, chat_id, token_ciphertext, promotion_message, welcome_enabled,
       welcome_chat_id, welcome_message, welcome_started_at, welcome_revision,
       chat_bot_token_ciphertext, keyword_enabled, keyword_started_at, private_enabled, private_started_at, private_start_message,
-      private_followup_enabled, private_followup_message, private_followup_started_at, private_followup_revision
-    ) VALUES ('primary', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      private_followup_enabled, private_followup_message, private_followup_started_at, private_followup_revision,
+      private_updates_enabled, private_updates_started_at, private_updates_revision
+    ) VALUES ('primary', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET enabled = excluded.enabled, chat_id = excluded.chat_id,
       token_ciphertext = excluded.token_ciphertext, promotion_message = excluded.promotion_message,
       welcome_enabled = excluded.welcome_enabled, welcome_chat_id = excluded.welcome_chat_id,
@@ -368,11 +386,15 @@ export async function saveTelegramPromotionSettings(input: SettingsInput) {
       private_followup_enabled = excluded.private_followup_enabled,
       private_followup_message = excluded.private_followup_message,
       private_followup_started_at = excluded.private_followup_started_at,
-      private_followup_revision = excluded.private_followup_revision`)
+      private_followup_revision = excluded.private_followup_revision,
+      private_updates_enabled = excluded.private_updates_enabled,
+      private_updates_started_at = excluded.private_updates_started_at,
+      private_updates_revision = excluded.private_updates_revision`)
       .run(Number(input.enabled), chatId, ciphertext, promotionMessage, Number(welcomeEnabled),
         welcomeChatId, welcomeMessage, welcomeStartedAt, welcomeRevision, chatCiphertext, Number(keywordEnabled), keywordStartedAt,
         Number(privateEnabled), privateStartedAt, privateStartMessage,
-        Number(followupEnabled), followupMessage, followupStartedAt, followupRevision);
+        Number(followupEnabled), followupMessage, followupStartedAt, followupRevision,
+        Number(updatesEnabled), updatesStartedAt, updatesRevision);
   });
   return telegramPromotionStatus();
 }
@@ -449,6 +471,7 @@ export function startTelegramPromotionWorker() {
   if (workers.telegramPromotionWorkerStarted) return;
   workers.telegramPromotionWorkerStarted = true;
   startTelegramWelcomeWorker(decryptToken);
+  startTelegramPrivateUpdatesWorker(decryptToken);
   let running = false;
   let reportedError = false;
   const tick = async () => {

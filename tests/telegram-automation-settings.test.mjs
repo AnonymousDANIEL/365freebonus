@@ -34,7 +34,7 @@ writeFixture('package.json', '{"type":"commonjs"}');
 symlinkSync(fileURLToPath(new URL('../node_modules', import.meta.url)), path.join(fixture, 'node_modules'), 'dir');
 for (const relative of [
   'app/api/admin/_security', 'app/api/admin/telegram/route',
-  ...['auth-core', 'brand-links', 'directory', 'image-media', 'image-url', 'sqlite', 'telegram-background', 'telegram-brand-card', 'telegram-promotions'].map(name => `app/lib/${name}`),
+  ...['auth-core', 'brand-links', 'directory', 'image-media', 'image-url', 'sqlite', 'telegram-background', 'telegram-brand-card', 'telegram-followups', 'telegram-private-updates', 'telegram-promotions'].map(name => `app/lib/${name}`),
 ]) {
   const source = readFileSync(new URL(`../${relative}.ts`, import.meta.url), 'utf8');
   const { outputText } = ts.transpileModule(source, {
@@ -144,6 +144,7 @@ const privateChat = { privateEnabled: true, privateStartMessage };
 const initialChatStatus = {
   hasToken: false, keywordEnabled: false, keywordReplies: 0,
   privateEnabled: false, privateStartMessage: '', privateReplies: 0,
+  updates: { enabled: false, counts: { pending: 0, sending: 0, sent: 0, failed: 0, unknown: 0, cancelled: 0 }, lastError: '' },
   followup: { enabled: false, message: '', delayMinutes: 60, counts: { pending: 0, sent: 0, failed: 0, unknown: 0, cancelled: 0 }, lastError: '' },
 };
 const keywordChatStatus = { ...initialChatStatus, hasToken: true, keywordEnabled: true };
@@ -167,6 +168,9 @@ test('Telegram settings reject invalid nested shapes and unknown fields before t
     { ...base, chatBot: { keywordEnabled: 0 } },
     { ...base, chatBot: { keywordEnabled: false, privateEnabled: 'true' } },
     { ...base, chatBot: { keywordEnabled: false, privateStartMessage: 'a'.repeat(2_001) } },
+    { ...base, chatBot: { keywordEnabled: false, updates: null } },
+    { ...base, chatBot: { keywordEnabled: false, updates: { enabled: 'true' } } },
+    { ...base, chatBot: { keywordEnabled: false, updates: { enabled: false, unknown: true } } },
     { ...base, chatBot: { keywordEnabled: false, followup: null } },
     { ...base, chatBot: { keywordEnabled: false, followup: { enabled: 'true', message: 'Reply' } } },
     { ...base, chatBot: { keywordEnabled: false, followup: { enabled: false, message: 'a'.repeat(2_001) } } },
@@ -493,4 +497,83 @@ test('followup status exposes aggregates only and token rotation cancels pending
   assert.equal(rotated.chatBot.followup.enabled, true);
   assert.equal(rotated.chatBot.followup.counts.pending, 0);
   assert.equal(rotated.chatBot.followup.counts.cancelled, 1);
+});
+
+
+function updateNotificationJob({ userId = 765432101, status = 'pending', revision = 'fixture-promotion', error = '' } = {}) {
+  const id = `updates-${userId}`;
+  database.prepare("INSERT INTO brands(id,name,slug,category,tagline,description,color,icon) VALUES(?,?,?,'New','','','#aabbcc','sparkles')").run(id, id, id);
+  database.prepare(`INSERT INTO telegram_private_brand_updates
+    (brand_id,promotion_revision,user_id,settings_revision,status,last_error) VALUES(?,?,?,?,?,?)`)
+    .run(id, revision, userId, settingsRow().private_updates_revision, status, error);
+}
+
+const privateUpdatesConfig = { enabled: false, chatId: '', chatBot: {
+  token: chatToken, keywordEnabled: false, privateEnabled: true, updates: { enabled: true },
+} };
+
+test('private website update notifications require private chat and return aggregate status without secrets', async () => {
+  const before = settingsRow();
+  const rejected = await put({ ...privateUpdatesConfig, chatBot: { ...privateUpdatesConfig.chatBot, privateEnabled: false } }, 400);
+  assert.match(rejected.error, /私聊/);
+  assert.deepEqual(settingsRow(), before);
+  assert.equal(telegram.calls.length, 0);
+  const configured = await put(privateUpdatesConfig);
+  const row = settingsRow();
+  assert.equal(configured.chatBot.updates.enabled, true);
+  assert.equal(row.private_updates_enabled, 1);
+  assert.ok(row.private_updates_started_at > 0);
+  assert.ok(row.private_updates_revision);
+  updateNotificationJob();
+  updateNotificationJob({ userId: 765432102, status: 'unknown', error: 'Telegram 未确认发送结果。' });
+  const status = await get();
+  assert.deepEqual(status.chatBot.updates.counts, { pending: 1, sending: 0, sent: 0, failed: 0, unknown: 1, cancelled: 0 });
+  assert.equal(status.chatBot.updates.lastError, 'Telegram 未确认发送结果。');
+  for (const privateValue of [chatToken, row.chat_bot_token_ciphertext, row.private_updates_revision, '765432101', '765432102', 'fixture-promotion']) {
+    assert.equal(JSON.stringify(status).includes(privateValue), false, 'public settings status must only contain notification aggregates');
+  }
+});
+
+test('old settings clients and same-bot token rotation preserve private notification generations and pending delivery', async () => {
+  await put(privateUpdatesConfig);
+  const first = settingsRow();
+  updateNotificationJob();
+  const legacy = await put({ enabled: false, chatId: '', promotionMessage: 'Updated channel copy.' });
+  assert.equal(legacy.chatBot.updates.enabled, true);
+  assert.equal(settingsRow().private_updates_revision, first.private_updates_revision);
+  assert.equal(settingsRow().private_updates_started_at, first.private_updates_started_at);
+  assert.equal(legacy.chatBot.updates.counts.pending, 1);
+  const rotated = await put({ enabled: false, chatId: '', chatBot: { token: rotatedChatToken, keywordEnabled: false } });
+  const current = settingsRow();
+  assert.notEqual(current.chat_bot_token_ciphertext, first.chat_bot_token_ciphertext);
+  assert.equal(current.private_updates_revision, first.private_updates_revision);
+  assert.equal(current.private_updates_started_at, first.private_updates_started_at);
+  assert.equal(rotated.chatBot.updates.counts.pending, 1);
+});
+
+test('disabling or replacing the ChatBot cancels queued notification work and re-enabling starts a new generation', async () => {
+  await put(privateUpdatesConfig);
+  const first = settingsRow();
+  updateNotificationJob();
+  updateNotificationJob({ userId: 765432102, status: 'sent' });
+  const off = await put({ enabled: false, chatId: '', chatBot: { keywordEnabled: false, updates: { enabled: false } } });
+  const disabled = settingsRow();
+  assert.equal(off.chatBot.updates.enabled, false);
+  assert.equal(disabled.private_updates_started_at, 0);
+  assert.notEqual(disabled.private_updates_revision, first.private_updates_revision);
+  assert.equal(off.chatBot.updates.counts.pending, 0);
+  assert.equal(off.chatBot.updates.counts.cancelled, 1);
+  assert.equal(off.chatBot.updates.counts.sent, 1);
+  await put({ enabled: false, chatId: '', chatBot: { keywordEnabled: false, updates: { enabled: true } } });
+  const resumed = settingsRow();
+  assert.notEqual(resumed.private_updates_revision, disabled.private_updates_revision);
+  assert.ok(resumed.private_updates_started_at >= first.private_updates_started_at);
+  updateNotificationJob({ userId: 765432103 });
+  const replaced = await put({ enabled: false, chatId: '', chatBot: { token: replacementChatToken, keywordEnabled: false } });
+  assert.notEqual(settingsRow().private_updates_revision, resumed.private_updates_revision);
+  assert.equal(replaced.chatBot.updates.counts.pending, 0);
+  assert.equal(replaced.chatBot.updates.counts.cancelled, 2);
+  assert.equal(replaced.chatBot.updates.counts.sent, 1);
+  const privateOff = await put({ enabled: false, chatId: '', chatBot: { keywordEnabled: false, privateEnabled: false } });
+  assert.equal(privateOff.chatBot.updates.enabled, false, 'legacy clients can disable private chat without including notification preferences');
 });

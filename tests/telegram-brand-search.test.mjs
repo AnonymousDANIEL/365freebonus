@@ -124,8 +124,8 @@ function assertCard(call, { name = 'Bintang44', slug = 'bintang' } = {}) {
   assert.match(call.parameters.text ?? call.parameters.caption, new RegExp(`Introduction for ${name}\\.`));
   assert.deepEqual(buttons(call), [
     { text: name, url: `${origin}/${slug}` },
-    { text: 'Visit website', url: `${origin}/` },
-    { text: 'Join Now', url: `https://brands.example/${slug}` },
+    { text: '🌐 Visit website', url: `${origin}/` },
+    { text: '🚀 Join Now', url: `https://brands.example/${slug}` },
   ]);
 }
 
@@ -272,7 +272,7 @@ test('unmatched, one-character and command input does not accidentally expose br
   assert.equal(getSqlite().prepare('SELECT status FROM telegram_private_followups WHERE chat_id=?').get(privateId).status, 'pending');
   await h.run([input(4, { text: '/start' }), input(5, { text: '/stop' })]);
   assert.equal(h.calls.length, 2);
-  assert.ok(h.calls.every(call => !buttons(call)?.some(button => button.text === 'Join Now')));
+  assert.ok(h.calls.every(call => !buttons(call)?.some(button => button.text === '🚀 Join Now')));
 });
 
 test('one-card rate-limit retries and update offsets never duplicate a successful brand result', async t => {
