@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { ArrowUpRight, Check, ChevronRight, CircleHelp, ExternalLink, Eye, FileText, ImageIcon, KeyRound, LayoutGrid, LoaderCircle, Megaphone, Plus, Search, Send, Settings2, ShieldCheck, Sparkles, Trash2, Upload, UserRound, X, Pencil, Globe, LockKeyhole, LogOut, Orbit, Sun, Gamepad2, Moon, Triangle } from "lucide-react";
 import { DEFAULT_PROMOTION_DAYS, effectiveBrandCategory, isBrandPublished, isSafeSocialUrl, isValidPromotionStart, type Brand, type SiteSettings } from "../lib/directory";
 import { isSafeImageUrl, isUploadedImageUrl } from "../lib/image-url";
+import { brandScheduleInput, malaysiaDateTimeInput } from "../lib/brand-schedule-input";
 import { AdminThemeToggle, useAdminTheme } from "../components/AdminTheme";
 import TelegramGroupSettings from "./TelegramGroupSettings";
 import PopupNoticeSettings from "./PopupNoticeSettings";
@@ -49,10 +50,6 @@ const expiryFormat = new Intl.DateTimeFormat("zh-CN", {
   timeZone: "Asia/Kuala_Lumpur", year: "numeric", month: "2-digit", day: "2-digit",
   hour: "2-digit", minute: "2-digit", hourCycle: "h23",
 });
-const malaysiaOffset = 8 * 60 * 60 * 1000;
-function malaysiaDateTimeInput(start: number | null | undefined): string {
-  return isValidPromotionStart(start) ? new Date(start + malaysiaOffset).toISOString().slice(0, -8) : "";
-}
 const emptyBrand = (): Brand => ({ id: "", name: "", slug: "", category: "All", promotionDays: null, promotionStartsAt: null, promotionExpiresAt: null, tagline: "", description: "", color: "#d3b477", icon: "sparkles", imageUrl: "", featured: false, published: false, sortOrder: 10, link: "" });
 
 function BrandIcon({ value }: { value: string }) {
@@ -195,9 +192,12 @@ export default function AdminClient({ displayName, signInPath }: { displayName: 
   const originalEditing = editing ? brands.find(brand => brand.id === editing.id) : undefined;
   const startChanged = Boolean(editing && editing.category !== "All" && promotionStartInput !== malaysiaDateTimeInput(originalEditing?.promotionStartsAt));
   const autoPublishesOnSave = startChanged && Boolean(promotionStartInput) && !originalEditing?.published;
+  const publishesDraftAtStart = Boolean(editing && editing.category !== "All" && promotionStartInput && editing.published && !originalEditing?.published);
   let publicationHint = "允许品牌显示在前台。";
-  if (autoPublishesOnSave) {
-    publicationHint = "保存后进入待上线状态，到时首次显示在前台。";
+  if (autoPublishesOnSave || publishesDraftAtStart) {
+    publicationHint = "保存后按开始时间自动上线；时间已到则直接显示在前台。";
+  } else if (editing && !editing.published && editing.category !== "All" && promotionStartInput) {
+    publicationHint = "保存后为草稿，不会自动上线。勾选并保存，才会按此时间自动显示。";
   } else if (editing?.published && originalEditing && publicationStatus(originalEditing, now) === "scheduled") {
     publicationHint = editing.category === "All" || !promotionStartInput
       ? "保存后立即上架。取消勾选可移至草稿。"
@@ -241,13 +241,6 @@ export default function AdminClient({ displayName, signInPath }: { displayName: 
     if (editing.category !== "All" && (!Number.isInteger(editing.promotionDays) || (editing.promotionDays ?? 0) < 1 || (editing.promotionDays ?? 0) > 365)) {
       setError("展示天数请输入 1 至 365 的整数。"); return;
     }
-    let promotionStartsAt: number | null = null;
-    if (startChanged && promotionStartInput) {
-      promotionStartsAt = Date.parse(`${promotionStartInput}+08:00`);
-      if (!isValidPromotionStart(promotionStartsAt) || malaysiaDateTimeInput(promotionStartsAt) !== promotionStartInput || promotionStartsAt < Date.now()) {
-        setError("请选择未来的开始时间，留空则立即开始。"); return;
-      }
-    }
     setBusy(true); setError("");
     try {
       const { id: _id, publishAt: _publishAt, promotionExpiresAt: _expires, promotionStartsAt: _starts, scheduledCategory: _scheduledCategory, promotionDays, ...fields } = editing;
@@ -255,8 +248,7 @@ export default function AdminClient({ displayName, signInPath }: { displayName: 
       const payload = {
         ...fields,
         ...(durationChanged ? { promotionDays: editing.category === "All" ? null : promotionDays } : {}),
-        ...(startChanged ? { promotionStartsAt } : {}),
-        ...(promotionStartsAt !== null && (!originalEditing?.published || editing.published) ? { autoPublishAtStart: true } : {}),
+        ...brandScheduleInput(editing, originalEditing, promotionStartInput),
         slug: editing.slug || editing.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, ""),
       };
       const result = await request<{ brand: Brand }>(editing.id ? `/api/admin/brands/${encodeURIComponent(editing.id)}` : "/api/admin/brands", editing.id ? "PUT" : "POST", payload);
@@ -443,7 +435,7 @@ export default function AdminClient({ displayName, signInPath }: { displayName: 
         <label className="cms-promotion-start">
           开始时间（马来西亚 UTC+8）
           <input type="datetime-local" value={promotionStartInput} onChange={event => setPromotionStartInput(event.target.value)} />
-          <small>留空立即开始推广。草稿设置新时间并保存后，到时自动上线。已上架品牌在推广开始前继续显示在 All。</small>
+          <small>选择时间后点击「保存品牌」，保存成功显示「待上线」即会到点自动展示，无需再次确认。已上架品牌在推广开始前继续显示在 All；留空立即开始推广。</small>
         </label>
         {editing.promotionExpiresAt !== null && <p className="cms-wide cms-promotion-note">
           {editing.promotionExpiresAt <= now
@@ -459,7 +451,7 @@ export default function AdminClient({ displayName, signInPath }: { displayName: 
         <label>品牌图片 URL<input type="text" inputMode="url" autoComplete="off" spellCheck={false} maxLength={1000} value={editing.imageUrl} onChange={event => { setEditing({ ...editing, imageUrl: event.target.value }); setBrandPhotoName(""); }} placeholder="也可输入公开的图片地址" /></label>
       </div><label className="cms-wide">品牌链接<input type="url" maxLength={1000} value={editing.link} onChange={event => setEditing({ ...editing, link: event.target.value })} placeholder="https://..." /><small>可选，留空时仅展示详情。</small></label></div>
       <div className="cms-switches"><label>
-        <span><strong>{autoPublishesOnSave ? "定时上线" : "上架品牌"}</strong><small>{publicationHint}</small></span>
+        <span><strong>{autoPublishesOnSave || publishesDraftAtStart ? "定时上线" : "上架品牌"}</strong><small>{publicationHint}</small></span>
         <input type="checkbox" checked={editing.published || autoPublishesOnSave} disabled={autoPublishesOnSave}
           onChange={event => setEditing({ ...editing, published: event.target.checked })} />
       </label><label><span><strong>首页精选</strong><small>在首页精选区域展示。</small></span><input type="checkbox" checked={editing.featured} onChange={event => setEditing({ ...editing, featured: event.target.checked })} /></label></div></fieldset></div><div className="cms-dialog-footer"><button disabled={busy} type="button" className="cms-secondary" onClick={() => setEditing(null)}>取消</button><button disabled={busy} type="submit" className="cms-primary">{busy ? <LoaderCircle size={17} className="cms-spin" /> : <Check size={17} />}{uploading === "brand" ? "正在上传…" : busy ? "正在保存…" : "保存品牌"}</button></div></form>}

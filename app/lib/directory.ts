@@ -1,6 +1,7 @@
 export type BrandCategory = "All" | "Update" | "New";
 export const DEFAULT_PROMOTION_DAYS = 7;
 export const PROMOTION_DAY_MS = 24 * 60 * 60 * 1000;
+export const PROMOTION_START_GRACE_MS = 120_000;
 
 export function normalizeBrandCategory(category: unknown): BrandCategory {
   return category === "Update" || category === "New" ? category : "All";

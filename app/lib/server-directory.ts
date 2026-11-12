@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { getSqlite } from "./sqlite";
-import { defaultSettings, seedBrands, DEFAULT_PROMOTION_DAYS, PROMOTION_DAY_MS, effectiveBrandCategory, isBrandPublished, normalizeBrandCategory, isSafeSocialUrl, isValidPromotionStart, PromotionValidationError, SettingsValidationError, type Brand, type BrandCategory, type SiteSettings, type DirectoryData } from "./directory";
+import { defaultSettings, seedBrands, DEFAULT_PROMOTION_DAYS, PROMOTION_DAY_MS, PROMOTION_START_GRACE_MS, effectiveBrandCategory, isBrandPublished, normalizeBrandCategory, isSafeSocialUrl, isValidPromotionStart, PromotionValidationError, SettingsValidationError, type Brand, type BrandCategory, type SiteSettings, type DirectoryData } from "./directory";
 
 const brandColumns = "id, name, slug, category, tagline, description, color, icon, image_url AS imageUrl, featured, published, sort_order AS sortOrder, link, promotion_days AS promotionDays, promotion_expires_at AS promotionExpiresAt, promotion_starts_at AS promotionStartsAt, publish_at AS publishAt";
 const publicBrandVisibility = "published = 1 AND (publish_at IS NULL OR publish_at <= ?)";
@@ -85,11 +85,14 @@ function promotionDuration(input: number | null | undefined, fallback: number): 
   return input;
 }
 
-function promotionStart(input: number | null | undefined, previous: number | null, now: number): number | null {
+function promotionStart(input: number | null | undefined, previous: number | null, now: number, autoPublishAtStart = false): number | null {
   if (input === undefined) return previous;
   if (input === null) return null;
   if (!isValidPromotionStart(input)) throw new PromotionValidationError("请输入有效的推广开始时间。");
-  if (input !== previous && input < now) throw new PromotionValidationError("推广开始时间不能早于现在。若要立即开始，请清空定时时间。");
+  // Minute-resolution inputs and an in-flight request can cross the deadline.
+  // A bounded grace applies only to an explicit automatic-publication intent.
+  const earliest = now - (autoPublishAtStart ? PROMOTION_START_GRACE_MS : 0);
+  if (input !== previous && input < earliest) throw new PromotionValidationError("推广开始时间已过，请选择未来时间；若要立即开始，请清空定时时间。");
   return input;
 }
 
@@ -104,11 +107,11 @@ export function createBrand(input: BrandWriteInput & { id: string }, now = Date.
   const db = initializeDirectory();
   const category = normalizeBrandCategory(input.category);
   const promotionDays = category === "All" ? null : promotionDuration(input.promotionDays, DEFAULT_PROMOTION_DAYS);
-  const promotionStartsAt = category === "All" ? null : promotionStart(input.promotionStartsAt, null, now);
+  const promotionStartsAt = category === "All" ? null : promotionStart(input.promotionStartsAt, null, now, input.autoPublishAtStart === true);
   // Derive the deadline from the accepted start and duration.
   const promotionExpiresAt = promotionDays === null ? null : (promotionStartsAt ?? now) + promotionDays * PROMOTION_DAY_MS;
   const { autoPublishAtStart, ...details } = input;
-  const publishAt = autoPublishAtStart && promotionStartsAt !== null ? promotionStartsAt : null;
+  const publishAt = autoPublishAtStart === true && promotionStartsAt !== null ? promotionStartsAt : null;
   const brand: Brand = { ...details, category, promotionDays, promotionStartsAt, promotionExpiresAt, publishAt, published: input.published || publishAt !== null };
   db.exec("BEGIN IMMEDIATE");
   try {
@@ -133,7 +136,7 @@ export function updateBrand(id: string, input: BrandWriteInput, now = Date.now()
     // Older clients can reassign a started promotion without a start field.
     // A new assignment starts now unless a future schedule or explicit start is supplied.
     const startsImmediately = categoryChanged && input.promotionStartsAt === undefined && previousStart !== null && previousStart < now;
-    const promotionStartsAt = category === "All" || startsImmediately ? null : promotionStart(input.promotionStartsAt, previousStart, now);
+    const promotionStartsAt = category === "All" || startsImmediately ? null : promotionStart(input.promotionStartsAt, previousStart, now, input.autoPublishAtStart === true);
     const assignmentChanged = categoryChanged || promotionStartsAt !== previousStart;
     const durationChanged = promotionDays !== previous.promotionDays;
     let promotionExpiresAt = previous.promotionExpiresAt;
@@ -144,7 +147,8 @@ export function updateBrand(id: string, input: BrandWriteInput, now = Date.now()
     const wasPublic = isBrandPublished(previous, now);
     const wasWaiting = previous.published && !wasPublic;
     const scheduleRequested = autoPublishAtStart === true && promotionStartsAt !== null
-      && promotionStartsAt === input.promotionStartsAt && (promotionStartsAt >= now || promotionStartsAt === previousPublishAt);
+      && promotionStartsAt === input.promotionStartsAt
+      && (promotionStartsAt >= now - PROMOTION_START_GRACE_MS || promotionStartsAt === previousPublishAt);
     const published = input.published || scheduleRequested;
     let publishAt: number | null = null;
     if (published) {

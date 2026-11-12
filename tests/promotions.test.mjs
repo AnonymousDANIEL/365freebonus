@@ -14,7 +14,7 @@ const fixture = mkdtempSync(path.join(tmpdir(), 'directory-promotions-'));
 writeFileSync(path.join(fixture, 'package.json'), '{"type":"commonjs"}');
 symlinkSync(path.join(project, 'node_modules'), path.join(fixture, 'node_modules'), 'dir');
 for (const source of [
-  'app/lib/sqlite.ts', 'app/lib/directory.ts', 'app/lib/server-directory.ts', 'app/lib/brand-links.ts',
+  'app/lib/sqlite.ts', 'app/lib/directory.ts', 'app/lib/server-directory.ts', 'app/lib/brand-links.ts', 'app/lib/brand-schedule-input.ts',
   'app/lib/image-url.ts', 'app/lib/auth-core.ts', 'app/lib/session-store.ts', 'app/lib/admin-credentials.ts',
   'app/chatgpt-auth.ts', 'app/api/admin/_security.ts', 'app/api/admin/_validation.ts',
 ]) {
@@ -28,6 +28,7 @@ for (const source of [
 const require = createRequire(import.meta.url);
 const repository = require(path.join(fixture, 'app/lib/server-directory.js'));
 const directory = require(path.join(fixture, 'app/lib/directory.js'));
+const { brandScheduleInput, malaysiaDateTimeInput } = require(path.join(fixture, 'app/lib/brand-schedule-input.js'));
 const { brandAnnouncementPath, brandAnchorPath, isBrandShortSlug } = require(path.join(fixture, 'app/lib/brand-links.js'));
 const sqlite = require(path.join(fixture, 'app/lib/sqlite.js'));
 const { brandInput } = require(path.join(fixture, 'app/api/admin/_validation.js'));
@@ -404,6 +405,127 @@ test('draft scheduling intent is explicit and a pending publication can be retri
   assert.equal(unpublished.promotionStartsAt, moved.promotionStartsAt);
   assert.equal(unpublished.published, false);
   assert.equal((await repository.readDirectory(false, moved.publishAt)).brands.some(brand => brand.id === draft.id), false);
+});
+
+test('the editor can save the current Malaysia minute and the server publishes an already due explicit schedule', async () => {
+  const currentDataDir = process.env.DATA_DIR;
+  process.env.DATA_DIR = path.join(fixture, 'current-minute-publication');
+  try {
+    const requestedStart = now;
+    const saveTime = requestedStart + 3_000;
+    const input = brandInput.parse({ ...fields(example('current-minute', { category: 'New', published: false, promotionDays: 2 })),
+      ...brandScheduleInput({ category: 'New', published: false }, undefined, malaysiaDateTimeInput(requestedStart)) });
+    assert.equal(input.autoPublishAtStart, true);
+    const saved = repository.createBrand({ ...input, id: 'current-minute' }, saveTime);
+    assert.equal(saved.published, true);
+    assert.equal(saved.publishAt, requestedStart);
+    assert.equal(saved.promotionStartsAt, requestedStart);
+    assert.equal(saved.promotionExpiresAt, requestedStart + 2 * day);
+    const pending = await repository.readDirectory(false, requestedStart - 1);
+    assert.equal(pending.brands.some(brand => brand.id === saved.id), false);
+    assert.equal(pending.nextPublishAt, requestedStart);
+    const due = await repository.readDirectory(false, requestedStart);
+    assert.equal(due.brands.find(brand => brand.id === saved.id).category, 'New');
+    assert.equal(due.nextPublishAt, undefined);
+    assert.equal((await repository.readDirectory(false, saveTime)).brands.some(brand => brand.id === saved.id), true);
+    assert.equal((await repository.readDirectory(false, saved.promotionExpiresAt)).brands.find(brand => brand.id === saved.id).category, 'All');
+  } finally { process.env.DATA_DIR = currentDataDir; }
+});
+
+test('a schedule request crossing its deadline remains idempotent and a later explicit unpublish stays hidden', async () => {
+  const currentDataDir = process.env.DATA_DIR;
+  process.env.DATA_DIR = path.join(fixture, 'crossed-publication-deadline');
+  try {
+    const draft = repository.createBrand(example('crossing-draft', { published: false }), now);
+    const requestedStart = now + 60_000;
+    const editing = { ...fields(draft), category: 'Update', published: false, promotionDays: 3 };
+    const input = brandInput.parse({ ...editing,
+      ...brandScheduleInput(editing, draft, malaysiaDateTimeInput(requestedStart)) });
+    const saved = repository.updateBrand(draft.id, input, requestedStart + 1_000);
+    assert.equal(saved.publishAt, requestedStart);
+    assert.equal(saved.promotionExpiresAt, requestedStart + 3 * day);
+    assert.equal((await repository.readDirectory(false, requestedStart + 1_000)).brands.find(brand => brand.id === saved.id).category, 'Update');
+    const readJob = sqlite.getSqlite().prepare('SELECT revision FROM telegram_promotion_outbox WHERE brand_id=?');
+    const revision = readJob.get(saved.id).revision;
+    const replayed = repository.updateBrand(saved.id, input, requestedStart + 10 * 60_000);
+    assert.deepEqual(replayed, saved, 'a retry after the grace window preserves a previously accepted schedule');
+    assert.equal(readJob.get(saved.id).revision, revision);
+
+    const unpublishing = { ...fields(replayed), published: false };
+    const cancelPayload = brandInput.parse({ ...unpublishing,
+      ...brandScheduleInput(unpublishing, replayed, malaysiaDateTimeInput(requestedStart)) });
+    assert.equal(cancelPayload.autoPublishAtStart, undefined);
+    const cancelled = repository.updateBrand(saved.id, cancelPayload, requestedStart + 11 * 60_000);
+    assert.equal(cancelled.published, false);
+    assert.equal(cancelled.publishAt, null);
+    assert.equal(cancelled.promotionStartsAt, requestedStart);
+    assert.equal((await repository.readDirectory(false, requestedStart + day)).brands.some(brand => brand.id === saved.id), false);
+  } finally { process.env.DATA_DIR = currentDataDir; }
+});
+
+test('recent-past grace requires explicit automatic publication and older schedules fail without changing saved data', async () => {
+  assert.equal(directory.PROMOTION_START_GRACE_MS, 120_000);
+  const graceStart = now - directory.PROMOTION_START_GRACE_MS;
+  const accepted = repository.createBrand(example('grace-edge', {
+    category: 'New', published: false, promotionStartsAt: graceStart, autoPublishAtStart: true,
+  }), now);
+  assert.equal(accepted.published, true);
+  assert.equal(accepted.publishAt, graceStart);
+  assert.equal(accepted.promotionExpiresAt, graceStart + 7 * day);
+  for (const autoPublishAtStart of [undefined, false]) {
+    assert.throws(() => repository.createBrand(example(`no-grace-${String(autoPublishAtStart)}`, {
+      category: 'New', published: false, promotionStartsAt: now - 1, autoPublishAtStart,
+    }), now), directory.PromotionValidationError);
+  }
+  const tooOld = graceStart - 1;
+  assert.throws(() => repository.createBrand(example('grace-too-old-create', {
+    category: 'New', published: false, promotionStartsAt: tooOld, autoPublishAtStart: true,
+  }), now), directory.PromotionValidationError);
+  const original = repository.createBrand(example('grace-too-old-update', { category: 'New', promotionStartsAt: now + day }), now);
+  const db = sqlite.getSqlite();
+  const job = db.prepare('SELECT * FROM telegram_promotion_outbox WHERE brand_id=?').get(original.id);
+  assert.throws(() => repository.updateBrand(original.id, { ...fields(original), name: 'Must remain unchanged',
+    promotionStartsAt: tooOld, autoPublishAtStart: true }, now), directory.PromotionValidationError);
+  assert.deepEqual((await repository.readDirectory(true, now)).brands.find(brand => brand.id === original.id), original);
+  assert.deepEqual(db.prepare('SELECT * FROM telegram_promotion_outbox WHERE brand_id=?').get(original.id), job);
+  assert.equal(db.prepare('SELECT 1 FROM brands WHERE id=?').get('grace-too-old-create'), undefined);
+});
+
+test('unchanged draft dates require explicit editor publishing intent and do not override later cancellation', async () => {
+  const currentDataDir = process.env.DATA_DIR;
+  process.env.DATA_DIR = path.join(fixture, 'unchanged-editor-schedule');
+  try {
+    const start = now + day;
+    const draft = repository.createBrand(example('unchanged-draft-date', { category: 'Update', promotionStartsAt: start, published: false }), now);
+    const dateInput = malaysiaDateTimeInput(start);
+    const ordinaryPayload = brandInput.parse({ ...fields(draft), tagline: 'Only edit the description',
+      ...brandScheduleInput(draft, draft, dateInput) });
+    assert.equal(ordinaryPayload.autoPublishAtStart, undefined);
+    const unchanged = repository.updateBrand(draft.id, ordinaryPayload, now + 1);
+    assert.equal(unchanged.published, false);
+    assert.equal((await repository.readDirectory(false, start)).brands.some(brand => brand.id === draft.id), false);
+
+    const editing = { ...fields(unchanged), published: true };
+    const schedulePayload = brandInput.parse({ ...editing, ...brandScheduleInput(editing, unchanged, dateInput) });
+    assert.equal(schedulePayload.promotionStartsAt, start);
+    assert.equal(schedulePayload.autoPublishAtStart, true);
+    const scheduled = repository.updateBrand(draft.id, schedulePayload, now + 2);
+    assert.equal(scheduled.publishAt, start);
+    const pending = await repository.readDirectory(false, start - 1);
+    assert.equal(pending.nextPublishAt, start);
+    assert.equal(pending.brands.some(brand => brand.id === draft.id), false);
+    assert.equal((await repository.readDirectory(false, start)).brands.find(brand => brand.id === draft.id).category, 'Update');
+
+    const unchecked = { ...fields(scheduled), published: false };
+    const cancelled = repository.updateBrand(draft.id, { ...unchecked,
+      ...brandScheduleInput(unchecked, scheduled, dateInput) }, now + 3);
+    assert.equal(cancelled.publishAt, null);
+    const afterCancel = await repository.readDirectory(false, start);
+    assert.equal(afterCancel.nextPublishAt, undefined);
+    assert.equal(afterCancel.brands.some(brand => brand.id === draft.id), false);
+    const clearing = brandScheduleInput({ category: 'Update', published: true }, scheduled, '');
+    assert.deepEqual(clearing, { promotionStartsAt: null });
+  } finally { process.env.DATA_DIR = currentDataDir; }
 });
 
 test('clearing the schedule of a pending published brand releases it immediately', async () => {
