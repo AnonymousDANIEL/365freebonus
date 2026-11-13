@@ -441,6 +441,7 @@ export default function TelegramGroupSettings({ request, signInPath }: AdminProp
             <small>来源群需允许机器人接收普通消息：将机器人设为管理员，或在 BotFather 关闭 Group Privacy。其他机器人发出的消息还可能需要开启 Bot-to-Bot Communication Mode。</small>
             <small>不要同时为此机器人使用其他 Webhook 或轮询接收服务。系统会去重、限速，并忽略自己的消息和目标群消息。</small>
             <small>相同 Telegram 图片身份或相同图片内容会跳过，文案、链接或来源改变也不会重复发送。去重记录在重新开启和重启后保留。</small>
+            <small>保留原文换行、文字格式和自定义 Emoji；隐藏链接保留原文字并改为本站。若 Telegram 拒绝或未保留自定义 Emoji，后台会提示，不会去掉表情自动重发。超长文案或缺少原始格式资料的旧待发消息会停止发送，避免内容变样。</small>
             <dl className="cms-telegram-counts" aria-label="群图片转发记录">
               {Object.entries(config.relay.counts).map(([key, count]) => <div key={key}><dt>{({ ...deliveryLabels, cancelled: "已取消" } as Record<string, string>)[key] || key}</dt><dd>{count}</dd></div>)}
               <div><dt>最近检查（MYT）</dt><dd>{config.relay.lastPolledAt === null ? "尚未检查" : pollTimeFormat.format(config.relay.lastPolledAt)}</dd></div>

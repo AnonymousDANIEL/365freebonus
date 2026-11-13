@@ -29,7 +29,8 @@ exports.telegramRequest = async (token, method, parameters = {}, upload) => {
   if (method === 'getChatMember') return {ok:true,result:exports.targetAllowed ? {status:'administrator',can_post_messages:true,can_send_messages:true,can_send_photos:true,can_send_other_messages:true} : {status:'left'}};
   if (method === 'sendPhoto' || method === 'sendAnimation' || method === 'sendVideo' || method === 'sendDocument') {
     if (exports.sends.length) { const next=exports.sends.shift(); return typeof next === 'function' ? await next(parameters) : next; }
-    return {ok:true,result:{message_id:9000+exports.calls.length,date:Math.floor(exports.now/1000)}};
+    return {ok:true,result:{message_id:9000+exports.calls.length,date:Math.floor(exports.now/1000),
+      caption:parameters.caption,caption_entities:parameters.caption_entities||[]}};
   }
   throw new Error('Unexpected relay transport method: '+method);
 };
@@ -129,7 +130,7 @@ test('photo relay verifies its target and uses the promotion bot independently o
   assert.equal(call.parameters.photo,'photo-1');
   assert.equal(call.parameters.caption,'Offer 1\nhttps://365freebonus.com/');
   assert.deepEqual(call.parameters.reply_markup,{inline_keyboard:relayKeyboard()});
-  assert.equal(call.parameters.caption_entities,undefined);
+  assert.deepEqual(call.parameters.caption_entities,[{type:'url',offset:'Offer 1\n'.length,length:'https://365freebonus.com/'.length}]);
   assert.equal(call.parameters.parse_mode,undefined);
   assert.equal(jobs()[0].status,'sent');
   assert.ok(telegram.calls.every(call=>call.token===token));
@@ -407,7 +408,7 @@ test('v17 migration preserves notes, credentials and existing queues while activ
     ALTER TABLE telegram_promotion_settings DROP COLUMN relay_revision;
     PRAGMA user_version=17;`);
   closeDatabase();const migrated=getSqlite();
-  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,20);
+  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,21);
   const current=migrated.prepare("SELECT * FROM telegram_promotion_settings WHERE id='primary'").get();
   assert.equal(current.relay_enabled,1);assert.equal(current.relay_started_at,now);assert.ok(current.relay_revision);
   assert.equal(current.relay_chat_id,'@join365freebonusgroup');
@@ -440,6 +441,144 @@ function accountPhoto(overrides={}) {
     bytes:Buffer.from('personal-photo-one'),hasSpoiler:false,sourceMediaId:'personal-photo-one',
     accountGeneration:'account-generation',relayRevision:'relay-revision',...overrides};
 }
+
+function originalEmojiCaption() {
+  const originalUrl='https://old.example/join';
+  const caption=`Friday plans? 😹\n⭐⭐\n➡️ FREE RM20 ${originalUrl}\n🔗 JOIN NOW⬇️`;
+  const urlOffset=caption.indexOf(originalUrl);
+  const custom=(text,id,offset=caption.indexOf(text))=>({type:'custom_emoji',offset,length:text.length,custom_emoji_id:id});
+  const entities=[
+    custom('😹','100000000000000001'),
+    custom('⭐','100000000000000002'),
+    custom('⭐','100000000000000003',caption.indexOf('⭐')+1),
+    custom('➡️','100000000000000004'),
+    {type:'bold',offset:caption.indexOf('FREE RM20'),length:'FREE RM20'.length},
+    {type:'url',offset:urlOffset,length:originalUrl.length},
+    custom('🔗','100000000000000005'),
+    custom('⬇️','100000000000000006'),
+  ];
+  const rewritten=caption.replace(originalUrl,'https://365freebonus.com/');
+  const shift='https://365freebonus.com/'.length-originalUrl.length;
+  const expectedEntities=entities.map(entity=>({...entity,
+    ...(entity.type==='url'?{length:'https://365freebonus.com/'.length}:{}),
+    offset:entity.offset>urlOffset?entity.offset+shift:entity.offset}));
+  return {caption,entities,rewritten,expectedEntities};
+}
+
+test('bot custom emoji and formatting survive queued storage and reopening with only authorized URLs changed',async()=>{
+  configure();const original=originalEmojiCaption();
+  await poll(now,[photo(1,{caption:original.caption,caption_entities:original.entities})]);
+  assert.equal(jobs().length,1);
+  assert.equal(jobs()[0].caption,original.rewritten);
+  assert.deepEqual(JSON.parse(jobs()[0].caption_entities),original.expectedEntities);
+  closeDatabase();await deliver(now);
+  const call=sends()[0];assert.equal(sends().length,1);
+  assert.equal(call.parameters.caption,original.rewritten);
+  assert.deepEqual(call.parameters.caption_entities,original.expectedEntities);
+  assert.equal(call.parameters.parse_mode,undefined);
+  assert.deepEqual(call.parameters.reply_markup,{inline_keyboard:relayKeyboard()});
+});
+
+test('all personal photo, GIF, MP4 and original-video file uploads retain custom emoji IDs and formatting',async t=>{
+  await configureAccount(t);const original=originalEmojiCaption();
+  const variants=[
+    {mediaKind:'photo',method:'sendPhoto',field:'photo'},
+    {mediaKind:'animation',method:'sendAnimation',field:'animation'},
+    {mediaKind:'video',mimeType:'video/mp4',method:'sendVideo',field:'video'},
+    {mediaKind:'video',mimeType:'video/webm',method:'sendDocument',field:'document'},
+  ];
+  for(let i=0;i<variants.length;i++){
+    const {method,field,...variant}=variants[i];
+    assert.equal(await relay.enqueuePersonalRelayMedia(accountPhoto({...variant,sourceMessageId:3000+i,
+      sourceMediaId:`original-emoji-media-${i}`,bytes:Buffer.from(`original-emoji-bytes-${i}`),
+      caption:original.caption,captionEntities:original.entities})),true);
+    assert.deepEqual(JSON.parse(jobs()[i].caption_entities),original.expectedEntities);
+  }
+  closeDatabase();
+  for(let i=0;i<variants.length;i++){
+    await deliver(now+i*4000);
+    const call=sends()[i];assert.equal(call.method,variants[i].method);assert.equal(call.upload.field,variants[i].field);
+    assert.equal(call.parameters.caption,original.rewritten);
+    assert.deepEqual(call.parameters.caption_entities,original.expectedEntities);
+    assert.equal(call.parameters.parse_mode,undefined);
+    assert.deepEqual(call.parameters.reply_markup,{inline_keyboard:relayKeyboard()});
+    assert.equal(jobs()[i].status,'sent');
+  }
+  assert.equal(sends().length,4);
+});
+
+test('Telegram rejection of custom emoji never falls back to changed plain emoji or text',async()=>{
+  configure();const original=originalEmojiCaption();
+  await poll(now,[photo(1,{caption:original.caption,caption_entities:original.entities})]);
+  telegram.sends.push({ok:false,code:400,retryAfter:0});await deliver(now);
+  assert.equal(sends().length,1);assert.equal(jobs()[0].status,'failed');
+  assert.deepEqual(sends()[0].parameters.caption_entities,original.expectedEntities);
+  assert.match(jobs()[0].last_error,/自定义|emoji|表情|原样/i);
+  assert.match(relay.relayStatus(getSqlite()).lastError,/自定义|emoji|表情|原样/i);
+  await deliver(now+4000);assert.equal(sends().length,1);
+  assert.equal(telegram.calls.some(call=>call.method==='sendMessage'),false);
+});
+
+test('a successful Telegram reply that strips custom emoji records a warning without resending the delivered media',async()=>{
+  configure();const original=originalEmojiCaption();
+  await poll(now,[photo(1,{caption:original.caption,caption_entities:original.entities})]);
+  telegram.sends.push(ok({message_id:87654,date:now/1000,caption:original.rewritten,caption_entities:[]}));
+  await deliver(now);
+  assert.equal(sends().length,1);assert.equal(jobs()[0].status,'sent');
+  assert.ok(jobs()[0].last_error);assert.match(jobs()[0].last_error,/自定义|emoji|表情|原样/i);
+  assert.match(relay.relayStatus(getSqlite()).lastError,/自定义|emoji|表情|原样/i);
+  await poll(now+4000,[photo(2,{caption:original.caption,caption_entities:original.entities,photo:photo(1).message.photo})]);
+  await deliver(now+4000);
+  assert.equal(sends().length,1);assert.equal(jobs().length,1);
+  assert.equal(telegram.calls.some(call=>call.method==='sendMessage'),false);
+});
+
+test('a successful reply with changed caption text warns even when custom emoji IDs remain intact and never resends',async()=>{
+  configure();const original=originalEmojiCaption();
+  await poll(now,[photo(1,{caption:original.caption,caption_entities:original.entities})]);
+  telegram.sends.push(ok({message_id:87655,date:now/1000,caption:original.rewritten+' changed',
+    caption_entities:original.expectedEntities}));
+  await deliver(now);
+  assert.equal(sends().length,1);assert.equal(jobs()[0].status,'sent');
+  assert.deepEqual(sends()[0].parameters.caption_entities,original.expectedEntities);
+  assert.match(jobs()[0].last_error,/返回的文案|原文不一致|文案.*不一致/);
+  assert.match(relay.relayStatus(getSqlite()).lastError,/返回的文案|原文不一致|文案.*不一致/);
+  await poll(now+4000,[photo(2,{caption:original.caption,caption_entities:original.entities,photo:photo(1).message.photo})]);
+  await deliver(now+4000);
+  assert.equal(sends().length,1);assert.equal(jobs().length,1);
+  assert.equal(telegram.calls.some(call=>call.method==='sendMessage'),false);
+});
+
+test('overlength Bot captions fail with a clear error instead of forwarding shortened text or emoji',async()=>{
+  configure();const caption='😹'.repeat(1100);
+  await poll(now,[photo(1,{caption,caption_entities:[{type:'custom_emoji',offset:0,length:2,custom_emoji_id:'100000000000000001'}]})]);
+  assert.equal(jobs().length,1);assert.equal(jobs()[0].status,'failed');
+  assert.match(jobs()[0].last_error,/超过|长度限制/);
+  await deliver(now);assert.equal(sends().length,0);
+  assert.equal(telegram.calls.some(call=>call.method==='sendMessage'),false);
+});
+
+test('overlength personal captions are consumed with a failed record and never silently truncated or sent as text',async t=>{
+  await configureAccount(t);
+  const input=accountPhoto({caption:'Original words\n'+'⭐'.repeat(1100),captionEntities:[
+    {type:'custom_emoji',offset:'Original words\n'.length,length:1,custom_emoji_id:'100000000000000001'},
+  ]});
+  assert.equal(await relay.enqueuePersonalRelayMedia(input),true);
+  assert.equal(jobs().length,1);assert.equal(jobs()[0].status,'failed');
+  assert.match(jobs()[0].last_error,/超过|长度限制/);
+  assert.equal(jobs()[0].media_bytes,null);
+  await deliver(now);assert.equal(sends().length,0);
+  assert.equal(telegram.calls.some(call=>call.method==='sendMessage'),false);
+});
+
+for(const invalid of ['not-json','{"type":"custom_emoji"}'])test(`corrupt stored caption entities fail closed without plain-text fallback (${invalid[0]})`,async()=>{
+  configure();await poll(now,[photo()]);
+  getSqlite().prepare('UPDATE telegram_relay_outbox SET caption_entities=?').run(invalid);
+  await deliver(now);
+  assert.equal(sends().length,0);assert.equal(jobs()[0].status,'failed');
+  assert.ok(jobs()[0].last_error);
+  assert.equal(telegram.calls.some(call=>call.method==='sendMessage'),false);
+});
 
 test('captioned source channel_post updates use the same fixed links and destination channel support',async()=>{
   configure();telegram.targetType='channel';
@@ -736,12 +875,12 @@ test('v18 upgrade preserves settings and PIN while seeding permanent image ident
   const stateBefore={...db.prepare("SELECT * FROM telegram_relay_state WHERE id='primary'").get()};
   const sentId=jobs()[0].id;
   db.exec('DROP TABLE telegram_relay_media_keys');
-  for(const column of ['origin','account_generation','media_bytes','content_hash','visual_hash','media_prepared','mime_type']) {
+  for(const column of ['origin','account_generation','media_bytes','content_hash','visual_hash','media_prepared','mime_type','caption_entities']) {
     db.exec(`ALTER TABLE telegram_relay_outbox DROP COLUMN ${column}`);
   }
   db.exec('PRAGMA user_version=18');closeDatabase();
   const migrated=getSqlite();
-  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,20);
+  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,21);
   assert.deepEqual({...migrated.prepare("SELECT * FROM telegram_promotion_settings WHERE id='primary'").get()},settingsBefore);
   assert.deepEqual({...migrated.prepare("SELECT * FROM notes_vault_settings WHERE id='primary'").get()},vaultBefore);
   assert.deepEqual({...migrated.prepare("SELECT * FROM telegram_relay_state WHERE id='primary'").get()},stateBefore);
@@ -759,12 +898,12 @@ test('v19 upgrade preserves queued media bytes, permanent identities, settings a
   await poll(now+1000,[photo(1)]);
   const db=getSqlite();
   db.prepare("INSERT INTO notes_vault_settings(id,pin_hash,revision,created_at,updated_at) VALUES('primary','retained-pin-hash','retained-vault',21,22)").run();
-  const rowsBefore=jobs().map(row=>({...row}));
+  const rowsBefore=jobs().map(({caption_entities,...row})=>({...row}));
   const keysBefore=db.prepare('SELECT * FROM telegram_relay_media_keys ORDER BY media_key').all().map(row=>({...row}));
   const settingsBefore={...db.prepare("SELECT * FROM telegram_promotion_settings WHERE id='primary'").get()};
   const stateBefore={...db.prepare("SELECT * FROM telegram_relay_state WHERE id='primary'").get()};
   const vaultBefore={...db.prepare("SELECT * FROM notes_vault_settings WHERE id='primary'").get()};
-  const columns=db.prepare('PRAGMA table_info(telegram_relay_outbox)').all().map(row=>row.name).filter(name=>name!=='mime_type');
+  const columns=db.prepare('PRAGMA table_info(telegram_relay_outbox)').all().map(row=>row.name).filter(name=>!['mime_type','caption_entities'].includes(name));
   db.exec(`BEGIN IMMEDIATE;
     CREATE TABLE telegram_relay_outbox_v19 (
       id INTEGER PRIMARY KEY AUTOINCREMENT,source_chat_id INTEGER NOT NULL,source_message_id INTEGER NOT NULL,
@@ -787,8 +926,9 @@ test('v19 upgrade preserves queued media bytes, permanent identities, settings a
   assert.throws(()=>db.prepare(`INSERT INTO telegram_relay_outbox(source_chat_id,source_message_id,fingerprint,
     queued_at,revision,media_kind,file_id,file_unique_id,caption) VALUES(? ,9999,'before-video',?,'relay-revision','video','v','vu','Video')`).run(source,now),/CHECK/);
   closeDatabase();const migrated=getSqlite();
-  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,20);
-  assert.deepEqual(jobs().map(row=>({...row})),rowsBefore);
+  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,21);
+  assert.deepEqual(jobs().map(({caption_entities,...row})=>({...row})),rowsBefore);
+  assert.ok(jobs().every(row=>row.caption_entities===''));
   assert.deepEqual(migrated.prepare('SELECT * FROM telegram_relay_media_keys ORDER BY media_key').all().map(row=>({...row})),keysBefore);
   assert.deepEqual({...migrated.prepare("SELECT * FROM telegram_promotion_settings WHERE id='primary'").get()},settingsBefore);
   assert.deepEqual({...migrated.prepare("SELECT * FROM telegram_relay_state WHERE id='primary'").get()},stateBefore);
@@ -799,6 +939,32 @@ test('v19 upgrade preserves queued media bytes, permanent identities, settings a
   assert.equal(jobs().at(-1).media_kind,'video');
   assert.throws(()=>migrated.prepare(`INSERT INTO telegram_relay_outbox(source_chat_id,source_message_id,media_group_id,
     fingerprint,queued_at,revision,media_kind,file_id,file_unique_id,caption) VALUES(? ,9998,'pending-album','album-copy',?,'relay-revision','photo','p','pu','Photo')`).run(source,now),/UNIQUE/);
+});
+
+test('v20 upgrade marks unavailable legacy caption entities without changing jobs, media keys, settings or PIN',async t=>{
+  await configureAccount(t);
+  await relay.enqueuePersonalRelayMedia(accountPhoto());
+  await relay.enqueuePersonalRelayMedia(accountPhoto({mediaKind:'video',mimeType:'video/webm',sourceMessageId:3002,
+    sourceMediaId:'v20-pending-video',bytes:Buffer.from('v20-video-bytes')}));
+  const db=getSqlite();
+  db.prepare("INSERT INTO notes_vault_settings(id,pin_hash,revision,created_at,updated_at) VALUES('primary','v20-pin','v20-vault',31,32)").run();
+  const beforeJobs=jobs().map(({caption_entities,...row})=>({...row}));
+  const beforeKeys=db.prepare('SELECT * FROM telegram_relay_media_keys ORDER BY media_key').all().map(row=>({...row}));
+  const beforeSettings={...db.prepare("SELECT * FROM telegram_promotion_settings WHERE id='primary'").get()};
+  const beforeState={...db.prepare("SELECT * FROM telegram_relay_state WHERE id='primary'").get()};
+  const beforePin={...db.prepare("SELECT * FROM notes_vault_settings WHERE id='primary'").get()};
+  db.exec('ALTER TABLE telegram_relay_outbox DROP COLUMN caption_entities; PRAGMA user_version=20');
+  closeDatabase();const migrated=getSqlite();
+  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,21);
+  assert.deepEqual(jobs().map(({caption_entities,...row})=>({...row})),beforeJobs);
+  assert.ok(jobs().every(row=>row.caption_entities===''),'old queues mark unavailable original custom emoji metadata instead of fabricating an empty entity list');
+  assert.deepEqual(migrated.prepare('SELECT * FROM telegram_relay_media_keys ORDER BY media_key').all().map(row=>({...row})),beforeKeys);
+  assert.deepEqual({...migrated.prepare("SELECT * FROM telegram_promotion_settings WHERE id='primary'").get()},beforeSettings);
+  assert.deepEqual({...migrated.prepare("SELECT * FROM telegram_relay_state WHERE id='primary'").get()},beforeState);
+  assert.deepEqual({...migrated.prepare("SELECT * FROM notes_vault_settings WHERE id='primary'").get()},beforePin);
+  await deliver(now);await deliver(now+4000);
+  assert.equal(sends().length,0,'legacy jobs without original emoji metadata must never be re-created as plain text');
+  assert.ok(jobs().every(row=>row.status==='failed'&&row.last_error));
 });
 
 test('a full bot queue retains the source update until capacity is available and then queues it exactly once',async()=>{

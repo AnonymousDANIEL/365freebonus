@@ -12,7 +12,7 @@ export function getDataDirectory(): string {
 function migrate(db: DatabaseSync) {
   if (migrated.has(db)) return;
   const readVersion = () => (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
-  if (readVersion() < 20) {
+  if (readVersion() < 21) {
     db.exec("BEGIN IMMEDIATE");
     try {
       // Read again inside the write lock, so concurrent process starts cannot
@@ -373,6 +373,11 @@ function migrate(db: DatabaseSync) {
         `);
         db.prepare("UPDATE sqlite_sequence SET seq=MAX(seq,?) WHERE name='telegram_relay_outbox'").run(oldSequence);
         db.prepare("INSERT INTO sqlite_sequence(name,seq) SELECT 'telegram_relay_outbox',? WHERE NOT EXISTS(SELECT 1 FROM sqlite_sequence WHERE name='telegram_relay_outbox')").run(oldSequence);
+      }
+      if (version < 21) {
+        // An empty sentinel marks legacy jobs whose original formatting was
+        // never captured. New plain captions explicitly store JSON [].
+        db.exec("ALTER TABLE telegram_relay_outbox ADD COLUMN caption_entities TEXT NOT NULL DEFAULT ''; PRAGMA user_version=21;");
       }
       db.exec("COMMIT");
     } catch (error) { db.exec("ROLLBACK"); throw error; }

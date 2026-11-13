@@ -26,8 +26,15 @@ class User extends Box {} class Channel extends Box {} class Photo extends Box {
 class MessageMediaPhoto extends Box {} class MessageMediaDocument extends Box {} class DocumentAttributeAnimated extends Box {} class DocumentAttributeVideo extends Box {}
 class Message extends Box {get photo(){return this.media?.photo;}get document(){return this.media?.document;}}
 class InputPeerChannel extends Box {} class ReplyInlineMarkup extends Box {} class InlineButtonTypeUrl extends Box {}
+class MessageEntityCustomEmoji extends Box {} class MessageEntityBold extends Box {} class MessageEntityItalic extends Box {}
+class MessageEntityUnderline extends Box {} class MessageEntityStrike extends Box {} class MessageEntitySpoiler extends Box {}
+class MessageEntityCode extends Box {} class MessageEntityPre extends Box {} class MessageEntityBlockquote extends Box {}
+class MessageEntityFormattedDate extends Box {} class MessageEntityTextUrl extends Box {} class MessageEntityMentionName extends Box {}
+class MessageEntityHashtag extends Box {} class MessageEntityCashtag extends Box {} class MessageEntityBotCommand extends Box {}
+class MessageEntityUnknown extends Box {}
 class Authorization extends Box {} class SignIn extends Box {} class LogOut extends Box {}
-exports.Api={User,Channel,Photo,Document,MessageMediaPhoto,MessageMediaDocument,DocumentAttributeAnimated,DocumentAttributeVideo,Message,InputPeerChannel,ReplyInlineMarkup,InlineButtonTypeUrl,auth:{Authorization,SignIn,LogOut}};
+exports.Api={User,Channel,Photo,Document,MessageMediaPhoto,MessageMediaDocument,DocumentAttributeAnimated,DocumentAttributeVideo,Message,InputPeerChannel,ReplyInlineMarkup,InlineButtonTypeUrl,
+MessageEntityCustomEmoji,MessageEntityBold,MessageEntityItalic,MessageEntityUnderline,MessageEntityStrike,MessageEntitySpoiler,MessageEntityCode,MessageEntityPre,MessageEntityBlockquote,MessageEntityFormattedDate,MessageEntityTextUrl,MessageEntityMentionName,MessageEntityHashtag,MessageEntityCashtag,MessageEntityBotCommand,MessageEntityUnknown,auth:{Authorization,SignIn,LogOut}};
 exports.utils={getPeerId:entity=>'-100'+entity.id};
 exports.Logger=class {setLevel(){};};
 exports.state={};
@@ -265,6 +272,68 @@ test('captioned attached MP4 video is downloaded and enqueued as video with its 
   assert.equal(queued.caption,'Video caption https://source.example');
   assert.equal(queued.sourceMediaId,'video-video-41');
   assert.deepEqual(queued.bytes,telegram.state.media);
+});
+
+test('custom emoji document IDs and UTF-16 positions survive personal caption conversion without changing text',async()=>{
+  await login();await select();ready();
+  const caption='  Friday plans? 😹\n⭐ ⭐\n➡️FREE RM20 CASH\n\n  ';
+  const emoji=(text,id,start=0)=>new Api.MessageEntityCustomEmoji({offset:caption.indexOf(text,start),length:text.length,documentId:{toString:()=>id}});
+  const firstStar=caption.indexOf('⭐');
+  const entities=[emoji('😹','5368324170671202286'),emoji('⭐','9007199254740993123'),
+    emoji('⭐','9007199254740993124',firstStar+1),emoji('➡️','5368324170671202287'),
+    new Api.MessageEntityBold({offset:caption.indexOf('FREE'),length:'FREE RM20 CASH'.length})];
+  telegram.state.messages=[photo(41,{message:caption,entities})];
+  await account.pollTelegramAccountOnce();
+  assert.equal(cursor(),41);
+  assert.equal(telegram.state.queue[0].caption,caption,'spaces, blank lines and fallback glyphs remain byte-for-byte identical');
+  assert.deepEqual(telegram.state.queue[0].captionEntities,entities.map(entity=>({
+    type:entity.className==='MessageEntityCustomEmoji'?'custom_emoji':'bold',offset:entity.offset,length:entity.length,
+    ...(entity.documentId?{custom_emoji_id:entity.documentId.toString()}:{}),
+  })));
+});
+
+test('personal captions preserve formatting, quote expansion, code language and explicit date format',async()=>{
+  await login();await select();ready();
+  const span={offset:0,length:4};
+  const entities=[new Api.MessageEntityBold(span),new Api.MessageEntityItalic(span),new Api.MessageEntityUnderline(span),
+    new Api.MessageEntityStrike(span),new Api.MessageEntitySpoiler(span),new Api.MessageEntityCode(span),
+    new Api.MessageEntityPre({...span,language:'javascript'}),new Api.MessageEntityBlockquote(span),
+    new Api.MessageEntityBlockquote({...span,collapsed:true}),
+    new Api.MessageEntityFormattedDate({...span,date:1800000000,dayOfWeek:true,longDate:true,shortTime:true}),
+    new Api.MessageEntityFormattedDate({...span,date:1800000001,relative:true}),
+    new Api.MessageEntityHashtag(span),new Api.MessageEntityCashtag(span),new Api.MessageEntityBotCommand(span)];
+  telegram.state.messages=[video(41,{caption:'Keep exact formatting',entities})];
+  await account.pollTelegramAccountOnce();
+  assert.deepEqual(telegram.state.queue[0].captionEntities,[
+    ...['bold','italic','underline','strikethrough','spoiler','code'].map(type=>({type,...span})),
+    {type:'pre',...span,language:'javascript'},{type:'blockquote',...span},{type:'expandable_blockquote',...span},
+    {type:'date_time',...span,unix_time:1800000000,date_time_format:'wDt'},
+    {type:'date_time',...span,unix_time:1800000001,date_time_format:'r'},
+    ...['hashtag','cashtag','bot_command'].map(type=>({type,...span})),
+  ]);
+});
+
+test('link spans remain available for rewriting without carrying source URLs or private mention records',async()=>{
+  await login();await select();ready();
+  const entities=[new Api.MessageEntityTextUrl({offset:0,length:4,url:'https://source.example/private'}),
+    new Api.MessageEntityMentionName({offset:5,length:4,userId:'private-user-record'})];
+  telegram.state.messages=[photo(41,{message:'Link Name',entities})];
+  await account.pollTelegramAccountOnce();
+  assert.deepEqual(telegram.state.queue[0].captionEntities,[{type:'text_link',offset:0,length:4},{type:'text_mention',offset:5,length:4}]);
+  assert.doesNotMatch(JSON.stringify(telegram.state.queue[0].captionEntities),/private-user|source\.example/);
+});
+
+test('unknown and malformed custom emoji entities do not discard the original caption or prevent later valid entities',async()=>{
+  await login();await select();ready();
+  telegram.state.messages=[photo(41,{message:'⭐ Keep',entities:[
+    new Api.MessageEntityCustomEmoji({offset:0,length:1,documentId:{toString:()=>{throw new Error('unusable ID');}}}),
+    new Api.MessageEntityCustomEmoji({offset:0,length:1,documentId:{toString:()=>'-12'}}),
+    new Api.MessageEntityUnknown({offset:0,length:1}),new Api.MessageEntityBold({offset:-1,length:3}),
+    new Api.MessageEntityItalic({offset:2,length:4}),
+  ]})];
+  await account.pollTelegramAccountOnce();
+  assert.equal(telegram.state.queue[0].caption,'⭐ Keep');
+  assert.deepEqual(telegram.state.queue[0].captionEntities,[{type:'italic',offset:2,length:4}]);
 });
 
 test('video captions, protection and actual attachments are required; previews and round video notes are skipped',async()=>{

@@ -425,8 +425,39 @@ export async function handleAccountAction(input: TelegramAccountAction) {
 }
 
 function captionEntities(entities: Api.TypeMessageEntity[] | undefined) {
-  const types: Record<string, string> = { MessageEntityUrl: "url", MessageEntityTextUrl: "text_link", MessageEntityMention: "mention", MessageEntityMentionName: "text_mention", MessageEntityEmail: "email", MessageEntityPhone: "phone_number" };
-  return (entities || []).flatMap(entity => types[entity.className] ? [{ type: types[entity.className], offset: entity.offset, length: entity.length }] : []);
+  type CaptionEntity = { type: string; offset: number; length: number; custom_emoji_id?: string; language?: string; unix_time?: number; date_time_format?: string };
+  const types: Record<string, string> = {
+    MessageEntityUrl: "url", MessageEntityTextUrl: "text_link", MessageEntityMention: "mention",
+    MessageEntityMentionName: "text_mention", InputMessageEntityMentionName: "text_mention",
+    MessageEntityEmail: "email", MessageEntityPhone: "phone_number", MessageEntityHashtag: "hashtag",
+    MessageEntityCashtag: "cashtag", MessageEntityBotCommand: "bot_command", MessageEntityBold: "bold",
+    MessageEntityItalic: "italic", MessageEntityUnderline: "underline", MessageEntityStrike: "strikethrough",
+    MessageEntitySpoiler: "spoiler", MessageEntityCode: "code", MessageEntityPre: "pre",
+    MessageEntityCustomEmoji: "custom_emoji", MessageEntityBlockquote: "blockquote", MessageEntityFormattedDate: "date_time",
+  };
+  return (entities || []).flatMap((entity): CaptionEntity[] => {
+    const type = types[entity.className];
+    if (!type || !Number.isSafeInteger(entity.offset) || entity.offset < 0 || !Number.isSafeInteger(entity.length) || entity.length <= 0) return [];
+    const converted: CaptionEntity = { type, offset: entity.offset, length: entity.length };
+    if (entity.className === "MessageEntityCustomEmoji") {
+      // Keep the ID as a decimal string: these 64-bit document identifiers can
+      // exceed JavaScript's safe integer range. The caption keeps its original
+      // fallback glyph while Telegram renders the corresponding custom emoji.
+      let id = "";
+      try { id = entity.documentId?.toString() || ""; } catch { return []; }
+      if (!/^[1-9]\d{0,19}$/.test(id)) return [];
+      converted.custom_emoji_id = id;
+    } else if (entity.className === "MessageEntityPre") {
+      if (typeof entity.language === "string" && entity.language.length <= 100) converted.language = entity.language;
+    } else if (entity.className === "MessageEntityBlockquote") {
+      if (entity.collapsed) converted.type = "expandable_blockquote";
+    } else if (entity.className === "MessageEntityFormattedDate") {
+      if (!Number.isSafeInteger(entity.date) || entity.date < 0) return [];
+      converted.unix_time = entity.date;
+      converted.date_time_format = entity.relative ? "r" : `${entity.dayOfWeek ? "w" : ""}${entity.longDate ? "D" : entity.shortDate ? "d" : ""}${entity.longTime ? "T" : entity.shortTime ? "t" : ""}`;
+    }
+    return [converted];
+  });
 }
 function ownButtons(message: Api.Message) {
   if (!(message.replyMarkup instanceof Api.ReplyInlineMarkup)) return false;

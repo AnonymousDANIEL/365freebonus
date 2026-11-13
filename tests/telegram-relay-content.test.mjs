@@ -16,7 +16,7 @@ for (const name of ['telegram-relay-content', 'telegram-bot']) {
   ).outputText);
 }
 const require = createRequire(import.meta.url);
-const { prepareRelayMessage, relayKeyboard, RELAY_WEBSITE, RELAY_DEFAULT_TARGET } = require(path.join(fixture, 'telegram-relay-content.js'));
+const { prepareRelayMessage, normalizeRelayCaptionEntities, relayKeyboard, RELAY_WEBSITE, RELAY_DEFAULT_TARGET } = require(path.join(fixture, 'telegram-relay-content.js'));
 const transport = require(path.join(fixture, 'telegram-bot.js'));
 const https = require('node:https');
 const now = 1_800_000_000_123;
@@ -40,6 +40,30 @@ test('relay buttons contain exactly the three owner destinations', () => {
   ]);
   const first = relayKeyboard(); first[0][0].url = 'https://invalid.example';
   assert.equal(relayKeyboard()[0][0].url, RELAY_WEBSITE, 'callers cannot mutate future keyboards');
+});
+
+test('date-time formats preserve the empty original-text format and reject invalid options', () => {
+  for (const format of ['', 'r', 'wDT', 'dt']) {
+    const entity = {type:'date_time',offset:0,length:4,unix_time:1800000000,date_time_format:format};
+    assert.deepEqual(prepare(message({caption:'Date',caption_entities:[entity]})).captionEntities,[entity]);
+  }
+  assert.deepEqual(prepare(message({caption:'Date',caption_entities:[{type:'date_time',offset:0,length:4,unix_time:1800000000,date_time_format:'invalid'}]})).captionEntities,[]);
+});
+
+test('rewritten URL entities retain exact adjacent emoji and text spacing', () => {
+  const oldUrl='https://old.example';
+  const caption=`🥳${oldUrl}中文`;
+  const result=prepare(message({caption,caption_entities:[
+    {type:'custom_emoji',offset:0,length:2,custom_emoji_id:'1234567890123456789'},
+    {type:'url',offset:2,length:oldUrl.length},
+    {type:'bold',offset:2+oldUrl.length,length:2},
+  ]}));
+  assert.equal(result.caption,`🥳${RELAY_WEBSITE}中文`);
+  assert.deepEqual(result.captionEntities,[
+    {type:'custom_emoji',offset:0,length:2,custom_emoji_id:'1234567890123456789'},
+    {type:'url',offset:2,length:RELAY_WEBSITE.length},
+    {type:'bold',offset:2+RELAY_WEBSITE.length,length:2},
+  ]);
 });
 
 test('a captioned group photo selects the largest image and keeps plain text, paragraphs and spoiler state', () => {
@@ -140,20 +164,23 @@ test('canonical relay keyboards identify recirculated content even after another
 test('hidden text links after emoji use Telegram UTF-16 entity offsets without corrupting the surrounding copy', () => {
   const caption = '🎁 Big offer\n\nTap JOIN to discover more ✨';
   const result = prepare(message({ caption, caption_entities: [{ type: 'text_link', offset: caption.indexOf('JOIN'), length: 4, url: 'https://hidden-original.example' }] }));
-  assert.equal(result.caption, `🎁 Big offer\n\nTap ${RELAY_WEBSITE} to discover more ✨`);
+  assert.equal(result.caption, caption);
+  assert.deepEqual(result.captionEntities,[{type:"text_link",offset:caption.indexOf("JOIN"),length:4,url:RELAY_WEBSITE}]);
   assert.equal(JSON.stringify(result).includes('hidden-original'), false);
   assert.equal('caption_entities' in result, false);
   assert.equal('parse_mode' in result, false);
 });
 
-test('bare-domain, mention, user-link, email and phone entities all become the owner website', () => {
+test('visible contact links become the owner website and hidden user-link targets retain their labels', () => {
   const values = [
     ['url', 'brand.example/join'], ['mention', '@BrandAgent'], ['text_mention', 'Brand Agent'],
     ['email', 'hello@brand.example'], ['phone_number', '+60 123 456 789'],
   ];
   const caption = values.map(([, value]) => value).join('\n');
   const caption_entities = values.map(([type, value]) => ({ type, offset: caption.indexOf(value), length: value.length, user: { id: 999 } }));
-  assert.equal(prepare(message({ caption, caption_entities })).caption, values.map(() => RELAY_WEBSITE).join('\n'));
+  const result=prepare(message({caption,caption_entities}));
+  assert.equal(result.caption, [RELAY_WEBSITE,RELAY_WEBSITE,'Brand Agent',RELAY_WEBSITE,RELAY_WEBSITE].join('\n'));
+  assert.deepEqual(result.captionEntities.find(e=>e.type==='text_link'),{type:'text_link',offset:result.caption.indexOf('Brand Agent'),length:11,url:RELAY_WEBSITE});
 });
 
 test('literal web, Telegram, app and WhatsApp links are replaced while punctuation and ordinary copy remain', () => {
@@ -163,10 +190,11 @@ test('literal web, Telegram, app and WhatsApp links are replaced while punctuati
   for (const fragment of ['brand.example', 'oldgroup', 'oldchannel', '6012345678', 'oldbot']) assert.equal(result.caption.includes(fragment), false);
 });
 
-test('entity-linked words next to Chinese copy do not eat adjacent words or make a different destination URL', () => {
+test('hidden links preserve Chinese copy exactly and only replace the destination', () => {
   const caption = '点击这里报名';
   const result = prepare(message({ caption, caption_entities: [{ type: 'text_link', offset: 2, length: 2, url: 'https://brand.example' }] }));
-  assert.equal(result.caption, `点击 ${RELAY_WEBSITE} 报名`);
+  assert.equal(result.caption, caption);
+  assert.deepEqual(result.captionEntities,[{type:'text_link',offset:2,length:2,url:RELAY_WEBSITE}]);
 });
 
 test('invalid and overlapping entity offsets remain bounded and do not split emoji', () => {
@@ -177,7 +205,7 @@ test('invalid and overlapping entity offsets remain bounded and do not split emo
     { type: 'text_link', offset: caption.indexOf('JOIN'), length: 4, url: 'https://one.example' },
     { type: 'text_link', offset: caption.indexOf('JOIN') + 1, length: 3, url: 'https://two.example' },
   ] }));
-  assert.equal(result.caption, `🎁 ${RELAY_WEBSITE} ${RELAY_WEBSITE}`);
+  assert.equal(result.caption, `🎁 JOIN ${RELAY_WEBSITE}`);
   assert.equal(result.caption.isWellFormed(), true);
 });
 
@@ -252,4 +280,130 @@ test('video multipart transport keeps caption and fixed owner buttons on the upl
   assert.ok(calls[0].body.includes('sample-video'));
   assert.ok(calls[0].body.includes(JSON.stringify({ inline_keyboard: relayKeyboard() })));
   assert.ok(calls[0].body.includes(`Visit ${RELAY_WEBSITE}`));
+});
+
+
+test('custom emoji artwork and original caption whitespace survive without altering fallback Unicode', () => {
+  const caption = ' \nFriday plans? 🥳\n⭐⭐⭐⭐\n➡FREE RM20 CASH\n🔗TEKAN LINK⬇️\n ';
+  const party = caption.indexOf('🥳');
+  const stars = caption.indexOf('⭐⭐⭐⭐');
+  const arrow = caption.indexOf('➡');
+  const cash = caption.indexOf('FREE RM20 CASH');
+  const original = [
+    { type:'custom_emoji', offset:party, length:2, custom_emoji_id:'5368324170671202286' },
+    ...Array.from({length:4},(_,i)=>({ type:'custom_emoji', offset:stars+i, length:1, custom_emoji_id:String(5368324170671200000n+BigInt(i)) })),
+    { type:'custom_emoji', offset:arrow, length:1, custom_emoji_id:'5368324170671202290' },
+    { type:'bold', offset:cash, length:'FREE RM20 CASH'.length },
+  ];
+  const result = prepare(message({ caption, caption_entities:original }));
+  assert.equal(result.caption, caption, 'no trim, emoji conversion or whitespace normalization is allowed');
+  assert.deepEqual(result.captionEntities, original.toSorted((a,b)=>a.offset-b.offset||b.length-a.length));
+  assert.equal(result.captionTruncated, false);
+});
+
+test('rewritten links shift later custom emoji and formatting in UTF-16 coordinates', () => {
+  const caption='🌟 https://an-old-brand.example/join\n➡ New offer';
+  const result=prepare(message({caption,caption_entities:[
+    {type:'custom_emoji',offset:0,length:2,custom_emoji_id:'5368324170671202286'},
+    {type:'custom_emoji',offset:caption.indexOf('➡'),length:1,custom_emoji_id:'5368324170671202287'},
+    {type:'bold',offset:caption.indexOf('New offer'),length:9},
+  ]}));
+  assert.equal(result.caption,`🌟 ${RELAY_WEBSITE}\n➡ New offer`);
+  assert.deepEqual(result.captionEntities.find(e=>e.type==='custom_emoji'&&e.offset>0),
+    {type:'custom_emoji',offset:result.caption.indexOf('➡'),length:1,custom_emoji_id:'5368324170671202287'});
+  assert.deepEqual(result.captionEntities.find(e=>e.type==='bold'),{type:'bold',offset:result.caption.indexOf('New offer'),length:9});
+  assert.deepEqual(result.captionEntities.find(e=>e.type==='url'),{type:'url',offset:3,length:RELAY_WEBSITE.length});
+});
+
+test('formatting, quote and code metadata are preserved without accepting invalid crossings', () => {
+  const caption='🔥 ABCDE\nquoted ⭐\nconst x = 1';
+  const quote=caption.indexOf('quoted');const code=caption.indexOf('const');
+  const result=prepare(message({caption,caption_entities:[
+    {type:'custom_emoji',offset:0,length:2,custom_emoji_id:'5368324170671202286'},
+    {type:'custom_emoji',offset:1,length:1,custom_emoji_id:'5368324170671202287'},
+    {type:'bold',offset:3,length:4}, {type:'italic',offset:4,length:4},
+    {type:'blockquote',offset:quote,length:8},
+    {type:'custom_emoji',offset:caption.indexOf('⭐'),length:1,custom_emoji_id:'5368324170671202288'},
+    {type:'pre',offset:code,length:11,language:'javascript'},
+  ]}));
+  assert.equal(result.caption,caption);
+  assert.equal(result.captionEntities.some(e=>e.type==='italic'),false,'partial crossings are rejected');
+  assert.equal(result.captionEntities.filter(e=>e.type==='custom_emoji').length,2);
+  assert.deepEqual(result.captionEntities.find(e=>e.type==='pre'),{type:'pre',offset:code,length:11,language:'javascript'});
+});
+
+test('date-time entities preserve supported metadata while invalid IDs and unknown fields do not reach delivery',()=>{
+  const caption='Today ⭐ and 🥳';
+  const result=prepare(message({caption,caption_entities:[
+    {type:'date_time',offset:0,length:5,unix_time:1800000000,date_time_format:'r'},
+    {type:'custom_emoji',offset:caption.indexOf('⭐'),length:1,custom_emoji_id:'not-an-id'},
+    {type:'custom_emoji',offset:caption.indexOf('🥳'),length:2,custom_emoji_id:'5368324170671202286',private:'discard'},
+  ]}));
+  assert.deepEqual(result.captionEntities,[
+    {type:'date_time',offset:0,length:5,unix_time:1800000000,date_time_format:'r'},
+    {type:'custom_emoji',offset:caption.indexOf('🥳'),length:2,custom_emoji_id:'5368324170671202286'},
+  ]);
+});
+
+test('caption clipping flags the loss and never leaves half a custom emoji or entity',()=>{
+  const caption='A'.repeat(1022)+'🥳More text';
+  const result=prepare(message({caption,caption_entities:[
+    {type:'custom_emoji',offset:1022,length:2,custom_emoji_id:'5368324170671202286'},
+    {type:'bold',offset:1000,length:caption.length-1000},
+  ]}));
+  assert.equal(result.captionTruncated,true);
+  assert.equal(result.caption,'A'.repeat(1022)+'…');
+  assert.equal(result.caption.isWellFormed(),true);
+  assert.deepEqual(result.captionEntities,[]);
+});
+
+test('saved-caption validator accepts only original styles, custom emoji IDs and owner URL entities',()=>{
+  const caption=`🥳 ${RELAY_WEBSITE}`;
+  const entities=[
+    {type:'custom_emoji',offset:0,length:2,custom_emoji_id:'5368324170671202286'},
+    {type:'url',offset:3,length:RELAY_WEBSITE.length},
+  ];
+  assert.deepEqual(normalizeRelayCaptionEntities(caption,entities),entities);
+  assert.deepEqual(normalizeRelayCaptionEntities(caption,[...entities,
+    {type:'text_link',offset:0,length:2,url:'https://foreign.example'},
+    {type:'custom_emoji',offset:0,length:2,custom_emoji_id:'bad'},
+    {type:'unknown',offset:0,length:2},
+  ]),entities);
+  assert.deepEqual(normalizeRelayCaptionEntities('https://foreign.example',[{type:'url',offset:0,length:23}]),[]);
+});
+
+
+test('hidden link labels retain formatting and logo emoji while external targets are removed',()=>{
+  const caption='Before JOIN after 🥳';
+  const join=caption.indexOf('JOIN');
+  const result=prepare(message({caption,caption_entities:[
+    {type:'bold',offset:0,length:caption.length},
+    {type:'text_link',offset:join,length:4,url:'https://old.example'},
+    {type:'custom_emoji',offset:caption.indexOf('🥳'),length:2,custom_emoji_id:'5368324170671202286'},
+  ]}));
+  assert.equal(result.caption,caption);
+  assert.deepEqual(result.captionEntities.find(e=>e.type==='bold'),{type:'bold',offset:0,length:caption.length});
+  assert.deepEqual(result.captionEntities.find(e=>e.type==='text_link'),{type:'text_link',offset:join,length:4,url:RELAY_WEBSITE});
+  assert.equal(result.captionEntities.find(e=>e.type==='custom_emoji').custom_emoji_id,'5368324170671202286');
+  assert.equal(JSON.stringify(result).includes('old.example'),false);
+});
+
+test('custom emoji retains its artwork when source link nesting conflicts with Bot API nesting',()=>{
+  const caption='⭐⭐⭐⭐';
+  const result=prepare(message({caption,caption_entities:[
+    {type:'text_link',offset:0,length:4,url:'https://old.example'},
+    ...Array.from({length:4},(_,i)=>({type:'custom_emoji',offset:i,length:1,custom_emoji_id:String(5368324170671200000n+BigInt(i))})),
+  ]}));
+  assert.equal(result.caption,caption);
+  assert.equal(result.captionEntities.filter(e=>e.type==='custom_emoji').length,4);
+  assert.equal(JSON.stringify(result).includes('old.example'),false);
+});
+
+
+test('literal URL fallback never consumes an adjacent ordinary or custom emoji',()=>{
+  const caption='https://first.example🥳https://second.example🇲🇾➡Done';
+  const party=caption.indexOf('🥳');
+  const result=prepare(message({caption,caption_entities:[{type:'custom_emoji',offset:party,length:2,custom_emoji_id:'5368324170671202286'}]}));
+  assert.equal(result.caption,`${RELAY_WEBSITE}🥳${RELAY_WEBSITE}🇲🇾➡Done`);
+  assert.deepEqual(result.captionEntities.find(e=>e.type==='custom_emoji'),{type:'custom_emoji',offset:RELAY_WEBSITE.length,length:2,custom_emoji_id:'5368324170671202286'});
 });
