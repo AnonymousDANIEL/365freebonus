@@ -16,7 +16,7 @@ for (const name of ['telegram-relay-content', 'telegram-bot']) {
   ).outputText);
 }
 const require = createRequire(import.meta.url);
-const { prepareRelayMessage, normalizeRelayCaptionEntities, isRelayCustomEmojiId, relayKeyboard, RELAY_WEBSITE, RELAY_DEFAULT_TARGET } = require(path.join(fixture, 'telegram-relay-content.js'));
+const { prepareRelayMessage, normalizeRelayCaptionEntities, inspectRelayDelivery, isRelayCustomEmojiId, relayKeyboard, RELAY_WEBSITE, RELAY_DEFAULT_TARGET } = require(path.join(fixture, 'telegram-relay-content.js'));
 const transport = require(path.join(fixture, 'telegram-bot.js'));
 const https = require('node:https');
 const now = 1_800_000_000_123;
@@ -190,6 +190,108 @@ test('literal web, Telegram, app and WhatsApp links are replaced while punctuati
   for (const fragment of ['brand.example', 'oldgroup', 'oldchannel', '6012345678', 'oldbot']) assert.equal(result.caption.includes(fragment), false);
 });
 
+test('clear bare contacts and additional URL schemes are rewritten with exact UTF-16 style offsets', () => {
+  const addresses = ['brand.com/join?code=1', '//brand.net/path', 'ftp://brand.example/file', 'ftps://brand.example/file',
+    'mailto:hello@brand.example', 'tel:+60123456789', 'hello@brand.example', '@BrandAgent'];
+  const caption = `🎁 ${addresses.join(' | ')} ✨ END`;
+  const result = prepare(message({ caption, caption_entities: [{type:'bold',offset:caption.indexOf('END'),length:3}] }));
+  assert.equal(result.caption, `🎁 ${addresses.map(() => RELAY_WEBSITE).join(' | ')} ✨ END`);
+  assert.deepEqual(result.captionEntities.find(entity => entity.type === 'bold'), {type:'bold',offset:result.caption.indexOf('END'),length:3});
+  assert.equal(result.captionEntities.filter(entity => entity.type === 'url').length, addresses.length);
+  assert.equal(result.caption.isWellFormed(), true);
+});
+
+test('ordinary sentences, decimals, filenames and custom artwork fallback are not interpreted as links', () => {
+  const caption = 'e.g. Version 1.2.3 costs 50.00. Read file.md.\nbrand.com @BrandAgent https://logo.example';
+  const offset = caption.indexOf('brand.com');
+  const custom = {type:'custom_emoji',offset,length:caption.length-offset,custom_emoji_id:'-1234567890123456789'};
+  const result = prepare(message({caption,caption_entities:[custom]}));
+  assert.equal(result.caption, caption);
+  assert.deepEqual(result.captionEntities, [custom]);
+  assert.equal(result.customEmojiLost, false);
+  const code = prepare(message({caption:'brand.com\n@BrandAgent',caption_entities:[{type:'pre',offset:0,length:21}]}));
+  assert.equal(code.caption, 'brand.com\n@BrandAgent');
+});
+
+test('authoritative source link entities override fallback artwork protection', () => {
+  const caption = 'brand.com';
+  const result = prepare(message({caption,caption_entities:[
+    {type:'custom_emoji',offset:0,length:caption.length,custom_emoji_id:'1234'},
+    {type:'url',offset:0,length:caption.length},
+  ]}));
+  assert.equal(result.caption, RELAY_WEBSITE);
+  assert.equal(result.customEmojiLost, true);
+});
+
+function delivery(caption, caption_entities = []) {
+  return {caption, caption_entities, reply_markup:{inline_keyboard:relayKeyboard()}};
+}
+
+test('delivery inspection verifies exact caption, original custom artwork, safe links and fixed buttons', () => {
+  const caption = `🎁 See ${RELAY_WEBSITE}`;
+  const entities = [
+    {type:'custom_emoji',offset:0,length:2,custom_emoji_id:'-9223372036854775808'},
+    {type:'bold',offset:3,length:3},
+    {type:'url',offset:7,length:RELAY_WEBSITE.length},
+  ];
+  assert.deepEqual(inspectRelayDelivery(caption, entities, delivery(caption, entities)), {
+    captionMatches:true,customEmojiPreserved:true,linksSafe:true,buttonsMatch:true,
+  });
+  assert.equal(inspectRelayDelivery(caption, entities, delivery(` ${caption}`, entities)).captionMatches, false);
+  assert.deepEqual(inspectRelayDelivery(caption, entities, null), {
+    captionMatches:false,customEmojiPreserved:false,linksSafe:false,buttonsMatch:false,
+  });
+});
+
+test('delivery custom artwork compares ID, position, length and multiplicity rather than counts alone', () => {
+  const caption = '🟦🟦';
+  const expected = [
+    {type:'custom_emoji',offset:0,length:2,custom_emoji_id:'9007199254740993123'},
+    {type:'custom_emoji',offset:2,length:2,custom_emoji_id:'-9007199254740993123'},
+  ];
+  assert.equal(inspectRelayDelivery(caption, expected, delivery(caption, expected.toReversed())).customEmojiPreserved, true);
+  for (const actual of [[], [expected[0], expected[0]], [expected[0], {...expected[1],custom_emoji_id:'123'}],
+    [{...expected[0],offset:2}, {...expected[1],offset:0}], [expected[0], {...expected[1],length:1}],
+    [expected[0], {...expected[1],custom_emoji_id:'9223372036854775808'}], [...expected, expected[0]]]) {
+    assert.equal(inspectRelayDelivery(caption, expected, delivery(caption, actual)).customEmojiPreserved, false);
+  }
+});
+
+test('delivery inspection rejects foreign clickable entities and naked contacts even without metadata', () => {
+  for (const [type, caption, fields] of [
+    ['url','https://old.example',{}], ['text_link','JOIN',{url:'https://old.example'}],
+    ['mention','@BrandAgent',{}], ['text_mention','Agent',{user:{id:123}}],
+    ['email','hello@brand.example',{}], ['phone_number','+60123456789',{}],
+  ]) assert.equal(inspectRelayDelivery(caption, [], delivery(caption, [{type,offset:0,length:caption.length,...fields}])).linksSafe, false);
+  for (const caption of ['brand.com', '@BrandAgent', 'hello@brand.example', 'ftp://brand.example/file', 'mailto:hello@brand.example', 'tel:+60123456789']) {
+    assert.equal(inspectRelayDelivery(caption, [], delivery(caption)).linksSafe, false, caption);
+  }
+  assert.equal(inspectRelayDelivery(RELAY_WEBSITE, [], delivery(RELAY_WEBSITE)).linksSafe, true);
+  assert.equal(inspectRelayDelivery('ok', [], {...delivery('ok'),caption_entities:{}}).linksSafe, false);
+  assert.equal(inspectRelayDelivery('ok', [], delivery('ok', [{type:'bold',offset:0,length:99}])).linksSafe, false);
+});
+
+test('delivery inspection preserves safe labels and does not mistake nonclickable logo fallback or code for links', () => {
+  for (const entity of [
+    {type:'text_link',offset:0,length:9,url:RELAY_WEBSITE},
+    {type:'custom_emoji',offset:0,length:9,custom_emoji_id:'1234'},
+    {type:'code',offset:0,length:9},
+  ]) assert.equal(inspectRelayDelivery('brand.com', [entity], delivery('brand.com', [entity])).linksSafe, true);
+  assert.equal(inspectRelayDelivery('brand.com', [], delivery('brand.com', [
+    {type:'custom_emoji',offset:0,length:9,custom_emoji_id:'1234'},
+    {type:'url',offset:0,length:9},
+  ])).linksSafe, false, 'actual clickable metadata is never masked by fallback protection');
+});
+
+test('delivery buttons reject reordered, extra, missing or foreign-action buttons', () => {
+  const variants = [relayKeyboard().reverse(), relayKeyboard().slice(0,2), [...relayKeyboard(),[{text:'extra',url:RELAY_WEBSITE}]],
+    [[{...relayKeyboard()[0][0],callback_data:'foreign'}],...relayKeyboard().slice(1)],
+    [[{...relayKeyboard()[0][0],url:'https://old.example'}],...relayKeyboard().slice(1)],
+    [[{...relayKeyboard()[0][0],text:'Visit website'}],...relayKeyboard().slice(1)]];
+  for (const inline_keyboard of variants) assert.equal(inspectRelayDelivery('ok', [], {...delivery('ok'),reply_markup:{inline_keyboard}}).buttonsMatch, false);
+  assert.equal(inspectRelayDelivery('ok', [], {...delivery('ok'),reply_markup:{inline_keyboard:relayKeyboard(),remove_keyboard:true}}).buttonsMatch, false);
+});
+
 test('hidden links preserve Chinese copy exactly and only replace the destination', () => {
   const caption = '点击这里报名';
   const result = prepare(message({ caption, caption_entities: [{ type: 'text_link', offset: 2, length: 2, url: 'https://brand.example' }] }));
@@ -280,6 +382,32 @@ test('video multipart transport keeps caption and fixed owner buttons on the upl
   assert.ok(calls[0].body.includes('sample-video'));
   assert.ok(calls[0].body.includes(JSON.stringify({ inline_keyboard: relayKeyboard() })));
   assert.ok(calls[0].body.includes(`Visit ${RELAY_WEBSITE}`));
+});
+
+test('caption correction sends the original custom entities and fixed buttons without uploading media or parse mode', async t => {
+  const calls = [];
+  const caption = `🟦 Visit ${RELAY_WEBSITE}`;
+  const caption_entities = [{type:'custom_emoji',offset:0,length:2,custom_emoji_id:'-9007199254740993123'},
+    {type:'url',offset:9,length:RELAY_WEBSITE.length}];
+  t.mock.method(https, 'request', (options, callback) => {
+    const response = new EventEmitter(); response.setEncoding = () => response;
+    const outgoing = new EventEmitter();
+    outgoing.end = body => {
+      calls.push({options,parameters:JSON.parse(body)}); callback(response);
+      queueMicrotask(() => { response.emit('data', JSON.stringify({ok:true,result:{message_id:25,...delivery(caption,caption_entities)}})); response.emit('end'); });
+    };
+    return outgoing;
+  });
+  const parameters = {chat_id:context.targetChatId,message_id:25,caption,caption_entities,reply_markup:{inline_keyboard:relayKeyboard()}};
+  const reply = await transport.telegramRequest('fixture-promotion-token', 'editMessageCaption', parameters);
+  assert.equal(reply.ok, true);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].options.path, '/botfixture-promotion-token/editMessageCaption');
+  assert.equal(calls[0].options.headers['Content-Type'], 'application/json');
+  assert.deepEqual(calls[0].parameters, parameters);
+  assert.equal('parse_mode' in calls[0].parameters, false);
+  assert.equal(['photo','animation','video','media'].some(key => key in calls[0].parameters), false);
+  assert.equal(inspectRelayDelivery(caption, caption_entities, reply.result).customEmojiPreserved, true);
 });
 
 

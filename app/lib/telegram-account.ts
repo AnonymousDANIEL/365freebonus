@@ -4,7 +4,7 @@ import { Api, Logger, TelegramClient, utils } from "teleproto";
 import { StringSession } from "teleproto/sessions";
 import bigInt from "big-integer";
 import { getSqlite } from "./sqlite";
-import { isRelayCustomEmojiId } from "./telegram-relay-content";
+import { inspectRelayDelivery, isRelayCustomEmojiId, normalizeRelayCaptionEntities, type RelayCaptionEntity } from "./telegram-relay-content";
 
 type Stage = "disconnected" | "code" | "password" | "connected";
 type AccountRow = {
@@ -425,8 +425,8 @@ export async function handleAccountAction(input: TelegramAccountAction) {
   finally { release(db, claim); await closeClient(client); }
 }
 
-function captionEntities(entities: Api.TypeMessageEntity[] | undefined) {
-  type CaptionEntity = { type: string; offset: number; length: number; custom_emoji_id?: string; language?: string; unix_time?: number; date_time_format?: string };
+function captionEntities(entities: Api.TypeMessageEntity[] | undefined, keepLinkUrls = false) {
+  type CaptionEntity = RelayCaptionEntity;
   const types: Record<string, string> = {
     MessageEntityUrl: "url", MessageEntityTextUrl: "text_link", MessageEntityMention: "mention",
     MessageEntityMentionName: "text_mention", InputMessageEntityMentionName: "text_mention",
@@ -448,6 +448,9 @@ function captionEntities(entities: Api.TypeMessageEntity[] | undefined) {
       try { id = entity.documentId?.toString() || ""; } catch { return []; }
       if (!isRelayCustomEmojiId(id)) return [];
       converted.custom_emoji_id = id;
+    } else if (entity.className === "MessageEntityTextUrl" && keepLinkUrls) {
+      if (typeof entity.url !== "string") return [];
+      converted.url = entity.url;
     } else if (entity.className === "MessageEntityPre") {
       if (typeof entity.language === "string" && entity.language.length <= 100) converted.language = entity.language;
     } else if (entity.className === "MessageEntityBlockquote") {
@@ -490,6 +493,139 @@ type SourceEmojiSample = {
   sourcesSampled: number; messagesSampled: number; customEmojiEntities: number;
   negativeCustomEmojiEntities: number; unrepresentableCustomEmojiEntities: number;
 };
+
+type RelayDeliverySample = {
+  state: SourceEmojiSample["state"];
+  sampledPosts: number; matchingCaptions: number; customEmojiPosts: number; preservedCustomEmojiPosts: number;
+  safeLinkPosts: number; matchingButtonPosts: number; invalidReferences: number;
+  personalEditQualification: "qualified" | "not_premium" | "not_channel_admin" | "unknown";
+};
+
+/** Read back only recently sent posts in the currently verified relay destination. */
+export async function inspectRecentRelayDeliveries(): Promise<RelayDeliverySample> {
+  const result: RelayDeliverySample = { state: "ok", sampledPosts: 0, matchingCaptions: 0,
+    customEmojiPosts: 0, preservedCustomEmojiPosts: 0, safeLinkPosts: 0, matchingButtonPosts: 0, invalidReferences: 0,
+    personalEditQualification: "unknown" };
+  const db = getSqlite(), current = row(db), now = Date.now();
+  if (current.stage !== "connected" || !current.session_ciphertext) return { ...result, state: "disconnected" };
+  if (current.lease_until > now) return { ...result, state: "busy" };
+  if (current.next_attempt_at > now) return { ...result, state: "backoff" };
+  const configuration = () => db.prepare(`SELECT relay_enabled,relay_chat_id,relay_revision,token_ciphertext
+    FROM telegram_promotion_settings WHERE id='primary'`).get() as {
+      relay_enabled: number; relay_chat_id: string; relay_revision: string; token_ciphertext: string;
+    } | undefined;
+  const runtime = () => db.prepare(`SELECT target_chat_id,target_verified_at,ready_until,revision,bot_id
+    FROM telegram_relay_state WHERE id='primary'`).get() as {
+      target_chat_id: number; target_verified_at: number; ready_until: number; revision: string; bot_id: number;
+    } | undefined;
+  const settings = configuration(), target = runtime();
+  // Do not pass arbitrary IDs, private links, paths or URLs to MTProto resolution.
+  const publicTarget = settings?.relay_chat_id.match(/^(?:@([A-Za-z][A-Za-z0-9_]{3,31})|https:\/\/t\.me\/([A-Za-z][A-Za-z0-9_]{3,31})\/?)$/);
+  const username = publicTarget?.[1] || publicTarget?.[2];
+  if (!settings || settings.relay_enabled !== 1 || !settings.relay_revision || !settings.token_ciphertext || !username
+    || !target || !Number.isSafeInteger(target.target_chat_id) || target.target_chat_id >= 0
+    || !Number.isSafeInteger(target.bot_id) || target.bot_id <= 0
+    || target.target_verified_at <= 0 || target.target_verified_at > now
+    || target.revision !== settings.relay_revision || target.ready_until <= now) return { ...result, state: "unavailable" };
+  type Reference = { id: number; message_id: number | null; caption: string; caption_entities: string };
+  const references = db.prepare(`SELECT id,
+    CASE WHEN typeof(message_id)='integer' AND message_id BETWEEN 1 AND 9007199254740991 THEN message_id ELSE NULL END AS message_id,
+    caption,caption_entities FROM telegram_relay_outbox WHERE status='sent' AND revision=?
+    AND typeof(sent_at)='integer' AND sent_at>=? AND sent_at<=? ORDER BY sent_at DESC,id DESC LIMIT 5`)
+    .all(settings.relay_revision, now - 24 * 60 * 60_000, now) as Reference[];
+  if (!references.length) return result;
+  const expected = new Map<number, { caption: string; entities: RelayCaptionEntity[] }>();
+  for (const reference of references) {
+    try {
+      const parsed: unknown = JSON.parse(reference.caption_entities);
+      const entities = normalizeRelayCaptionEntities(reference.caption, parsed);
+      if (!Number.isSafeInteger(reference.message_id) || Number(reference.message_id) <= 0 || expected.has(Number(reference.message_id))
+        || typeof reference.caption !== "string" || !reference.caption.trim() || reference.caption.length > 1024
+        || !Array.isArray(parsed) || entities.length !== parsed.length) { result.invalidReferences++; continue; }
+      expected.set(Number(reference.message_id), { caption: reference.caption, entities });
+    } catch { result.invalidReferences++; }
+  }
+  if (!expected.size) return result;
+  let claim: Claim;
+  try { claim = claimAccount(db, Date.now(), { connected: true, respectBackoff: true }); }
+  catch (error) {
+    const state = error instanceof TelegramAccountError && error.status === 429 ? "backoff"
+      : error instanceof TelegramAccountError && error.message === BUSY_ERROR ? "busy"
+      : error instanceof TelegramAccountError && error.message === REAUTH_ERROR ? "disconnected" : "unavailable";
+    return { ...result, state };
+  }
+  const deadline = Date.now() + 40_000;
+  const remaining = () => Math.max(1, Math.min(REQUEST_MS, deadline - Date.now()));
+  const allowed = () => {
+    const latest = configuration(), latestTarget = runtime(), account = row(db);
+    return Date.now() < deadline && owns(db, claim) && account.stage === "connected"
+      && account.config_ciphertext === current.config_ciphertext && account.session_ciphertext === current.session_ciphertext
+      && latest?.relay_enabled === 1 && latest.relay_chat_id === settings.relay_chat_id
+      && latest.relay_revision === settings.relay_revision && latest.token_ciphertext === settings.token_ciphertext
+      && latestTarget?.target_chat_id === target.target_chat_id && latestTarget.bot_id === target.bot_id
+      && latestTarget.target_verified_at > 0 && latestTarget.target_verified_at <= Date.now()
+      && latestTarget.revision === settings.relay_revision && latestTarget.ready_until > Date.now();
+  };
+  let client: TelegramClient | undefined;
+  try {
+    if (!allowed()) return { ...result, state: "unavailable" };
+    client = makeClient(unseal<Credentials>(claim.row.config_ciphertext), unseal<string>(claim.row.session_ciphertext));
+    await bounded(client, client.connect(), remaining());
+    if (!allowed()) return { ...result, state: "unavailable" };
+    renew(db, claim);
+    const entity = await bounded(client, client.getEntity(`@${username}`), remaining());
+    if (!allowed() || !(entity instanceof Api.Channel)
+      || entity.min || Number(utils.getPeerId(entity)) !== target.target_chat_id) return { ...result, state: "unavailable" };
+    renew(db, claim);
+    // Qualification is evidence only; this function never edits a post.
+    if (entity instanceof Api.Channel && entity.broadcast) {
+      if (entity.creator === true || entity.adminRights?.editMessages === true) {
+        const me = await bounded(client, client.getMe(), remaining());
+        if (!allowed()) return { ...result, state: "unavailable" };
+        renew(db, claim);
+        if (me instanceof Api.User && !me.bot && !me.deleted && !me.min) result.personalEditQualification = me.premium === true ? "qualified" : "not_premium";
+      } else result.personalEditQualification = "not_channel_admin";
+    }
+    if (!allowed()) return { ...result, state: "unavailable" };
+    const messages = await bounded(client, client.getMessages(entity, { ids: [...expected.keys()], limit: 5 }), remaining());
+    if (!allowed()) return { ...result, state: "unavailable" };
+    renew(db, claim);
+    const received = new Set<number>();
+    for (const message of messages) {
+      if (!(message instanceof Api.Message) || !Number.isSafeInteger(message.id) || !expected.has(message.id)
+        || received.has(message.id)) { result.invalidReferences++; continue; }
+      received.add(message.id);
+      if (!message.peerId || Number(utils.getPeerId(message.peerId)) !== target.target_chat_id
+        || !Number.isSafeInteger(message.date) || message.date * 1000 < now - 24 * 60 * 60_000
+        || message.date * 1000 > Date.now() + 1000) { result.invalidReferences++; continue; }
+      const reference = expected.get(message.id)!;
+      const actualEntities = captionEntities(message.entities, true);
+      if (actualEntities.length !== (message.entities || []).length) { result.invalidReferences++; continue; }
+      const markup = message.replyMarkup instanceof Api.ReplyInlineMarkup ? { inline_keyboard: message.replyMarkup.rows.map(buttonRow => buttonRow.buttons.map(button =>
+        button.type instanceof Api.InlineButtonTypeUrl ? { text: button.text, url: button.type.url } : { text: button.text, unsupported: true })) } : undefined;
+      const inspected = inspectRelayDelivery(reference.caption, reference.entities,
+        { caption: message.message, caption_entities: actualEntities, reply_markup: markup });
+      result.sampledPosts++;
+      if (inspected.captionMatches) result.matchingCaptions++;
+      if (reference.entities.some(value => value.type === "custom_emoji")) {
+        result.customEmojiPosts++;
+        if (inspected.customEmojiPreserved) result.preservedCustomEmojiPosts++;
+      }
+      if (inspected.linksSafe) result.safeLinkPosts++;
+      if (inspected.buttonsMatch) result.matchingButtonPosts++;
+    }
+    result.invalidReferences += [...expected.keys()].filter(id => !received.has(id)).length;
+    return allowed() ? result : { ...result, state: "unavailable" };
+  } catch (error) {
+    // Honor only a genuine Telegram FloodWait. Diagnostics never revoke
+    // credentials, save sessions, touch queues or advance source cursors.
+    if (allowed() && safeError(error).status === 429 && failureCategory(error) === "telegram-rate-limit") {
+      recordFailure(db, claim, error, "relay-delivery-audit");
+      return { ...result, state: "backoff" };
+    }
+    return { ...result, state: "unavailable" };
+  } finally { release(db, claim); await closeClient(client); }
+}
 
 type ConnectedBotEmojiQualification = {
   state: SourceEmojiSample["state"];

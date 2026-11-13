@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { getSqlite } from "./sqlite";
 import { telegramRelayUpdates, telegramRequest } from "./telegram-bot";
-import { normalizeRelayCaptionEntities, prepareRelayMessage, relayKeyboard, type RelayCaptionEntity } from "./telegram-relay-content";
+import { inspectRelayDelivery, normalizeRelayCaptionEntities, prepareRelayMessage, relayKeyboard, type RelayCaptionEntity } from "./telegram-relay-content";
 import { downloadBotRelayMedia, relayMediaIdentity, relayMediaMaxBytes } from "./telegram-relay-media";
 
 type DecryptToken = (ciphertext: string) => string;
@@ -19,8 +19,11 @@ type RelayJob = {
   has_spoiler: number; attempts: number; lease_id: string; lease_until: number;
   origin: string; account_generation: string; queued_at: number; media_bytes: Uint8Array | null;
   content_hash: string; visual_hash: string; media_prepared: number; mime_type: string; caption_entities: string;
+  message_id: number | null; sent_at: number | null; last_error: string;
+  caption_edit_attempted_at: number; caption_edit_outcome: string;
 };
 type SendClaim = { settings: RelaySettings; targetChatId: number; job: RelayJob };
+type CaptionEditClaim = SendClaim;
 const LEASE_MS = 60_000;
 const VERIFY_MS = 60_000;
 const POLL_MS = 1_000;
@@ -41,6 +44,15 @@ const CUSTOM_EMOJI_ERROR = "Telegram 拒绝发送含自定义 Emoji 的消息。
 const CUSTOM_EMOJI_CHANGED_ERROR = "Telegram 未保留部分原始自定义 Emoji，请检查机器人的自定义 Emoji 使用权限。该消息不会自动重发。";
 const CAPTION_CHANGED_ERROR = "Telegram 返回的文案与提交原文不一致，请检查原消息格式。该消息不会自动重发。";
 const CUSTOM_EMOJI_DROPPED_ERROR = "原始自定义 Emoji 资料未能完整保留，已停止发送，避免表情变样。";
+const CAPTION_LINKS_CHANGED_ERROR = "Telegram 返回的文案链接与本站入口不一致，将尝试补正原消息；不会重复发送媒体。";
+const CAPTION_BUTTONS_CHANGED_ERROR = "Telegram 返回的按钮与固定入口不一致，将尝试补正原消息；不会重复发送媒体。";
+const CAPTION_REPLY_TARGET_ERROR = "Telegram 返回的消息目标未能确认，已停止自动补正；该消息不会重复发送。";
+const CAPTION_EDIT_REJECTED_ERROR = "Telegram 拒绝补正文案或按钮，请检查机器人权限及原消息格式；不会重复发送媒体。";
+const CAPTION_EDIT_UNCERTAIN_ERROR = "Telegram 未确认文案补正结果，已停止自动重试；不会重复发送媒体。";
+const CAPTION_EDIT_INVALID_ERROR = "原消息身份、设置或来源已改变，已停止自动补正文案；不会重复发送媒体。";
+const CAPTION_UNSAFE_LINKS_ERROR = "保存的转发文案仍含未替换链接，已停止发送或编辑，避免保留外部入口。";
+const REPAIRABLE_CAPTION_ERRORS = [CAPTION_CHANGED_ERROR, CUSTOM_EMOJI_CHANGED_ERROR, CAPTION_LINKS_CHANGED_ERROR, CAPTION_BUTTONS_CHANGED_ERROR];
+const CAPTION_EDIT_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 function transaction<T>(db: DatabaseSync, work: () => T): T {
   db.exec("BEGIN IMMEDIATE");
@@ -370,13 +382,117 @@ function storedCaptionEntities(job: RelayJob): RelayCaptionEntity[] | null {
     return entities.length === parsed.length ? entities : null;
   } catch { return null; }
 }
-function preservedCustomEmoji(expected: RelayCaptionEntity[], actual: unknown): boolean {
-  const custom = expected.filter(entity => entity.type === "custom_emoji");
-  if (!custom.length) return true;
-  if (!Array.isArray(actual)) return false;
-  return custom.every(entity => actual.some(candidate => candidate && typeof candidate === "object"
-    && candidate.type === "custom_emoji" && candidate.custom_emoji_id === entity.custom_emoji_id
-    && candidate.offset === entity.offset && candidate.length === entity.length));
+function deliveryWarning(caption: string, entities: RelayCaptionEntity[], actual: unknown): string {
+  const inspected = inspectRelayDelivery(caption, entities, actual);
+  return !inspected.captionMatches ? CAPTION_CHANGED_ERROR
+    : !inspected.customEmojiPreserved ? CUSTOM_EMOJI_CHANGED_ERROR
+    : !inspected.linksSafe ? CAPTION_LINKS_CHANGED_ERROR
+    : !inspected.buttonsMatch ? CAPTION_BUTTONS_CHANGED_ERROR : "";
+}
+function messageIdentityMatches(actual: Record<string, unknown>, targetChatId: number, messageId?: number | null): boolean {
+  const chat = actual.chat;
+  return typeof actual.message_id === "number" && Number.isSafeInteger(actual.message_id) && actual.message_id > 0
+    && (messageId === undefined || actual.message_id === messageId)
+    && chat !== null && typeof chat === "object" && !Array.isArray(chat) && (chat as Record<string, unknown>).id === targetChatId;
+}
+function ownsCaptionEdit(db: DatabaseSync, claim: CaptionEditClaim, now: number): boolean {
+  return Boolean(db.prepare(`SELECT 1 FROM telegram_relay_outbox WHERE id=? AND status='sent' AND message_id=?
+    AND caption_edit_attempted_at>0 AND caption_edit_outcome='attempting' AND lease_id=? AND lease_until>?
+    AND EXISTS(SELECT 1 FROM telegram_relay_state WHERE id='primary' AND send_lease_id=? AND send_lease_until>?)`)
+    .get(claim.job.id, claim.job.message_id, claim.job.lease_id, now, claim.job.lease_id, now));
+}
+function captionEditAllowed(db: DatabaseSync, claim: CaptionEditClaim, now: number): boolean {
+  const current = settings(db), runtime = state(db);
+  return enabled(current) && current.relay_revision === claim.settings.relay_revision
+    && current.relay_chat_id === claim.settings.relay_chat_id && current.token_ciphertext === claim.settings.token_ciphertext
+    && runtime.revision === current.relay_revision && runtime.ready_until > now && runtime.target_chat_id === claim.targetChatId
+    && claim.job.revision === current.relay_revision && claim.job.source_chat_id !== claim.targetChatId
+    && ownsCaptionEdit(db, claim, now)
+    && (claim.job.origin !== "account" || accountAllowed(db, claim.job.source_chat_id, claim.job.account_generation, claim.job.queued_at));
+}
+function auditCaptionEdit(outcome: "preserved" | "changed" | "rejected" | "uncertain" | "invalid", expected: RelayCaptionEntity[], actual?: unknown, caption = "") {
+  const inspected = actual ? inspectRelayDelivery(caption, expected, actual) : null;
+  console.info("Telegram relay caption edit check.", JSON.stringify({ outcome,
+    expectedCustomEmoji: expected.filter(entity => entity.type === "custom_emoji").length,
+    returnedCustomEmoji: actual && typeof actual === "object" && Array.isArray((actual as Record<string, unknown>).caption_entities)
+      ? ((actual as Record<string, unknown>).caption_entities as Record<string, unknown>[]).filter(entity => entity?.type === "custom_emoji").length : 0,
+    captionMatches: inspected?.captionMatches ?? false, customEmojiPreserved: inspected?.customEmojiPreserved ?? false,
+    linksSafe: inspected?.linksSafe ?? false, buttonsMatch: inspected?.buttonsMatch ?? false,
+  }));
+}
+/** A delivered message is edited at most once; media is never sent again. */
+async function repairTelegramRelayCaptionOnce(token: string, identity: number, snapshot: RelaySettings, clock: () => number): Promise<boolean> {
+  const db = getSqlite();
+  const claim = transaction(db, () => {
+    const current = settings(db);
+    if (!enabled(current) || current.token_ciphertext !== snapshot.token_ciphertext) return null;
+    const runtime = synchronize(db, current, identity), now = clock();
+    db.prepare(`UPDATE telegram_relay_outbox SET caption_edit_outcome='uncertain',last_error=?,lease_id='',lease_until=0
+      WHERE status='sent' AND caption_edit_outcome='attempting' AND lease_until<=?`).run(CAPTION_EDIT_UNCERTAIN_ERROR, now);
+    if (runtime.ready_until <= now || runtime.target_chat_id >= 0 || runtime.send_lease_until > now || runtime.next_send_at > now) return null;
+    const placeholders = REPAIRABLE_CAPTION_ERRORS.map(() => "?").join(",");
+    const job = db.prepare(`SELECT * FROM telegram_relay_outbox WHERE status='sent' AND revision=?
+      AND message_id>0 AND sent_at>=? AND sent_at<=? AND caption_edit_attempted_at=0 AND last_error IN (${placeholders})
+      ORDER BY sent_at DESC,id DESC LIMIT 1`).get(current.relay_revision, now - CAPTION_EDIT_WINDOW_MS, now, ...REPAIRABLE_CAPTION_ERRORS) as RelayJob | undefined;
+    if (!job) return null;
+    const entities = storedCaptionEntities(job);
+    const preparedSafe = entities && inspectRelayDelivery(job.caption, entities,
+      { caption: job.caption, caption_entities: entities, reply_markup: { inline_keyboard: relayKeyboard() } }).linksSafe;
+    if (!Number.isSafeInteger(job.message_id) || Number(job.message_id) <= 0
+      || job.source_chat_id === runtime.target_chat_id || !entities || job.caption.length > 1024
+      || !preparedSafe
+      || (job.origin === "account" && !accountAllowed(db, job.source_chat_id, job.account_generation, job.queued_at))) {
+      db.prepare(`UPDATE telegram_relay_outbox SET caption_edit_attempted_at=?,caption_edit_outcome='invalid',last_error=? WHERE id=? AND caption_edit_attempted_at=0`)
+        .run(now, !entities ? !job.caption_entities ? LEGACY_CAPTION_ERROR : CAPTION_DATA_ERROR
+          : !preparedSafe ? CAPTION_UNSAFE_LINKS_ERROR : CAPTION_EDIT_INVALID_ERROR, job.id);
+      return { invalid: true as const, entities: entities || [] };
+    }
+    const leaseId = randomUUID();
+    db.prepare("UPDATE telegram_relay_state SET send_lease_id=?,send_lease_until=?,next_send_at=? WHERE id='primary'")
+      .run(leaseId, now + LEASE_MS, now + SEND_MS);
+    db.prepare(`UPDATE telegram_relay_outbox SET caption_edit_attempted_at=?,caption_edit_outcome='attempting',lease_id=?,lease_until=?
+      WHERE id=? AND status='sent' AND caption_edit_attempted_at=0`).run(now, leaseId, now + LEASE_MS, job.id);
+    return { settings: current, targetChatId: runtime.target_chat_id, entities,
+      job: { ...job, caption_edit_attempted_at: now, caption_edit_outcome: "attempting", lease_id: leaseId, lease_until: now + LEASE_MS } };
+  });
+  if (!claim) return false;
+  if ("invalid" in claim) { auditCaptionEdit("invalid", claim.entities); return true; }
+  if (!captionEditAllowed(db, claim, clock())) {
+    transaction(db, () => {
+      if (ownsCaptionEdit(db, claim, clock())) db.prepare(`UPDATE telegram_relay_outbox SET caption_edit_outcome='invalid',last_error=?,lease_id='',lease_until=0
+        WHERE id=? AND lease_id=?`).run(CAPTION_EDIT_INVALID_ERROR, claim.job.id, claim.job.lease_id);
+      db.prepare("UPDATE telegram_relay_state SET send_lease_id='',send_lease_until=0 WHERE id='primary' AND send_lease_id=?").run(claim.job.lease_id);
+    });
+    auditCaptionEdit("invalid", claim.entities); return true;
+  }
+  const reply = await telegramRequest(token, "editMessageCaption", { chat_id: claim.targetChatId, message_id: claim.job.message_id,
+    caption: claim.job.caption, caption_entities: claim.entities, reply_markup: { inline_keyboard: relayKeyboard() } }).catch(() => null);
+  let outcome: "preserved" | "changed" | "rejected" | "uncertain" | "invalid" = "uncertain";
+  transaction(db, () => {
+    const now = clock();
+    if (!ownsCaptionEdit(db, claim, now)) return;
+    let error = CAPTION_EDIT_UNCERTAIN_ERROR, nextSend = now + SEND_MS;
+    if (!captionEditAllowed(db, claim, now)) { outcome = "uncertain"; error = CAPTION_EDIT_INVALID_ERROR; }
+    else if (reply?.ok) {
+      if (!messageIdentityMatches(reply.result, claim.targetChatId, claim.job.message_id)) { outcome = "invalid"; error = CAPTION_EDIT_INVALID_ERROR; }
+      else { error = deliveryWarning(claim.job.caption, claim.entities, reply.result); outcome = error ? "changed" : "preserved"; }
+    } else if (reply && !reply.ok && reply.code >= 400 && reply.code < 500) {
+      outcome = "rejected"; error = CAPTION_EDIT_REJECTED_ERROR;
+      if (reply.code === 429) nextSend = Math.min(Number.MAX_SAFE_INTEGER, now + Math.max(SEND_MS, reply.retryAfter * 1000));
+      if (reply.code === 401 || reply.code === 403) {
+        const accessError = reply.code === 401 ? TOKEN_ERROR : TARGET_ERROR;
+        nextSend = now + VERIFY_MS;
+        db.prepare(`UPDATE telegram_relay_state SET ready_until=0,next_poll_at=MAX(next_poll_at,?),last_error=?
+          WHERE id='primary' AND send_lease_id=?`).run(nextSend, accessError, claim.job.lease_id);
+      }
+    }
+    db.prepare(`UPDATE telegram_relay_outbox SET caption_edit_outcome=?,last_error=?,lease_id='',lease_until=0 WHERE id=? AND lease_id=?`)
+      .run(outcome, error, claim.job.id, claim.job.lease_id);
+    db.prepare("UPDATE telegram_relay_state SET send_lease_id='',send_lease_until=0,next_send_at=MAX(next_send_at,?) WHERE id='primary' AND send_lease_id=?")
+      .run(nextSend, claim.job.lease_id);
+  });
+  auditCaptionEdit(outcome, claim.entities, reply?.ok ? reply.result : undefined, claim.job.caption);
+  return true;
 }
 let successfulEmojiAuditBudget = 5;
 function auditEmojiDelivery(expected: RelayCaptionEntity[], actual: unknown, outcome: "preserved" | "changed" | "rejected" | "uncertain") {
@@ -400,6 +516,7 @@ export async function deliverTelegramRelayOnce(decryptToken: DecryptToken, clock
   try { token = decryptToken(snapshot.token_ciphertext); } catch { /* Keep credentials private. */ }
   const identity = botId(token);
   if (!token || !identity) return;
+  if (await repairTelegramRelayCaptionOnce(token, identity, snapshot, clock)) return;
   const claim = transaction(db, () => {
     const current = settings(db);
     if (!enabled(current) || current.token_ciphertext !== snapshot.token_ciphertext) return null;
@@ -429,9 +546,12 @@ export async function deliverTelegramRelayOnce(decryptToken: DecryptToken, clock
   });
   if (!claim) return;
   const captionEntities = storedCaptionEntities(claim.job);
-  if (!captionEntities || claim.job.caption.length > 1024) {
+  const preparedSafe = captionEntities && inspectRelayDelivery(claim.job.caption, captionEntities,
+    { caption: claim.job.caption, caption_entities: captionEntities, reply_markup: { inline_keyboard: relayKeyboard() } }).linksSafe;
+  if (!captionEntities || claim.job.caption.length > 1024 || !preparedSafe) {
     transaction(db, () => {
-      const error = claim.job.caption.length > 1024 ? CAPTION_LIMIT_ERROR : !claim.job.caption_entities ? LEGACY_CAPTION_ERROR : CAPTION_DATA_ERROR;
+      const error = claim.job.caption.length > 1024 ? CAPTION_LIMIT_ERROR : !claim.job.caption_entities ? LEGACY_CAPTION_ERROR
+        : !captionEntities ? CAPTION_DATA_ERROR : CAPTION_UNSAFE_LINKS_ERROR;
       if (ownsSend(db, claim, clock())) db.prepare("UPDATE telegram_relay_outbox SET status='failed',last_error=?,media_bytes=NULL,lease_id='',lease_until=0 WHERE id=? AND lease_id=?")
         .run(error, claim.job.id, claim.job.lease_id);
       db.prepare("UPDATE telegram_relay_state SET send_lease_id='',send_lease_until=0 WHERE id='primary' AND send_lease_id=?").run(claim.job.lease_id);
@@ -506,8 +626,8 @@ export async function deliverTelegramRelayOnce(decryptToken: DecryptToken, clock
     const owned = ownsSend(db, claim, now);
     if (owned) {
       if (reply?.ok && typeof reply.result.message_id === "number" && Number.isSafeInteger(reply.result.message_id) && reply.result.message_id > 0) {
-        const warning = typeof reply.result.caption === "string" && reply.result.caption !== claim.job.caption ? CAPTION_CHANGED_ERROR
-          : preservedCustomEmoji(captionEntities, reply.result.caption_entities) ? "" : CUSTOM_EMOJI_CHANGED_ERROR;
+        const warning = messageIdentityMatches(reply.result, claim.targetChatId)
+          ? deliveryWarning(claim.job.caption, captionEntities, reply.result) : CAPTION_REPLY_TARGET_ERROR;
         auditEmojiDelivery(captionEntities, reply.result.caption_entities, warning ? "changed" : "preserved");
         db.prepare("UPDATE telegram_relay_outbox SET status='sent',sent_at=?,message_id=?,last_error=?,lease_id='',lease_until=0 WHERE id=? AND lease_id=?")
           .run(now, reply.result.message_id, warning, claim.job.id, claim.job.lease_id);
@@ -549,7 +669,7 @@ export function startTelegramRelayWorker(decryptToken: DecryptToken) {
       const { relayFormattingDiagnostics } = await import("./telegram-relay-diagnostics");
       console.info("Telegram relay formatting audit.", JSON.stringify(relayFormattingDiagnostics(getSqlite(), Date.now(), Date.parse("2026-11-13T11:48:35Z"))));
       if (settings(getSqlite())?.relay_enabled !== 1) return;
-      const { sampleSelectedSourceEmoji, inspectConnectedBotEmojiQualification } = await import("./telegram-account");
+      const { sampleSelectedSourceEmoji, inspectConnectedBotEmojiQualification, inspectRecentRelayDeliveries } = await import("./telegram-account");
       for (let attempt = 0; attempt < 6; attempt++) {
         const sample = await sampleSelectedSourceEmoji();
         if (sample.state !== "busy" || attempt === 5) {
@@ -573,6 +693,20 @@ export function startTelegramRelayWorker(decryptToken: DecryptToken) {
         const qualification = await inspectConnectedBotEmojiQualification();
         if (qualification.state !== "busy" || attempt === 5) {
           console.info("Telegram relay emoji qualification audit.", JSON.stringify({ ...qualification, targetKind }));
+          break;
+        }
+        await new Promise(resolve => setTimeout(resolve, 5_000));
+      }
+      await new Promise(resolve => setTimeout(resolve, 15_000));
+      for (let attempt = 0; attempt < 6; attempt++) {
+        const readback = await inspectRecentRelayDeliveries();
+        if (readback.state !== "busy" || attempt === 5) {
+          console.info("Telegram relay delivery readback audit.", JSON.stringify({ state: readback.state,
+            sampledPosts: readback.sampledPosts, matchingCaptions: readback.matchingCaptions,
+            customEmojiPosts: readback.customEmojiPosts, preservedCustomEmojiPosts: readback.preservedCustomEmojiPosts, safeLinkPosts: readback.safeLinkPosts,
+            matchingButtonPosts: readback.matchingButtonPosts, invalidReferences: readback.invalidReferences,
+            personalEditQualification: readback.personalEditQualification,
+          }));
           break;
         }
         await new Promise(resolve => setTimeout(resolve, 5_000));

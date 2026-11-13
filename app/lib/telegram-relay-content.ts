@@ -74,7 +74,12 @@ const styleTypes = new Set(["bold", "italic", "underline", "strikethrough", "spo
 const quoteTypes = new Set(["blockquote", "expandable_blockquote"]);
 const preservedTypes = new Set([...styleTypes, ...quoteTypes, "code", "pre", "custom_emoji", "date_time", "hashtag", "cashtag", "bot_command"]);
 const atomicTypes = new Set(["custom_emoji", "date_time", "hashtag", "cashtag", "bot_command"]);
-const literalUrlPattern = /\b(?:https?:\/\/|tg:\/\/|www\.|t\.me\/|telegram\.me\/|wa\.me\/)[^\s<>"'\u0000-\u001f\p{Extended_Pictographic}\p{Regional_Indicator}\p{Emoji_Modifier}\uFE0F\u200D\u20E3]+/giu;
+const literalUrlPattern = /\b(?:https?:\/\/|ftps?:\/\/|tg:\/\/|mailto:|tel:|www\.|t\.me\/|telegram\.me\/|wa\.me\/)[^\s<>"'\u0000-\u001f\p{Extended_Pictographic}\p{Regional_Indicator}\p{Emoji_Modifier}\uFE0F\u200D\u20E3]+/giu;
+// Source entities remain authoritative. These conservative fallbacks cover
+// clear addresses when Telegram supplies no clickable-entity metadata.
+const bareDomainPattern = /(?<![\p{L}\p{N}_@./-])(?:\/\/)?(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:com|net|org|info|biz|xyz|online|site|app|io|co|me|my|sg|uk|au|us|ca|hk|tw|cn|id|th|vn|ph|in|example)(?![a-z0-9_-])(?::\d{1,5})?(?:[/?#][^\s<>"'\u0000-\u001f\p{Extended_Pictographic}\p{Regional_Indicator}\p{Emoji_Modifier}\uFE0F\u200D\u20E3]*)?/giu;
+const bareEmailPattern = /(?<![\p{L}\p{N}_.+@-])[a-z0-9][a-z0-9.!#$%&'*+/=?^_`{|}~-]*@[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+/giu;
+const bareMentionPattern = /(?<![\p{L}\p{N}_@])@[a-z][a-z0-9_]{4,31}(?![a-z0-9_])/giu;
 const punctuationTail = /[.,!?;:)\]}\u3002\uff0c\uff01\uff1f\uff1b\uff1a\uff09\u3001\u300b\u300d]+$/;
 
 function entitySpan(caption: string, value: Record<string, unknown>): Span | null {
@@ -108,6 +113,18 @@ function preservedEntity(caption: string, value: Record<string, unknown>): Relay
 }
 
 function overlaps(a: Span, b: Span) { return a.start < b.end && b.start < a.end; }
+
+function directLinkSpans(caption: string, protectedSpans: Span[] = []): Span[] {
+  const spans: Span[] = [];
+  for (const pattern of [literalUrlPattern, bareEmailPattern, bareDomainPattern, bareMentionPattern]) {
+    for (const match of caption.matchAll(pattern)) {
+      const tail = punctuationTail.exec(match[0])?.[0] || "";
+      const span = { start: match.index, end: match.index + match[0].length - tail.length };
+      if (span.end > span.start && !protectedSpans.some(other => overlaps(other, span)) && !spans.some(other => overlaps(other, span))) spans.push(span);
+    }
+  }
+  return spans.sort((a, b) => a.start - b.start);
+}
 function canNest(a: RelayCaptionEntity, b: RelayCaptionEntity): boolean {
   if ([a.type, b.type].some(type => type === "pre" || type === "code")) return false;
   if (quoteTypes.has(a.type) && quoteTypes.has(b.type)) return false;
@@ -161,6 +178,60 @@ export function normalizeRelayCaptionEntities(caption: string, values: unknown):
   return safeEntities(caption, normalized);
 }
 
+export type RelayDeliveryInspection = {
+  captionMatches: boolean;
+  customEmojiPreserved: boolean;
+  linksSafe: boolean;
+  buttonsMatch: boolean;
+};
+
+/** Inspect Telegram's actual reply, rather than trusting a successful HTTP call. */
+export function inspectRelayDelivery(caption: string, expected: RelayCaptionEntity[], actual: unknown): RelayDeliveryInspection {
+  const message = record(actual);
+  const returnedCaption = typeof message?.caption === "string" ? message.caption : null;
+  const raw = message?.caption_entities;
+  const validList = raw === undefined || Array.isArray(raw) && raw.length <= 1024;
+  const entities = Array.isArray(raw) ? raw.slice(0, 1024) : [];
+  let linksSafe = returnedCaption !== null && validList;
+  let actualCustomValid = validList;
+  const protectedSpans: Span[] = [];
+  const actualCustom: string[] = [];
+  for (const value of entities) {
+    const entity = record(value);
+    const span = entity && returnedCaption !== null ? entitySpan(returnedCaption, entity) : null;
+    if (!entity || !span || typeof entity.type !== "string") { linksSafe = false; actualCustomValid = false; continue; }
+    if (entity.type === "custom_emoji") {
+      if (!isRelayCustomEmojiId(entity.custom_emoji_id)) { actualCustomValid = false; linksSafe = false; }
+      else { actualCustom.push(JSON.stringify([entity.offset, entity.length, entity.custom_emoji_id])); protectedSpans.push(span); }
+    } else if (entity.type === "url") {
+      if (returnedCaption!.slice(span.start, span.end) !== RELAY_WEBSITE || entity.url !== undefined && entity.url !== RELAY_WEBSITE) linksSafe = false;
+    } else if (entity.type === "text_link") {
+      if (entity.url !== RELAY_WEBSITE) linksSafe = false;
+      else protectedSpans.push(span);
+    } else if (linkTypes.has(entity.type) || !preservedEntity(returnedCaption!, entity)) linksSafe = false;
+    else if (entity.type === "code" || entity.type === "pre") protectedSpans.push(span);
+  }
+  if (returnedCaption !== null && directLinkSpans(returnedCaption, protectedSpans).some(span => returnedCaption.slice(span.start, span.end) !== RELAY_WEBSITE)) linksSafe = false;
+  const expectedCustom = expected.filter(entity => entity.type === "custom_emoji");
+  const expectedCustomValid = expectedCustom.every(entity => !!entitySpan(caption, entity) && isRelayCustomEmojiId(entity.custom_emoji_id));
+  const expectedKeys = expectedCustom.map(entity => JSON.stringify([entity.offset, entity.length, entity.custom_emoji_id])).sort();
+  const actualKeys = actualCustom.sort();
+  const markup = record(message?.reply_markup);
+  const rows = markup?.inline_keyboard;
+  const keyboard = relayKeyboard();
+  const buttonsMatch = !!markup && Object.keys(markup).length === 1 && Array.isArray(rows) && rows.length === keyboard.length
+    && keyboard.every((row, index) => Array.isArray(rows[index]) && rows[index].length === row.length && row.every((button, buttonIndex) => {
+      const actualButton = record(rows[index][buttonIndex]);
+      return !!actualButton && Object.keys(actualButton).length === 2 && actualButton.text === button.text && actualButton.url === button.url;
+    }));
+  return {
+    captionMatches: returnedCaption === caption,
+    customEmojiPreserved: returnedCaption !== null && expectedCustomValid && actualCustomValid && JSON.stringify(expectedKeys) === JSON.stringify(actualKeys),
+    linksSafe,
+    buttonsMatch,
+  };
+}
+
 function rewriteCaption(caption: string, rawEntities: unknown): { caption: string; entities: RelayCaptionEntity[]; truncated: boolean } {
   const links: Span[] = [];
   const preserved: RelayCaptionEntity[] = [];
@@ -185,10 +256,10 @@ function rewriteCaption(caption: string, rawEntities: unknown): { caption: strin
   // Explicit URL entities define the clickable boundary, so adjacent original
   // text and emoji need no inserted separator spaces.
   const edits: CaptionEdit[] = merged.map(span => ({ ...span, replacement: RELAY_WEBSITE, prefix: 0, suffix: 0 }));
-  for (const match of caption.matchAll(literalUrlPattern)) {
-    const tail = punctuationTail.exec(match[0])?.[0] || "";
-    const span = { start: match.index, end: match.index + match[0].length - tail.length };
-    if (span.end > span.start && !merged.some(link => overlaps(link, span))) edits.push({ ...span, replacement: RELAY_WEBSITE, prefix: 0, suffix: 0 });
+  const protectedSpans = preserved.filter(entity => ["custom_emoji", "text_link", "code", "pre"].includes(entity.type))
+    .map(entity => ({ start: entity.offset, end: entity.offset + entity.length }));
+  for (const span of directLinkSpans(caption, protectedSpans)) {
+    if (!merged.some(link => overlaps(link, span))) edits.push({ ...span, replacement: RELAY_WEBSITE, prefix: 0, suffix: 0 });
   }
   edits.sort((a, b) => a.start - b.start);
   let rewritten = "", cursor = 0;
