@@ -140,7 +140,7 @@ test('migrations preserve brand data and existing expiry without creating Telegr
       process.env.DATA_DIR = legacyPath;
       const saved = await repository.readDirectory(true, now);
       const upgraded = sqlite.getSqlite();
-      assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version, 17);
+      assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version, 18);
       assert.equal(upgraded.prepare('SELECT COUNT(*) AS count FROM telegram_promotion_outbox').get().count, version >= 5 ? 1 : 0);
       assert.equal(upgraded.prepare('SELECT COUNT(*) AS count FROM telegram_private_contacts').get().count, 0);
       const runtime = upgraded.prepare("SELECT revision, next_offset, last_polled_at, sent, keyword_replies, private_replies FROM telegram_welcome_state WHERE id='primary'").get();
@@ -164,7 +164,10 @@ test('migrations preserve brand data and existing expiry without creating Telegr
           private_enabled: 0, private_started_at: 0, private_start_message: '',
           private_followup_enabled: 0, private_followup_message: '', private_followup_started_at: 0, private_followup_revision: '',
           private_updates_enabled: 0, private_updates_started_at: 0, private_updates_revision: '',
+          relay_enabled: 1, relay_chat_id: '@join365freebonusgroup', relay_started_at: settings.relay_started_at, relay_revision: settings.relay_revision,
         });
+        assert.ok(settings.relay_started_at > 0);
+        assert.match(settings.relay_revision, /^[a-f0-9]{32}$/);
         const outbox = upgraded.prepare("SELECT revision, status, attempts FROM telegram_promotion_outbox WHERE brand_id='original'").get();
         assert.deepEqual({ ...outbox }, { revision: 'legacy-revision', status: 'pending', attempts: 2 });
       }

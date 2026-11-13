@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Check, LoaderCircle, Pencil, Plus, Trash2 } from "lucide-react";
 import "./telegram-keywords-admin.css";
 
+type RelayStatus = { enabled: boolean; chatId: string; ready: boolean; counts: { pending: number; sending: number; sent: number; failed: number; unknown: number; cancelled: number; skipped: number }; lastError: string; lastPolledAt: number | null };
 type WelcomeDraft = { enabled: boolean; chatId: string; message: string };
 type FollowupPreferences = { enabled: boolean; message: string };
 type FollowupStatus = FollowupPreferences & {
@@ -18,6 +19,7 @@ type TelegramConfig = {
   chatId: string;
   hasToken: boolean;
   promotionMessage: string;
+  relay: RelayStatus;
   counts: { pending: number; sending: number; sent: number; failed: number; unknown: number; skipped: number };
   lastError: string;
   welcome: WelcomeDraft & { sent: number; lastPolledAt: number | null; lastError: string };
@@ -25,6 +27,7 @@ type TelegramConfig = {
 };
 type TelegramDraft = Pick<TelegramConfig, "enabled" | "chatId" | "promotionMessage"> & {
   token: string;
+  relay: Pick<RelayStatus, "enabled" | "chatId">;
   welcome: WelcomeDraft;
   chatBot: ChatBotPreferences & { token: string };
 };
@@ -41,6 +44,7 @@ const keywordLimit = 120;
 const messageLimit = 2000;
 const initialDraft: TelegramDraft = {
   enabled: false, chatId: "", token: "", promotionMessage: "",
+  relay: { enabled: false, chatId: "@join365freebonusgroup" },
   welcome: { enabled: false, chatId: "", message: "" },
   chatBot: { token: "", keywordEnabled: false, privateEnabled: false, privateStartMessage: "", followup: { enabled: false, message: "" }, updates: { enabled: false } },
 };
@@ -57,9 +61,10 @@ const pollTimeFormat = new Intl.DateTimeFormat("zh-CN", {
   hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23",
 });
 
-function draftFromConfig({ enabled, chatId, promotionMessage, welcome, chatBot }: TelegramConfig): TelegramDraft {
+function draftFromConfig({ enabled, chatId, promotionMessage, relay, welcome, chatBot }: TelegramConfig): TelegramDraft {
   return {
     enabled, chatId, promotionMessage, token: "",
+    relay: { enabled: relay?.enabled ?? false, chatId: relay?.chatId || "@join365freebonusgroup" },
     welcome: { enabled: welcome.enabled, chatId: welcome.chatId, message: welcome.message },
     chatBot: {
       token: "", keywordEnabled: chatBot.keywordEnabled,
@@ -270,12 +275,17 @@ export default function TelegramGroupSettings({ request, signInPath }: AdminProp
     if (!config || loading || saving || refreshing) return;
     const chatId = draft.chatId.trim();
     const token = draft.token.trim();
+    const relay = { enabled: draft.relay.enabled, chatId: draft.relay.chatId.trim() };
     const { token: chatTokenInput, keywordEnabled, privateEnabled, privateStartMessage, followup, updates } = draft.chatBot;
     const chatToken = chatTokenInput.trim();
     const welcome = { ...draft.welcome, chatId: draft.welcome.chatId.trim(), message: draft.welcome.message.trim() };
     const targetRequired = welcome.enabled || keywordEnabled;
-    if (draft.enabled && !config.hasToken && !token) {
+    if ((draft.enabled || relay.enabled) && !config.hasToken && !token) {
       setNotice({ message: "请填写 @FreeBonus365Bot 的 Token。", error: true });
+      return;
+    }
+    if (relay.enabled && !relay.chatId) {
+      setNotice({ message: "请填写群图片转发的目标群组或频道。", error: true });
       return;
     }
     if (draft.enabled && !chatId) {
@@ -313,6 +323,7 @@ export default function TelegramGroupSettings({ request, signInPath }: AdminProp
         enabled: draft.enabled,
         chatId,
         promotionMessage: draft.promotionMessage.trim(),
+        relay,
         welcome,
         chatBot: {
           keywordEnabled, privateEnabled, privateStartMessage: privateStartMessage.trim(),
@@ -376,9 +387,9 @@ export default function TelegramGroupSettings({ request, signInPath }: AdminProp
             <span className={`cms-telegram-status${enabled ? " cms-telegram-enabled" : ""}`}>{connectionStatus}</span>
           </div>
           <div className="cms-settings-fields">
-            <label>@FreeBonus365Bot Token（Update / New）
+            <label>@FreeBonus365Bot Token（品牌通知／群图片转发）
               <input type="password" autoComplete="new-password" spellCheck={false} maxLength={160} value={draft.token}
-                required={draft.enabled && !config.hasToken} onChange={event => setDraft({ ...draft, token: event.target.value })} />
+                required={(draft.enabled || draft.relay.enabled) && !config.hasToken} onChange={event => setDraft({ ...draft, token: event.target.value })} />
               <small>{config.hasToken ? "已保存通知机器人的 Token。留空继续使用。" : "填写 BotFather 提供的 @FreeBonus365Bot Token。"}</small>
             </label>
             <label className="cms-telegram-switch">
@@ -403,6 +414,36 @@ export default function TelegramGroupSettings({ request, signInPath }: AdminProp
               {Object.entries(deliveryLabels).map(([key, label]) => <div key={key}><dt>{label}</dt><dd>{config.counts[key as keyof TelegramConfig["counts"]]}</dd></div>)}
             </dl>
             {config.lastError && <p className="cms-telegram-last-error">最近发送异常 · {config.lastError}</p>}
+          </div>
+        </section>
+        <section className="cms-settings-panel" aria-labelledby="telegram-relay-title">
+          <div>
+            <h2 id="telegram-relay-title">群图片自动转发</h2>
+            <p>@FreeBonus365Bot 自动整理它在其他群收到的照片或 GIF＋文案，发送到你的目标群。</p>
+            <span className={`cms-telegram-status${config.relay.enabled && config.relay.ready ? " cms-telegram-enabled" : ""}`}>{config.relay.enabled ? config.relay.ready ? "目标已连接" : "等待连接" : "已停用"}</span>
+          </div>
+          <div className="cms-settings-fields">
+            <label className="cms-telegram-switch">
+              <input type="checkbox" role="switch" checked={draft.relay.enabled} onChange={event => setDraft({ ...draft, relay: { ...draft.relay, enabled: event.target.checked } })} />
+              启用群图片自动转发
+            </label>
+            <label>转发目标群组或频道
+              <input type="text" autoComplete="off" spellCheck={false} maxLength={80} required={draft.relay.enabled}
+                value={draft.relay.chatId} placeholder="https://t.me/join365freebonusgroup"
+                onChange={event => setDraft({ ...draft, relay: { ...draft.relay, chatId: event.target.value } })} />
+              <small>将 @FreeBonus365Bot 加入目标群并允许发消息；频道需要管理员发布权限。此目标独立于上方品牌通知目标。</small>
+            </label>
+            <small>仅处理开启后收到的照片／GIF＋文案；纯文字、没有文案的图片及禁止转发的内容会跳过。原文链接和原按钮会换成以下固定入口：</small>
+            <small>🌐 Visit website — https://365freebonus.com/</small>
+            <small>🎁 365 Free Bonus Official — https://t.me/join365freebonus</small>
+            <small>💬 NEED HELP? — https://t.me/FreeBonus365ChatBot</small>
+            <small>来源群需允许机器人接收普通消息：将机器人设为管理员，或在 BotFather 关闭 Group Privacy。其他机器人发出的消息还可能需要开启 Bot-to-Bot Communication Mode。</small>
+            <small>不要同时为此机器人使用其他 Webhook 或轮询接收服务。系统会去重、限速，并忽略自己的消息和目标群消息。</small>
+            <dl className="cms-telegram-counts" aria-label="群图片转发记录">
+              {Object.entries(config.relay.counts).map(([key, count]) => <div key={key}><dt>{({ ...deliveryLabels, cancelled: "已取消" } as Record<string, string>)[key] || key}</dt><dd>{count}</dd></div>)}
+              <div><dt>最近检查（MYT）</dt><dd>{config.relay.lastPolledAt === null ? "尚未检查" : pollTimeFormat.format(config.relay.lastPolledAt)}</dd></div>
+            </dl>
+            {config.relay.lastError && <p className="cms-telegram-last-error">最近转发异常 · {config.relay.lastError}</p>}
           </div>
         </section>
         <section className="cms-settings-panel" aria-labelledby="telegram-welcome-title">

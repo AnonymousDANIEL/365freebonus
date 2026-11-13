@@ -12,7 +12,7 @@ export function getDataDirectory(): string {
 function migrate(db: DatabaseSync) {
   if (migrated.has(db)) return;
   const readVersion = () => (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
-  if (readVersion() < 17) {
+  if (readVersion() < 18) {
     db.exec("BEGIN IMMEDIATE");
     try {
       // Read again inside the write lock, so concurrent process starts cannot
@@ -266,6 +266,50 @@ function migrate(db: DatabaseSync) {
           WHERE private_enabled = 1 AND chat_bot_token_ciphertext <> ''`)
           .run(Date.now());
         db.exec("PRAGMA user_version = 17;");
+      }
+      if (version < 18) {
+        db.exec(`
+          ALTER TABLE telegram_promotion_settings ADD COLUMN relay_enabled INTEGER NOT NULL DEFAULT 0 CHECK (relay_enabled IN (0, 1));
+          ALTER TABLE telegram_promotion_settings ADD COLUMN relay_chat_id TEXT NOT NULL DEFAULT '@join365freebonusgroup';
+          ALTER TABLE telegram_promotion_settings ADD COLUMN relay_started_at INTEGER NOT NULL DEFAULT 0;
+          ALTER TABLE telegram_promotion_settings ADD COLUMN relay_revision TEXT NOT NULL DEFAULT '';
+          CREATE TABLE telegram_relay_state (
+            id TEXT PRIMARY KEY CHECK (id = 'primary'),
+            revision TEXT NOT NULL DEFAULT '', bot_id INTEGER NOT NULL DEFAULT 0,
+            next_offset INTEGER NOT NULL DEFAULT 0, last_polled_at INTEGER NOT NULL DEFAULT 0,
+            next_poll_at INTEGER NOT NULL DEFAULT 0,
+            poll_lease_id TEXT NOT NULL DEFAULT '', poll_lease_until INTEGER NOT NULL DEFAULT 0,
+            send_lease_id TEXT NOT NULL DEFAULT '', send_lease_until INTEGER NOT NULL DEFAULT 0,
+            next_send_at INTEGER NOT NULL DEFAULT 0,
+            target_chat_id INTEGER NOT NULL DEFAULT 0, target_verified_at INTEGER NOT NULL DEFAULT 0,
+            ready_until INTEGER NOT NULL DEFAULT 0,
+            skipped_count INTEGER NOT NULL DEFAULT 0, last_error TEXT NOT NULL DEFAULT ''
+          );
+          INSERT INTO telegram_relay_state (id) VALUES ('primary');
+          CREATE TABLE telegram_relay_outbox (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_chat_id INTEGER NOT NULL, source_message_id INTEGER NOT NULL,
+            media_group_id TEXT NOT NULL DEFAULT '', fingerprint TEXT NOT NULL,
+            queued_at INTEGER NOT NULL, revision TEXT NOT NULL,
+            media_kind TEXT NOT NULL CHECK (media_kind IN ('photo', 'animation')),
+            file_id TEXT NOT NULL, file_unique_id TEXT NOT NULL, caption TEXT NOT NULL,
+            has_spoiler INTEGER NOT NULL DEFAULT 0 CHECK (has_spoiler IN (0, 1)),
+            status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'sending', 'sent', 'failed', 'unknown', 'cancelled')),
+            attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at INTEGER NOT NULL DEFAULT 0,
+            lease_id TEXT NOT NULL DEFAULT '', lease_until INTEGER NOT NULL DEFAULT 0,
+            last_error TEXT NOT NULL DEFAULT '', sent_at INTEGER, message_id INTEGER,
+            UNIQUE (source_chat_id, source_message_id)
+          );
+          CREATE UNIQUE INDEX telegram_relay_album ON telegram_relay_outbox(source_chat_id, media_group_id) WHERE media_group_id <> '';
+          CREATE INDEX telegram_relay_due ON telegram_relay_outbox(status, next_attempt_at);
+          CREATE INDEX telegram_relay_fingerprint ON telegram_relay_outbox(fingerprint, queued_at);
+        `);
+        // Enable the requested relay only for an already configured promotion
+        // bot, beginning with new updates after this migration.
+        db.prepare(`UPDATE telegram_promotion_settings SET relay_enabled = 1,
+          relay_started_at = ?, relay_revision = lower(hex(randomblob(16)))
+          WHERE token_ciphertext <> ''`).run(Date.now());
+        db.exec("PRAGMA user_version = 18;");
       }
       db.exec("COMMIT");
     } catch (error) { db.exec("ROLLBACK"); throw error; }

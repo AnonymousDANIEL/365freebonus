@@ -5,6 +5,8 @@ import { telegramRequest } from "./telegram-bot";
 import { sendTelegramBrandCard, telegramPublicOrigin } from "./telegram-brand-card";
 import { startTelegramWelcomeWorker } from "./telegram-welcome";
 import { cancelPrivateBrandUpdates, privateBrandUpdateStatus, startTelegramPrivateUpdatesWorker } from "./telegram-private-updates";
+import { cancelRelayPending, relayStatus, startTelegramRelayWorker } from "./telegram-relay";
+import { RELAY_DEFAULT_TARGET } from "./telegram-relay-content";
 
 type StoredSettings = {
   enabled: number;
@@ -12,6 +14,10 @@ type StoredSettings = {
   token_ciphertext: string;
   chat_bot_token_ciphertext: string;
   promotion_message: string;
+  relay_enabled: number;
+  relay_chat_id: string;
+  relay_started_at: number;
+  relay_revision: string;
   welcome_enabled: number;
   welcome_chat_id: string;
   welcome_message: string;
@@ -35,6 +41,7 @@ type SettingsInput = {
   chatId: string;
   token?: string;
   promotionMessage?: string;
+  relay?: { enabled: boolean; chatId: string };
   welcome?: { enabled: boolean; chatId: string; message: string };
   chatBot?: { token?: string; keywordEnabled: boolean; privateEnabled?: boolean; privateStartMessage?: string; updates?: { enabled: boolean }; followup?: { enabled: boolean; message: string } };
 };
@@ -97,7 +104,8 @@ function decryptToken(stored: string) {
 }
 
 function storedSettings(db: DatabaseSync): StoredSettings {
-  return db.prepare(`SELECT enabled, chat_id, token_ciphertext, chat_bot_token_ciphertext, promotion_message, welcome_enabled,
+  return db.prepare(`SELECT enabled, chat_id, token_ciphertext, chat_bot_token_ciphertext, promotion_message,
+    relay_enabled, relay_chat_id, relay_started_at, relay_revision, welcome_enabled,
     welcome_chat_id, welcome_message, welcome_started_at, welcome_revision, keyword_enabled, keyword_started_at,
     private_enabled, private_started_at, private_start_message,
     private_updates_enabled, private_updates_started_at, private_updates_revision,
@@ -105,6 +113,7 @@ function storedSettings(db: DatabaseSync): StoredSettings {
     FROM telegram_promotion_settings WHERE id = 'primary'`).get() as StoredSettings | undefined
     ?? {
       enabled: 0, chat_id: "", token_ciphertext: "", chat_bot_token_ciphertext: "", promotion_message: "",
+      relay_enabled: 0, relay_chat_id: RELAY_DEFAULT_TARGET, relay_started_at: 0, relay_revision: "",
       welcome_enabled: 0, welcome_chat_id: "", welcome_message: "", welcome_started_at: 0, welcome_revision: "",
       keyword_enabled: 0, keyword_started_at: 0,
       private_enabled: 0, private_started_at: 0, private_start_message: "",
@@ -162,6 +171,16 @@ async function verifyChatBotUpdates(token: string) {
   }
   if (webhook.result.url) {
     throw new TelegramSettingsError("ChatBot 已连接到其他 Webhook，请先解除该连接再启用自动回复。");
+  }
+}
+
+async function verifyRelayReceiver(token: string) {
+  const webhook = await telegramRequest(token, "getWebhookInfo");
+  if (!webhook?.ok || typeof webhook.result.url !== "string") {
+    throw new TelegramSettingsError("暂时无法检查通知机器人的接收方式，请稍后重试。", 503);
+  }
+  if (webhook.result.url) {
+    throw new TelegramSettingsError("@FreeBonus365Bot 已连接到其他 Webhook，请先解除该连接再启用群图片转发。");
   }
 }
 
@@ -238,6 +257,7 @@ export function telegramPromotionStatus() {
   return {
     enabled: settings.enabled === 1, chatId: settings.chat_id, hasToken: Boolean(settings.token_ciphertext), counts, lastError,
     promotionMessage: settings.promotion_message,
+    relay: { enabled: settings.relay_enabled === 1, chatId: settings.relay_chat_id, ...relayStatus(db) },
     chatBot: {
       hasToken: Boolean(settings.chat_bot_token_ciphertext), keywordEnabled: settings.keyword_enabled === 1,
       keywordReplies: welcome?.keyword_replies ?? 0,
@@ -281,6 +301,12 @@ export async function saveTelegramPromotionSettings(input: SettingsInput) {
   }
   let chatId = normalizeChatTarget(input.chatId);
   const promotionMessage = input.promotionMessage?.trim() ?? previous.promotion_message;
+  const relayEnabled = input.relay?.enabled ?? (previous.relay_enabled === 1);
+  const relayChatId = input.relay ? normalizeChatTarget(input.relay.chatId) : previous.relay_chat_id || RELAY_DEFAULT_TARGET;
+  if (relayEnabled && !token) throw new TelegramSettingsError(`请填写 @${PROMOTION_BOT} 的 Token，再启用群图片转发。`);
+  if (relayEnabled && !relayChatId) throw new TelegramSettingsError("请填写群图片转发的目标群组或频道。");
+  const promotionIdentityChanged = tokenChanged && token.split(":", 1)[0] !== previousToken.split(":", 1)[0];
+
   const welcomeEnabled = input.welcome?.enabled ?? (previous.welcome_enabled === 1);
   const keywordEnabled = input.chatBot?.keywordEnabled ?? (previous.keyword_enabled === 1);
   const privateEnabled = input.chatBot?.privateEnabled ?? (previous.private_enabled === 1);
@@ -328,6 +354,8 @@ export async function saveTelegramPromotionSettings(input: SettingsInput) {
     input.enabled && (!previous.enabled || chatId !== previous.chat_id || tokenChanged)
       ? verifyChat(token, chatId, PROMOTION_BOT) : tokenChanged ? verifyBot(token, PROMOTION_BOT) : null,
     chatVerification,
+    relayEnabled && (!previous.relay_enabled || relayChatId !== previous.relay_chat_id || tokenChanged)
+      ? Promise.all([verifyRelayReceiver(token), verifyChat(token, relayChatId, PROMOTION_BOT)]) : null,
   ]);
   if (typeof verifiedChat === "string") chatId = verifiedChat;
   if (typeof verifiedChatBotGroup === "string") welcomeChatId = verifiedChatBotGroup;
@@ -352,6 +380,11 @@ export async function saveTelegramPromotionSettings(input: SettingsInput) {
       if (chatBotId !== previousChatToken.split(":", 1)[0]) db.exec("DELETE FROM telegram_private_contacts");
     }
     const nowMs = Date.now();
+    const relayChanged = relayEnabled !== (current.relay_enabled === 1) || relayChatId !== current.relay_chat_id
+      || promotionIdentityChanged || (relayEnabled && (!current.relay_revision || current.relay_started_at <= 0));
+    const relayStartedAt = relayEnabled ? (relayChanged ? nowMs : current.relay_started_at) : 0;
+    const relayRevision = relayChanged ? randomUUID() : current.relay_revision;
+    if (relayChanged || !relayEnabled) cancelRelayPending(db);
     const now = Math.floor(nowMs / 1_000);
     const updatesStartedAt = updatesEnabled ? (updatesChanged ? nowMs : current.private_updates_started_at) : 0;
     const updatesRevision = updatesChanged ? randomUUID() : current.private_updates_revision;
@@ -373,8 +406,9 @@ export async function saveTelegramPromotionSettings(input: SettingsInput) {
       welcome_chat_id, welcome_message, welcome_started_at, welcome_revision,
       chat_bot_token_ciphertext, keyword_enabled, keyword_started_at, private_enabled, private_started_at, private_start_message,
       private_followup_enabled, private_followup_message, private_followup_started_at, private_followup_revision,
-      private_updates_enabled, private_updates_started_at, private_updates_revision
-    ) VALUES ('primary', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      private_updates_enabled, private_updates_started_at, private_updates_revision,
+      relay_enabled, relay_chat_id, relay_started_at, relay_revision
+    ) VALUES ('primary', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET enabled = excluded.enabled, chat_id = excluded.chat_id,
       token_ciphertext = excluded.token_ciphertext, promotion_message = excluded.promotion_message,
       welcome_enabled = excluded.welcome_enabled, welcome_chat_id = excluded.welcome_chat_id,
@@ -389,12 +423,15 @@ export async function saveTelegramPromotionSettings(input: SettingsInput) {
       private_followup_revision = excluded.private_followup_revision,
       private_updates_enabled = excluded.private_updates_enabled,
       private_updates_started_at = excluded.private_updates_started_at,
-      private_updates_revision = excluded.private_updates_revision`)
+      private_updates_revision = excluded.private_updates_revision,
+      relay_enabled = excluded.relay_enabled, relay_chat_id = excluded.relay_chat_id,
+      relay_started_at = excluded.relay_started_at, relay_revision = excluded.relay_revision`)
       .run(Number(input.enabled), chatId, ciphertext, promotionMessage, Number(welcomeEnabled),
         welcomeChatId, welcomeMessage, welcomeStartedAt, welcomeRevision, chatCiphertext, Number(keywordEnabled), keywordStartedAt,
         Number(privateEnabled), privateStartedAt, privateStartMessage,
         Number(followupEnabled), followupMessage, followupStartedAt, followupRevision,
-        Number(updatesEnabled), updatesStartedAt, updatesRevision);
+        Number(updatesEnabled), updatesStartedAt, updatesRevision,
+        Number(relayEnabled), relayChatId, relayStartedAt, relayRevision);
   });
   return telegramPromotionStatus();
 }
@@ -472,6 +509,7 @@ export function startTelegramPromotionWorker() {
   workers.telegramPromotionWorkerStarted = true;
   startTelegramWelcomeWorker(decryptToken);
   startTelegramPrivateUpdatesWorker(decryptToken);
+  startTelegramRelayWorker(decryptToken);
   let running = false;
   let reportedError = false;
   const tick = async () => {

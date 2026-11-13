@@ -10,6 +10,7 @@ const configInput = z.object({
   chatId: z.string().trim().max(80),
   token: z.string().trim().max(160).optional(),
   promotionMessage: z.string().trim().max(2_000).optional(),
+  relay: z.object({ enabled: z.boolean(), chatId: z.string().trim().max(80) }).strict().optional(),
   welcome: z.object({
     enabled: z.boolean(),
     chatId: z.string().trim().max(80),

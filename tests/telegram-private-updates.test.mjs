@@ -115,7 +115,7 @@ function queuePending(id = 'brand', recipient = userId, revision = 'promotion-re
 function downgradeFixtureToV16() {
   // Only disposable fixture databases are altered. This reconstructs the real
   // v16 schema without depending on git history or a second production module.
-  getSqlite().exec(`DROP TABLE telegram_private_brand_updates;
+  getSqlite().exec(`DROP TABLE telegram_relay_outbox; DROP TABLE telegram_relay_state; ALTER TABLE telegram_promotion_settings DROP COLUMN relay_enabled; ALTER TABLE telegram_promotion_settings DROP COLUMN relay_chat_id; ALTER TABLE telegram_promotion_settings DROP COLUMN relay_started_at; ALTER TABLE telegram_promotion_settings DROP COLUMN relay_revision; DROP TABLE telegram_private_brand_updates;
     DROP TABLE telegram_private_updates_state;
     ALTER TABLE telegram_promotion_settings DROP COLUMN private_updates_enabled;
     ALTER TABLE telegram_promotion_settings DROP COLUMN private_updates_started_at;
@@ -448,7 +448,7 @@ test('v16 migration preserves existing data and opt-outs while enabling only fut
   const beforeNote = { ...db.prepare('SELECT * FROM secure_notes').get() };
   downgradeFixtureToV16();
   const migrated = getSqlite();
-  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version, 17);
+  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version, 18);
   const settings = migrated.prepare("SELECT * FROM telegram_promotion_settings WHERE id='primary'").get();
   assert.equal(settings.private_updates_enabled, 1);
   assert.equal(settings.private_updates_started_at, now);

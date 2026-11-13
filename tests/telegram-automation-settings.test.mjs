@@ -10,6 +10,7 @@ import ts from 'typescript';
 const fixture = mkdtempSync(path.join(tmpdir(), 'telegram-settings-'));
 const appOrigin = 'https://directory.example';
 const promotionToken = '12345678:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+const replacementPromotionToken = '11223344:FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF';
 const rotatedPromotionToken = '12345678:CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC';
 const chatToken = '87654321:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB';
 const rotatedChatToken = '87654321:DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD';
@@ -34,7 +35,7 @@ writeFixture('package.json', '{"type":"commonjs"}');
 symlinkSync(fileURLToPath(new URL('../node_modules', import.meta.url)), path.join(fixture, 'node_modules'), 'dir');
 for (const relative of [
   'app/api/admin/_security', 'app/api/admin/telegram/route',
-  ...['auth-core', 'brand-links', 'directory', 'image-media', 'image-url', 'sqlite', 'telegram-background', 'telegram-brand-card', 'telegram-followups', 'telegram-private-updates', 'telegram-promotions'].map(name => `app/lib/${name}`),
+  ...['auth-core', 'brand-links', 'directory', 'image-media', 'image-url', 'sqlite', 'telegram-background', 'telegram-brand-card', 'telegram-followups', 'telegram-private-updates', 'telegram-relay-content', 'telegram-relay', 'telegram-promotions'].map(name => `app/lib/${name}`),
 ]) {
   const source = readFileSync(new URL(`../${relative}.ts`, import.meta.url), 'utf8');
   const { outputText } = ts.transpileModule(source, {
@@ -56,7 +57,7 @@ exports.telegramRequest = async (token, method, parameters = {}) => {
   exports.calls.push({ token, method, parameters });
   if (method === 'getMe') {
     const id = Number(token.split(':')[0]);
-    const username = id === 12345678 ? 'FreeBonus365Bot' : [87654321, 99887766].includes(id) ? 'FreeBonus365ChatBot' : 'OtherBot';
+    const username = [12345678, 11223344].includes(id) ? 'FreeBonus365Bot' : [87654321, 99887766].includes(id) ? 'FreeBonus365ChatBot' : 'OtherBot';
     return { ok: true, result: { is_bot: true, id, username } };
   }
   if (method === 'getWebhookInfo') return { ok: true, result: { url: exports.webhookUrl } };
@@ -158,6 +159,11 @@ test('Telegram settings reject invalid nested shapes and unknown fields before t
     { ...base, token: 'a'.repeat(161) },
     { ...base, promotionMessage: 'a'.repeat(2_001) },
     { ...base, token_ciphertext: 'must-not-overwrite' },
+    { ...base, relay: null },
+    { ...base, relay: { enabled: 'true', chatId: '@fixture_group' } },
+    { ...base, relay: { enabled: true, chatId: 123 } },
+    { ...base, relay: { enabled: false, chatId: '@fixture_group', unknown: true } },
+    { ...base, relay: { enabled: false, chatId: 'a'.repeat(81) } },
     { ...base, welcome: [] },
     { ...base, welcome: { enabled: false, chatId: '', message: '', unknown: true } },
     { ...base, welcome: { enabled: 'false', chatId: '', message: '' } },
@@ -576,4 +582,109 @@ test('disabling or replacing the ChatBot cancels queued notification work and re
   assert.equal(replaced.chatBot.updates.counts.sent, 1);
   const privateOff = await put({ enabled: false, chatId: '', chatBot: { keywordEnabled: false, privateEnabled: false } });
   assert.equal(privateOff.chatBot.updates.enabled, false, 'legacy clients can disable private chat without including notification preferences');
+});
+
+
+const relayOnlyConfig = { enabled: false, chatId: '', token: promotionToken,
+  relay: { enabled: true, chatId: 'https://t.me/fixture_group' } };
+
+test('photo relay uses the promotion bot independently and validates its incoming receiver and target', async () => {
+  const empty = await get();
+  assert.equal(empty.relay.enabled, false);
+  assert.equal(empty.relay.chatId, '@join365freebonusgroup');
+  await put({ enabled: false, chatId: '', relay: { enabled: true, chatId: '@fixture_group' } }, 400);
+  assert.equal(telegram.calls.length, 0, 'missing promotion credentials must fail before network validation');
+
+  const saved = await put(relayOnlyConfig);
+  assert.equal(saved.enabled, false, 'relay must not enable website announcement posting');
+  assert.equal(saved.chatId, '');
+  assert.equal(saved.relay.enabled, true);
+  assert.equal(saved.relay.chatId, '@fixture_group');
+  assert.equal(saved.chatBot.hasToken, false);
+  assert.ok(telegram.calls.every(call => call.token === promotionToken));
+  assert.ok(telegram.calls.some(call => call.method === 'getWebhookInfo'));
+  assert.ok(telegram.calls.some(call => call.method === 'getChat' && call.parameters.chat_id === '@fixture_group'));
+  assert.ok(settingsRow().relay_started_at > 0);
+  assert.ok(settingsRow().relay_revision);
+  const before = settingsRow();
+  telegram.webhookUrl = 'https://example.invalid/other-receiver';
+  await put({ enabled: false, chatId: '', relay: { enabled: true, chatId: '@other_group' } }, 400);
+  assert.deepEqual(settingsRow(), before, 'a foreign webhook must not be removed or replaced');
+  telegram.webhookUrl = '';
+  telegram.groupAdmin = false;
+  await put({ enabled: false, chatId: '', relay: { enabled: true, chatId: '@other_group' } }, 400);
+  assert.deepEqual(settingsRow(), before, 'missing posting rights must leave saved relay settings intact');
+});
+
+test('old clients and same promotion-bot token rotation preserve relay activation and target', async () => {
+  await put(relayOnlyConfig);
+  const original = settingsRow();
+  const legacy = await put({ enabled: true, chatId: channelId, promotionMessage: 'A new website notice template.' });
+  assert.equal(legacy.relay.enabled, true);
+  assert.equal(legacy.relay.chatId, '@fixture_group');
+  assert.equal(settingsRow().relay_started_at, original.relay_started_at);
+  assert.equal(settingsRow().relay_revision, original.relay_revision);
+  const rotated = await put({ enabled: true, chatId: channelId, token: rotatedPromotionToken });
+  assert.notEqual(settingsRow().token_ciphertext, original.token_ciphertext);
+  assert.equal(settingsRow().relay_started_at, original.relay_started_at);
+  assert.equal(settingsRow().relay_revision, original.relay_revision);
+  assert.equal(rotated.relay.chatId, '@fixture_group');
+  for (const privateValue of [promotionToken, rotatedPromotionToken, settingsRow().token_ciphertext, original.relay_revision]) {
+    assert.equal(JSON.stringify(rotated).includes(privateValue), false);
+  }
+});
+
+
+function relayJob({ messageId = 901, status = 'pending' } = {}) {
+  const current = settingsRow();
+  database.prepare(`INSERT INTO telegram_relay_outbox
+    (source_chat_id,source_message_id,fingerprint,queued_at,revision,media_kind,file_id,file_unique_id,caption,status)
+    VALUES(-1005566778899,?,?,?,?, 'photo','fixture-source-file','fixture-source-unique','Source-only caption must remain internal.',?)`)
+    .run(messageId, `relay-fingerprint-${messageId}`, Date.now(), current.relay_revision, status);
+}
+
+test('relay status is aggregate-only and same-bot credential rotation leaves its private cursor and queue intact', async () => {
+  await put(relayOnlyConfig);
+  const original = settingsRow();
+  relayJob();
+  relayJob({ messageId: 902, status: 'sent' });
+  database.prepare(`UPDATE telegram_relay_state SET revision=?,bot_id=12345678,next_offset=77,last_polled_at=12345678 WHERE id='primary'`)
+    .run(original.relay_revision);
+  const saved = await put({ enabled: false, chatId: '', token: rotatedPromotionToken });
+  assert.equal(saved.relay.counts.pending, 1);
+  assert.equal(saved.relay.counts.sent, 1);
+  assert.equal(saved.relay.lastPolledAt, 12345678);
+  assert.equal(database.prepare("SELECT next_offset FROM telegram_relay_state WHERE id='primary'").get().next_offset, 77);
+  assert.equal(settingsRow().relay_revision, original.relay_revision);
+  for (const privateValue of ['Source-only caption', 'fixture-source-file', 'fixture-source-unique', '-1005566778899', 'relay-fingerprint', original.relay_revision, settingsRow().token_ciphertext]) {
+    assert.equal(JSON.stringify(saved).includes(privateValue), false);
+  }
+});
+
+test('relay target changes, disabling and promotion-bot identity changes invalidate only queued relay work', async () => {
+  await put(relayOnlyConfig);
+  const original = settingsRow();
+  relayJob();
+  relayJob({ messageId: 902, status: 'sent' });
+  const moved = await put({ enabled: false, chatId: '', relay: { enabled: true, chatId: '@other_group' } });
+  assert.equal(moved.relay.chatId, '@other_group');
+  assert.notEqual(settingsRow().relay_revision, original.relay_revision);
+  assert.ok(settingsRow().relay_started_at >= original.relay_started_at);
+  assert.equal(moved.relay.counts.cancelled, 1);
+  assert.equal(moved.relay.counts.sent, 1);
+  relayJob({ messageId: 903 });
+  const off = await put({ enabled: false, chatId: '', relay: { enabled: false, chatId: '@other_group' } });
+  assert.equal(off.relay.enabled, false);
+  assert.equal(settingsRow().relay_started_at, 0);
+  assert.equal(off.relay.counts.cancelled, 2);
+  await put({ enabled: false, chatId: '', relay: { enabled: true, chatId: '@other_group' } });
+  const resumed = settingsRow();
+  assert.ok(resumed.relay_started_at > 0);
+  relayJob({ messageId: 904 });
+  const replaced = await put({ enabled: false, chatId: '', token: replacementPromotionToken });
+  assert.notEqual(settingsRow().relay_revision, resumed.relay_revision);
+  assert.equal(replaced.relay.counts.cancelled, 3);
+  assert.equal(replaced.relay.counts.sent, 1);
+  assert.equal(replaced.chatBot.hasToken, false);
+  assert.equal(replaced.enabled, false);
 });
