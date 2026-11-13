@@ -122,3 +122,13 @@ test('every valid job status is counted and private unknown origins/statuses nev
     assert.equal(result.origins.other,1);assert.equal(JSON.stringify(result).includes(privateMarker),false);
   }finally{db.close();}
 });
+
+test('a sent post with an unresolved edit warning is never reported as preserved',()=>{
+  const db=database();
+  try{
+    add(db,{error:'个人账号备用补正当前不可用，请检查本人账号连接和编辑权限；原媒体不会重复发送。'});
+    const result=relayFormattingDiagnostics(db,now);
+    assert.equal(result.latestOutcome,'unclassified');
+    assert.equal(result.customEmojiJobs.sent,1);
+  }finally{db.close();}
+});

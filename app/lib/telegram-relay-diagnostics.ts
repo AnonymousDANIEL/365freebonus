@@ -84,6 +84,7 @@ export function relayFormattingDiagnostics(db: DatabaseSync, now = Date.now(), s
     else if (dropped) outcome = "source_custom_emoji_dropped";
     else if (metadata === "legacy") outcome = "legacy_metadata_unknown";
     else if (metadata === "invalid") outcome = "invalid_metadata";
+    else if (row.status === "sent" && error) outcome = "unclassified";
     else if (row.status === "sent") outcome = customCount ? "sent_preserved" : "sent_plain";
     else if (row.status === "unknown") outcome = "delivery_unconfirmed";
     else if (row.status === "pending" || row.status === "sending" || row.status === "failed" || row.status === "cancelled") outcome = row.status;

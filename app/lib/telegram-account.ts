@@ -552,6 +552,7 @@ function editableCaptionEntities(entities: RelayCaptionEntity[]): Api.TypeMessag
 type AccountCaptionEdit = {
   state: SourceEmojiSample["state"]; attempted: boolean;
   outcome: "preserved" | "changed" | "rejected" | "uncertain" | "invalid" | "unavailable";
+  retryAt?: number;
 };
 
 /** One authorized caption-only edit of one leased relay post, followed by actual readback. */
@@ -574,8 +575,8 @@ export async function editVerifiedRelayCaptionWithAccount(input: {
   if (!entities || !prepared.linksSafe || !prepared.buttonsMatch) return invalid();
   const db = getSqlite(), current = row(db), now = Date.now();
   if (current.stage !== "connected" || !current.session_ciphertext) return { state: "disconnected", attempted: false, outcome: "unavailable" };
-  if (current.lease_until > now) return { state: "busy", attempted: false, outcome: "unavailable" };
-  if (current.next_attempt_at > now) return { state: "backoff", attempted: false, outcome: "unavailable" };
+  if (current.lease_until > now) return { state: "busy", attempted: false, outcome: "unavailable", retryAt: current.lease_until };
+  if (current.next_attempt_at > now) return { state: "backoff", attempted: false, outcome: "unavailable", retryAt: current.next_attempt_at };
   const configuration = () => db.prepare(`SELECT relay_enabled,relay_chat_id,relay_revision,token_ciphertext
     FROM telegram_promotion_settings WHERE id='primary'`).get() as {
       relay_enabled: number; relay_chat_id: string; relay_revision: string; token_ciphertext: string;
@@ -614,7 +615,8 @@ export async function editVerifiedRelayCaptionWithAccount(input: {
     const state = error instanceof TelegramAccountError && error.status === 429 ? "backoff"
       : error instanceof TelegramAccountError && error.message === BUSY_ERROR ? "busy"
       : error instanceof TelegramAccountError && error.message === REAUTH_ERROR ? "disconnected" : "unavailable";
-    return { state, attempted: false, outcome: "unavailable" };
+    const latest = row(db), retryAt = state === "busy" ? latest.lease_until : state === "backoff" ? latest.next_attempt_at : 0;
+    return { state, attempted: false, outcome: "unavailable", ...(retryAt > Date.now() ? { retryAt } : {}) };
   }
   const deadline = Date.now() + 40_000;
   const remaining = () => Math.max(1, Math.min(REQUEST_MS, deadline - Date.now()));
@@ -689,7 +691,9 @@ export async function editVerifiedRelayCaptionWithAccount(input: {
   } catch (error) {
     if (allowed() && safeError(error).status === 429 && failureCategory(error) === "telegram-rate-limit") {
       recordFailure(db, claim, error, "relay-account-caption-edit");
-      return { state: "backoff", attempted, outcome: attempted ? editReturned ? "uncertain" : "rejected" : "unavailable" };
+      const retryAt = !attempted ? row(db).next_attempt_at : 0;
+      return { state: "backoff", attempted, outcome: attempted ? editReturned ? "uncertain" : "rejected" : "unavailable",
+        ...(retryAt > Date.now() ? { retryAt } : {}) };
     }
     const rpc = error as { code?: unknown; errorMessage?: unknown } | null;
     if (attempted && !editReturned && typeof rpc?.code === "number" && rpc.code >= 400 && rpc.code < 500 && typeof rpc.errorMessage === "string") {
@@ -958,6 +962,16 @@ export async function pollTelegramAccountOnce() {
   const relay = db.prepare("SELECT relay_enabled,relay_revision,relay_started_at FROM telegram_promotion_settings WHERE id='primary'").get() as { relay_enabled: number; relay_revision: string; relay_started_at: number } | undefined;
   const target = db.prepare("SELECT target_chat_id,ready_until,bot_id,revision FROM telegram_relay_state WHERE id='primary'").get() as { target_chat_id: number; ready_until: number; bot_id: number; revision: string } | undefined;
   const ready = relay?.relay_enabled === 1 && target && target.ready_until > Date.now() && target.revision === relay.relay_revision && target.target_chat_id < 0;
+  const repairNow = Date.now();
+  // Give a due caption repair the account lease first. No current poll is
+  // interrupted, and future/backed-off or terminal repairs cannot starve receive.
+  if (ready && db.prepare(`SELECT 1 FROM telegram_relay_outbox WHERE status='sent' AND revision=? AND message_id>0
+    AND sent_at>=? AND sent_at<=? AND caption_edit_attempted_at>0 AND next_attempt_at<=?
+    AND ((caption_edit_outcome IN ('changed','account_waiting_1','account_waiting_2','account_waiting_3') AND last_error=?)
+      OR (caption_edit_outcome='account_unavailable' AND last_error=?)) LIMIT 1`)
+    .get(relay.relay_revision, repairNow - 24 * 60 * 60_000, repairNow, repairNow,
+      "Telegram 未保留部分原始自定义 Emoji，请检查机器人的自定义 Emoji 使用权限。该消息不会自动重发。",
+      "个人账号备用补正当前不可用，请检查本人账号连接和编辑权限；原媒体不会重复发送。")) return;
   const refreshDue = current.synced_at < Date.now() - REFRESH_MS;
   const source = ready ? db.prepare(`SELECT * FROM telegram_personal_sources WHERE selected=1 AND joined=1
     AND chat_id<>? ORDER BY CASE WHEN chat_id>? THEN 0 ELSE 1 END,chat_id LIMIT 1`).get(target.target_chat_id, current.poll_source_id) as SourceRow | undefined : undefined;

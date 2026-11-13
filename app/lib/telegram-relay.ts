@@ -515,9 +515,11 @@ async function repairTelegramRelayCaptionWithAccountOnce(identity: number, snaps
       WHERE status='sent' AND caption_edit_outcome='account_attempting' AND lease_until<=?`).run(ACCOUNT_CAPTION_UNCERTAIN_ERROR, now);
     if (runtime.ready_until <= now || runtime.target_chat_id >= 0 || runtime.send_lease_until > now || runtime.next_send_at > now) return null;
     const job = db.prepare(`SELECT * FROM telegram_relay_outbox WHERE status='sent' AND revision=? AND message_id>0
-      AND sent_at>=? AND sent_at<=? AND last_error=? AND caption_edit_attempted_at>0
-      AND caption_edit_outcome IN ('changed','account_waiting_1','account_waiting_2','account_waiting_3')
-      ORDER BY sent_at DESC,id DESC LIMIT 1`).get(current.relay_revision, now - CAPTION_EDIT_WINDOW_MS, now, CUSTOM_EMOJI_CHANGED_ERROR) as RelayJob | undefined;
+      AND sent_at>=? AND sent_at<=? AND next_attempt_at<=? AND caption_edit_attempted_at>0
+      AND ((caption_edit_outcome IN ('changed','account_waiting_1','account_waiting_2','account_waiting_3') AND last_error=?)
+        OR (caption_edit_outcome='account_unavailable' AND last_error=?))
+      ORDER BY sent_at DESC,id DESC LIMIT 1`).get(current.relay_revision, now - CAPTION_EDIT_WINDOW_MS, now, now,
+        CUSTOM_EMOJI_CHANGED_ERROR, ACCOUNT_CAPTION_UNAVAILABLE_ERROR) as RelayJob | undefined;
     if (!job) return null;
     const entities = storedCaptionEntities(job);
     const preparedSafe = entities && inspectRelayDelivery(job.caption, entities,
@@ -550,7 +552,7 @@ async function repairTelegramRelayCaptionWithAccountOnce(identity: number, snaps
     });
     auditAccountCaptionEdit("account_invalid", claim.entities, false, claim.waitingCount); return true;
   }
-  let result: { state: string; attempted: boolean; outcome: "preserved" | "changed" | "rejected" | "uncertain" | "invalid" | "unavailable" };
+  let result: { state: string; attempted: boolean; outcome: "preserved" | "changed" | "rejected" | "uncertain" | "invalid" | "unavailable"; retryAt?: number | null };
   try {
     const { editVerifiedRelayCaptionWithAccount } = await import("./telegram-account");
     // The account helper separately revalidates membership, Premium/admin
@@ -564,23 +566,25 @@ async function repairTelegramRelayCaptionWithAccountOnce(identity: number, snaps
   transaction(db, () => {
     const now = clock();
     if (!ownsCaptionEdit(db, claim, now, "account_attempting")) return;
-    let error = ACCOUNT_CAPTION_UNCERTAIN_ERROR, nextSend = now + SEND_MS;
+    let error = ACCOUNT_CAPTION_UNCERTAIN_ERROR, nextSend = now + SEND_MS, nextAttempt = now;
     if (!captionEditAllowed(db, claim, now, "account_attempting")) {
       outcome = result.attempted ? "account_uncertain" : "account_invalid";
       error = CAPTION_EDIT_INVALID_ERROR;
     } else if (!result.attempted && (result.state === "busy" || result.state === "backoff")) {
       if (claim.waitingCount < 3) {
-        waited = claim.waitingCount + 1; outcome = `account_waiting_${waited}`; error = CUSTOM_EMOJI_CHANGED_ERROR; nextSend = now + 5000;
-      } else { outcome = "account_unavailable"; error = ACCOUNT_CAPTION_UNAVAILABLE_ERROR; }
+        waited = claim.waitingCount + 1; outcome = `account_waiting_${waited}`; error = CUSTOM_EMOJI_CHANGED_ERROR;
+        const retryAt = Number.isSafeInteger(result.retryAt) && Number(result.retryAt) > now ? Number(result.retryAt) : 0;
+        nextAttempt = Math.max(now + 5000, retryAt);
+      } else { outcome = "account_unavailable_final"; error = ACCOUNT_CAPTION_UNAVAILABLE_ERROR; }
     } else {
       const resolved = result.attempted && result.outcome === "unavailable" ? "uncertain" : result.outcome;
-      outcome = `account_${resolved}`;
+      outcome = resolved === "unavailable" ? "account_unavailable_final" : `account_${resolved}`;
       error = resolved === "preserved" ? "" : resolved === "changed" ? CUSTOM_EMOJI_CHANGED_ERROR
         : resolved === "rejected" ? ACCOUNT_CAPTION_REJECTED_ERROR : resolved === "invalid" ? CAPTION_EDIT_INVALID_ERROR
         : resolved === "unavailable" ? ACCOUNT_CAPTION_UNAVAILABLE_ERROR : ACCOUNT_CAPTION_UNCERTAIN_ERROR;
     }
-    db.prepare("UPDATE telegram_relay_outbox SET caption_edit_outcome=?,last_error=?,lease_id='',lease_until=0 WHERE id=? AND lease_id=?")
-      .run(outcome, error, claim.job.id, claim.job.lease_id);
+    db.prepare("UPDATE telegram_relay_outbox SET caption_edit_outcome=?,last_error=?,next_attempt_at=?,lease_id='',lease_until=0 WHERE id=? AND lease_id=?")
+      .run(outcome, error, nextAttempt, claim.job.id, claim.job.lease_id);
     db.prepare("UPDATE telegram_relay_state SET send_lease_id='',send_lease_until=0,next_send_at=MAX(next_send_at,?) WHERE id='primary' AND send_lease_id=?")
       .run(nextSend, claim.job.lease_id);
   });

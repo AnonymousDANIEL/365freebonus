@@ -878,7 +878,7 @@ test('busy and backoff preflight waits are persisted without duplicate media and
     {state:'backoff',attempted:false,outcome:'unavailable'},
     {state:'ok',attempted:true,outcome:'preserved'});
   await deliver(now+8000);assert.equal(jobs()[0].caption_edit_outcome,'account_waiting_1');
-  assert.equal(state().next_send_at,now+13000);
+  assert.equal(state().next_send_at,now+11000);assert.equal(jobs()[0].next_attempt_at,now+13000);
   closeDatabase();await deliver(now+12999);assert.equal(personalEdit.calls.length,1);
   await deliver(now+13000);assert.equal(jobs()[0].caption_edit_outcome,'account_waiting_2');
   await deliver(now+17999);assert.equal(personalEdit.calls.length,2);
@@ -886,19 +886,69 @@ test('busy and backoff preflight waits are persisted without duplicate media and
   assert.equal(personalEdit.calls.length,3);assert.equal(sends().length,1);assert.equal(edits().length,1);
 });
 
+test('a sixty second account lease defers preflight without consuming bounded waits or clearing the lease',async t=>{
+  await botEditStillChanged({personal:true,t});
+  getSqlite().exec('ALTER TABLE telegram_personal_account ADD COLUMN lease_until INTEGER NOT NULL DEFAULT 0');
+  getSqlite().prepare("UPDATE telegram_personal_account SET lease_until=? WHERE id='primary'").run(now+68000);
+  personalEdit.results.push(
+    {state:'busy',attempted:false,outcome:'unavailable',retryAt:now+68000},
+    {state:'ok',attempted:true,outcome:'preserved'});
+  await deliver(now+8000);
+  assert.equal(jobs()[0].caption_edit_outcome,'account_waiting_1');
+  assert.equal(jobs()[0].next_attempt_at,now+68000);assert.equal(state().next_send_at,now+11000);
+  closeDatabase();
+  for(let at=now+13000;at<now+68000;at+=5000)await deliver(at);
+  assert.equal(personalEdit.calls.length,1);assert.equal(jobs()[0].caption_edit_outcome,'account_waiting_1');
+  assert.equal(getSqlite().prepare("SELECT lease_until FROM telegram_personal_account WHERE id='primary'").get().lease_until,now+68000);
+  await poll(now+68000,[]);await deliver(now+68000);
+  assert.equal(jobs()[0].caption_edit_outcome,'account_preserved');assert.equal(personalEdit.calls.length,2);
+  assert.equal(sends().length,1);assert.equal(edits().length,1);
+  assert.equal(getSqlite().prepare("SELECT lease_until FROM telegram_personal_account WHERE id='primary'").get().lease_until,now+68000);
+  closeDatabase();await deliver(now+72000);assert.equal(personalEdit.calls.length,2);
+});
+
+test('a deferred account repair leaves the ordinary media queue free after the global send interval',async()=>{
+  await botEditStillChanged();
+  personalEdit.results.push({state:'backoff',attempted:false,outcome:'unavailable',retryAt:now+68000});
+  await deliver(now+8000);await poll(now+9000,[photo(2)]);
+  assert.equal(jobs()[0].next_attempt_at,now+68000);assert.equal(state().next_send_at,now+11000);
+  await deliver(now+11000);
+  assert.equal(sends().length,2);assert.equal(sends()[1].parameters.photo,'photo-2');
+  assert.equal(personalEdit.calls.length,1);assert.equal(edits().length,1);
+  assert.equal(jobs()[0].caption_edit_outcome,'account_waiting_1');assert.equal(jobs()[1].status,'sent');
+});
+
+test('a known legacy unattempted unavailable repair reopens once and its new final outcome never reopens',async()=>{
+  await botEditStillChanged();
+  const unavailable='个人账号备用补正当前不可用，请检查本人账号连接和编辑权限；原媒体不会重复发送。';
+  getSqlite().prepare("UPDATE telegram_relay_outbox SET caption_edit_outcome='account_unavailable',last_error=?").run(unavailable);
+  personalEdit.results.push(
+    {state:'busy',attempted:false,outcome:'unavailable',retryAt:now+18000},
+    {state:'unavailable',attempted:false,outcome:'unavailable'});
+  await deliver(now+8000);
+  assert.equal(personalEdit.calls.length,1);assert.equal(jobs()[0].caption_edit_outcome,'account_waiting_1');
+  assert.equal(jobs()[0].next_attempt_at,now+18000);
+  closeDatabase();await deliver(now+13000);assert.equal(personalEdit.calls.length,1);
+  await deliver(now+18000);
+  assert.equal(personalEdit.calls.length,2);assert.equal(jobs()[0].caption_edit_outcome,'account_unavailable_final');
+  assert.equal(jobs()[0].last_error,unavailable);
+  closeDatabase();await deliver(now+23000);await deliver(now+28000);
+  assert.equal(personalEdit.calls.length,2);assert.equal(sends().length,1);assert.equal(edits().length,1);
+});
+
 test('a continually busy personal preflight stops after three bounded waits and never retries after restart',async()=>{
   await botEditStillChanged();personalEdit.results.push(...Array.from({length:4},()=>({state:'busy',attempted:false,outcome:'unavailable'})));
   for(let i=0;i<3;i++){
     await deliver(now+8000+i*5000);assert.equal(jobs()[0].caption_edit_outcome,`account_waiting_${i+1}`);
   }
-  await deliver(now+23000);assert.equal(jobs()[0].caption_edit_outcome,'account_unavailable');
+  await deliver(now+23000);assert.equal(jobs()[0].caption_edit_outcome,'account_unavailable_final');
   closeDatabase();await deliver(now+28000);await deliver(now+33000);
   assert.equal(personalEdit.calls.length,4);assert.equal(sends().length,1);assert.equal(edits().length,1);
 });
 
 for(const state of ['disconnected','unavailable'])test(`an unavailable personal account (${state}) is terminal without waiting or actual edit retries`,async()=>{
   await botEditStillChanged();personalEdit.results.push({state,attempted:false,outcome:'unavailable'});
-  await deliver(now+8000);assert.equal(jobs()[0].caption_edit_outcome,'account_unavailable');
+  await deliver(now+8000);assert.equal(jobs()[0].caption_edit_outcome,'account_unavailable_final');
   await deliver(now+12000);assert.equal(personalEdit.calls.length,1);assert.equal(sends().length,1);
 });
 
