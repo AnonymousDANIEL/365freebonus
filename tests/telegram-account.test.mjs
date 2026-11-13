@@ -22,7 +22,7 @@ exports.StringSession=class {constructor(value){this.value=value||'fixture-sessi
 `);
 writeFileSync(path.join(fixture, 'node_modules/teleproto/index.js'), `
 class Box {constructor(value={}){Object.assign(this,value);this.className=this.constructor.name;}}
-class User extends Box {} class Channel extends Box {} class Photo extends Box {} class Document extends Box {}
+class User extends Box {} class Username extends Box {} class Channel extends Box {} class Photo extends Box {} class Document extends Box {}
 class MessageMediaPhoto extends Box {} class MessageMediaDocument extends Box {} class DocumentAttributeAnimated extends Box {} class DocumentAttributeVideo extends Box {}
 class Message extends Box {get photo(){return this.media?.photo;}get document(){return this.media?.document;}}
 class InputPeerChannel extends Box {} class ReplyInlineMarkup extends Box {} class InlineButtonTypeUrl extends Box {}
@@ -32,13 +32,13 @@ class MessageEntityCode extends Box {} class MessageEntityPre extends Box {} cla
 class MessageEntityFormattedDate extends Box {} class MessageEntityTextUrl extends Box {} class MessageEntityMentionName extends Box {}
 class MessageEntityHashtag extends Box {} class MessageEntityCashtag extends Box {} class MessageEntityBotCommand extends Box {}
 class MessageEntityUnknown extends Box {}
-class Authorization extends Box {} class SignIn extends Box {} class LogOut extends Box {}
-exports.Api={User,Channel,Photo,Document,MessageMediaPhoto,MessageMediaDocument,DocumentAttributeAnimated,DocumentAttributeVideo,Message,InputPeerChannel,ReplyInlineMarkup,InlineButtonTypeUrl,
-MessageEntityCustomEmoji,MessageEntityBold,MessageEntityItalic,MessageEntityUnderline,MessageEntityStrike,MessageEntitySpoiler,MessageEntityCode,MessageEntityPre,MessageEntityBlockquote,MessageEntityFormattedDate,MessageEntityTextUrl,MessageEntityMentionName,MessageEntityHashtag,MessageEntityCashtag,MessageEntityBotCommand,MessageEntityUnknown,auth:{Authorization,SignIn,LogOut}};
+class Authorization extends Box {} class SignIn extends Box {} class LogOut extends Box {} class GetAdminedBots extends Box {}
+exports.Api={User,Username,Channel,Photo,Document,MessageMediaPhoto,MessageMediaDocument,DocumentAttributeAnimated,DocumentAttributeVideo,Message,InputPeerChannel,ReplyInlineMarkup,InlineButtonTypeUrl,
+MessageEntityCustomEmoji,MessageEntityBold,MessageEntityItalic,MessageEntityUnderline,MessageEntityStrike,MessageEntitySpoiler,MessageEntityCode,MessageEntityPre,MessageEntityBlockquote,MessageEntityFormattedDate,MessageEntityTextUrl,MessageEntityMentionName,MessageEntityHashtag,MessageEntityCashtag,MessageEntityBotCommand,MessageEntityUnknown,auth:{Authorization,SignIn,LogOut},bots:{GetAdminedBots}};
 exports.utils={getPeerId:entity=>'-100'+entity.id};
 exports.Logger=class {setLevel(){};};
 exports.state={};
-exports.reset=()=>Object.assign(exports.state,{calls:[],dialogs:[],messages:[],error:null,passwordNeeded:false,media:Buffer.from('fixture-image'),consume:true,queue:[],onDownload:null,onEnqueue:null});
+exports.reset=()=>Object.assign(exports.state,{calls:[],dialogs:[],messages:[],error:null,passwordNeeded:false,media:Buffer.from('fixture-image'),consume:true,queue:[],onDownload:null,onEnqueue:null,me:null,ownedBots:[],onOwnedBots:null});
 exports.reset();
 function fail(method){const e=exports.state.error;if(e&&e.method===method)throw Object.assign(new Error('PRIVATE RAW DETAIL'),e);}
 exports.TelegramClient=class {
@@ -50,9 +50,10 @@ exports.TelegramClient=class {
   async sendCode(){exports.state.calls.push({method:'sendCode'});fail('sendCode');return {phoneCodeHash:'private-code-hash',isCodeViaApp:true};}
   async invoke(request){exports.state.calls.push({method:request.className});fail(request.className);
     if(request instanceof SignIn){if(exports.state.passwordNeeded)throw Object.assign(new Error(),{errorMessage:'SESSION_PASSWORD_NEEDED'});return new Authorization({user:new User()});}
+    if(request instanceof GetAdminedBots){if(exports.state.onOwnedBots)await exports.state.onOwnedBots();return exports.state.ownedBots;}
     return {};}
   async signInWithPassword(_creds,params){exports.state.calls.push({method:'password'});await params.password();fail('password');return new User();}
-  async getMe(){fail('getMe');return new User();}
+  async getMe(){exports.state.calls.push({method:'getMe'});fail('getMe');return exports.state.me||new User();}
   iterDialogs(){fail('dialogs');return (async function*(){for(const dialog of exports.state.dialogs)yield dialog;})();}
   async getEntity(peer){fail('entity');return exports.state.dialogs.find(d=>String(d.entity.id)===peer.channelId.toString())?.entity;}
   iterMessages(peer,params){exports.state.calls.push({method:'history',peer:peer.channelId.toString(),params});fail('history');
@@ -385,6 +386,99 @@ test('source emoji audit failures do not clear saved authorization or modify que
   assert.deepEqual({...db().prepare('SELECT * FROM telegram_relay_outbox').get()},beforeJob);
   assert.equal(cursor(),40);
   assert.equal(telegram.state.queue.length,0);
+});
+
+for (const scenario of [
+  {name:'owned Premium bot owner',premium:true,usernames:undefined,expected:'owner_premium'},
+  {name:'owned non-Premium owner without a collectible username',premium:false,usernames:[{username:'private_bot_name',editable:true}],expected:'not_qualified'},
+  {name:'owned bot with a collectible username',premium:false,usernames:[{username:'private_collectible_name',editable:false}],expected:'fragment_username'},
+  {name:'owned bot with an omitted non-editable TL flag',premium:false,usernames:[{username:'private_collectible_name',active:true}],expected:'fragment_username'},
+  {name:'collectible qualification takes priority over owner Premium',premium:true,usernames:[{username:'private_collectible_name',editable:false}],expected:'fragment_username'},
+]) test(`bot emoji qualification reads ${scenario.name} without exposing profiles or changing application data`,async()=>{
+  await login();await select();ready();
+  telegram.state.me=new Api.User({id:'private_owner_id',firstName:'private_owner_name',phone:'private_owner_phone',premium:scenario.premium});
+  telegram.state.ownedBots=[new Api.User({id:'77',bot:true,username:'private_bot_name',usernames:scenario.usernames?.map(value=>new Api.Username(value))})];
+  const before={...stored()};
+  const beforeCursor=cursor();
+  const beforeQueue=db().prepare('SELECT * FROM telegram_relay_outbox').all();
+  const at=telegram.state.calls.length;
+  const result=await account.inspectConnectedBotEmojiQualification();
+  assert.deepEqual(result,{state:'ok',qualification:scenario.expected});
+  assert.doesNotMatch(JSON.stringify(result),/private_owner|private_bot|private_collectible|"(?:id|username|usernames|firstName|phone|premium)"\s*:/i);
+  assert.deepEqual({...stored()},before);
+  assert.equal(cursor(),beforeCursor);
+  assert.deepEqual(db().prepare('SELECT * FROM telegram_relay_outbox').all(),beforeQueue);
+  assert.equal(telegram.state.queue.length,0);
+  assert.deepEqual(telegram.state.calls.slice(at).filter(call=>['getMe','GetAdminedBots','history','download','sendCode','SignIn','password'].includes(call.method)).map(call=>call.method),['getMe','GetAdminedBots']);
+});
+
+test('bot emoji qualification never treats a non-owner Premium account as the bot owner',async()=>{
+  await login();ready();
+  telegram.state.me=new Api.User({id:'private_other_owner',premium:true});
+  telegram.state.ownedBots=[new Api.User({id:'999',bot:true,usernames:[new Api.Username({username:'private_other_collectible',editable:false})]})];
+  assert.deepEqual(await account.inspectConnectedBotEmojiQualification(),{state:'ok',qualification:'owner_not_verified'});
+});
+
+test('bot emoji qualification leaves minimal or ambiguous bot responses unknown',async()=>{
+  await login();ready();
+  telegram.state.me=new Api.User({id:'private_owner',premium:true});
+  for (const bots of [
+    [new Api.User({id:'77',bot:true,min:true})],
+    [new Api.User({id:'77',bot:true,deleted:true})],
+    [new Api.User({id:'77',bot:true,usernames:[{username:'private_untyped_name',editable:false}]})],
+    {users:[new Api.User({id:'77',bot:true})]},
+    [{}],
+  ]) {
+    telegram.state.ownedBots=bots;
+    assert.deepEqual(await account.inspectConnectedBotEmojiQualification(),{state:'ok',qualification:'unknown'});
+  }
+});
+
+test('bot emoji qualification refuses disconnected, busy and backoff reads before any network calls',async()=>{
+  assert.deepEqual(await account.inspectConnectedBotEmojiQualification(),{state:'disconnected',qualification:'unknown'});
+  assert.equal(telegram.state.calls.length,0);
+  await login();ready();
+  const at=telegram.state.calls.length;
+  db().prepare('UPDATE telegram_personal_account SET lease_until=?').run(Date.now()+60000);
+  assert.deepEqual(await account.inspectConnectedBotEmojiQualification(),{state:'busy',qualification:'unknown'});
+  db().prepare('UPDATE telegram_personal_account SET lease_until=0,next_attempt_at=?').run(Date.now()+60000);
+  assert.deepEqual(await account.inspectConnectedBotEmojiQualification(),{state:'backoff',qualification:'unknown'});
+  assert.equal(telegram.state.calls.length,at);
+});
+
+test('bot emoji qualification revalidates bot identity after asynchronous Telegram reads',async()=>{
+  await login();ready();
+  telegram.state.me=new Api.User({id:'private_owner',premium:true});
+  telegram.state.ownedBots=[new Api.User({id:'77',bot:true})];
+  telegram.state.onOwnedBots=async()=>db().prepare('UPDATE telegram_relay_state SET bot_id=78').run();
+  assert.deepEqual(await account.inspectConnectedBotEmojiQualification(),{state:'unavailable',qualification:'unknown'});
+});
+
+test('bot emoji qualification retains a genuine FloodWait without clearing source authorization',async()=>{
+  await login();await select();ready();
+  telegram.state.error={method:'GetAdminedBots',errorMessage:'FLOOD_WAIT_120',seconds:120};
+  const before=Date.now();
+  const session=stored().session_ciphertext;
+  const beforeCursor=cursor();
+  assert.deepEqual(await account.inspectConnectedBotEmojiQualification(),{state:'backoff',qualification:'unknown'});
+  assert.ok(stored().next_attempt_at>=before+120000);
+  assert.equal(stored().stage,'connected');
+  assert.equal(stored().session_ciphertext,session);
+  assert.equal(cursor(),beforeCursor);
+  assert.equal(telegram.state.queue.length,0);
+});
+
+test('bot emoji qualification failure does not revoke authorization or alter queued media',async()=>{
+  await login();await select();ready();
+  db().prepare(`INSERT INTO telegram_relay_outbox(source_chat_id,source_message_id,fingerprint,queued_at,revision,media_kind,file_id,file_unique_id,caption)
+    VALUES(?,1,'fixture-qualification',1,'fixture-revision','photo','fixture-file','fixture-unique','fixture-caption')`).run(source);
+  const before={...stored()};
+  const beforeQueue=db().prepare('SELECT * FROM telegram_relay_outbox').all();
+  telegram.state.error={method:'GetAdminedBots',errorMessage:'SESSION_REVOKED'};
+  assert.deepEqual(await account.inspectConnectedBotEmojiQualification(),{state:'unavailable',qualification:'unknown'});
+  assert.deepEqual({...stored()},before);
+  assert.deepEqual(db().prepare('SELECT * FROM telegram_relay_outbox').all(),beforeQueue);
+  assert.equal(cursor(),40);
 });
 
 test('personal captions preserve formatting, quote expansion, code language and explicit date format',async()=>{

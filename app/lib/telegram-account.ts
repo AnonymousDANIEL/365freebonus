@@ -491,6 +491,65 @@ type SourceEmojiSample = {
   negativeCustomEmojiEntities: number; unrepresentableCustomEmojiEntities: number;
 };
 
+type ConnectedBotEmojiQualification = {
+  state: SourceEmojiSample["state"];
+  qualification: "owner_premium" | "fragment_username" | "not_qualified" | "owner_not_verified" | "unknown";
+};
+
+/** Read only ownership/qualification needed for this bot; never return profile data. */
+export async function inspectConnectedBotEmojiQualification(): Promise<ConnectedBotEmojiQualification> {
+  const unknown: ConnectedBotEmojiQualification = { state: "ok", qualification: "unknown" };
+  const db = getSqlite();
+  const current = row(db);
+  if (current.stage !== "connected" || !current.session_ciphertext) return { ...unknown, state: "disconnected" };
+  if (current.lease_until > Date.now()) return { ...unknown, state: "busy" };
+  if (current.next_attempt_at > Date.now()) return { ...unknown, state: "backoff" };
+  const botIdentity = () => (db.prepare("SELECT bot_id FROM telegram_relay_state WHERE id='primary'").get() as { bot_id: number } | undefined)?.bot_id || 0;
+  const botId = botIdentity();
+  if (!Number.isSafeInteger(botId) || botId <= 0) return unknown;
+  let claim: Claim;
+  try { claim = claimAccount(db, Date.now(), { connected: true, respectBackoff: true }); }
+  catch (error) {
+    const state = error instanceof TelegramAccountError && error.status === 429 ? "backoff"
+      : error instanceof TelegramAccountError && error.message === BUSY_ERROR ? "busy"
+      : error instanceof TelegramAccountError && error.message === REAUTH_ERROR ? "disconnected" : "unavailable";
+    return { ...unknown, state };
+  }
+  let client: TelegramClient | undefined;
+  const deadline = Date.now() + 40_000;
+  const remaining = () => Math.max(1, Math.min(REQUEST_MS, deadline - Date.now()));
+  try {
+    client = makeClient(unseal<Credentials>(claim.row.config_ciphertext), unseal<string>(claim.row.session_ciphertext));
+    await bounded(client, client.connect(), remaining());
+    renew(db, claim);
+    const me = await bounded(client, client.getMe(), remaining());
+    renew(db, claim);
+    if (!(me instanceof Api.User) || me.bot || me.deleted || me.min) return unknown;
+    if (Date.now() >= deadline) return { ...unknown, state: "unavailable" };
+    const bots = await bounded(client, client.invoke(new Api.bots.GetAdminedBots()), remaining());
+    renew(db, claim);
+    if (!owns(db, claim) || botIdentity() !== botId) return { ...unknown, state: "unavailable" };
+    if (!Array.isArray(bots) || bots.some(bot => !(bot instanceof Api.User) || !bot.bot)) return unknown;
+    const bot = bots.find(candidate => candidate instanceof Api.User && candidate.id.toString() === String(botId));
+    if (!bot) return { state: "ok", qualification: "owner_not_verified" };
+    if (!(bot instanceof Api.User) || bot.min || bot.deleted) return unknown;
+    if (bot.usernames !== undefined && (!Array.isArray(bot.usernames) || bot.usernames.some(username => !(username instanceof Api.Username)
+      || typeof username.username !== "string" || !/^[A-Za-z0-9_]{1,32}$/.test(username.username)))) return unknown;
+    if (Array.isArray(bot.usernames) && bot.usernames.some(username => username.editable !== true)) {
+      return { state: "ok", qualification: "fragment_username" };
+    }
+    return { state: "ok", qualification: me.premium === true ? "owner_premium" : "not_qualified" };
+  } catch (error) {
+    // Keep a genuine Telegram wait, but never alter authorization, source
+    // cursors, queued messages or persisted sessions for a diagnostic read.
+    if (safeError(error).status === 429) {
+      recordFailure(db, claim, error, "emoji-bot-qualification");
+      return { ...unknown, state: "backoff" };
+    }
+    return { ...unknown, state: "unavailable" };
+  } finally { release(db, claim); await closeClient(client); }
+}
+
 /** Bounded read-only source audit. No message content, identifiers or credentials leave this function. */
 export async function sampleSelectedSourceEmoji(): Promise<SourceEmojiSample> {
   const result: SourceEmojiSample = { state: "ok", sourcesSampled: 0, messagesSampled: 0, customEmojiEntities: 0,

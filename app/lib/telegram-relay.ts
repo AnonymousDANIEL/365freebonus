@@ -549,11 +549,30 @@ export function startTelegramRelayWorker(decryptToken: DecryptToken) {
       const { relayFormattingDiagnostics } = await import("./telegram-relay-diagnostics");
       console.info("Telegram relay formatting audit.", JSON.stringify(relayFormattingDiagnostics(getSqlite(), Date.now(), Date.parse("2026-11-13T11:48:35Z"))));
       if (settings(getSqlite())?.relay_enabled !== 1) return;
-      const { sampleSelectedSourceEmoji } = await import("./telegram-account");
+      const { sampleSelectedSourceEmoji, inspectConnectedBotEmojiQualification } = await import("./telegram-account");
       for (let attempt = 0; attempt < 6; attempt++) {
         const sample = await sampleSelectedSourceEmoji();
         if (sample.state !== "busy" || attempt === 5) {
           console.info("Telegram relay source emoji audit.", JSON.stringify(sample));
+          break;
+        }
+        await new Promise(resolve => setTimeout(resolve, 5_000));
+      }
+      let targetKind = "unknown";
+      const snapshot = settings(getSqlite());
+      const runtime = state(getSqlite());
+      if (snapshot && runtime.target_chat_id < 0) {
+        let token = "";
+        try { token = decryptToken(snapshot.token_ciphertext); } catch { /* No credentials enter diagnostics. */ }
+        if (token && botId(token) === runtime.bot_id) {
+          const chat = await telegramRequest(token, "getChat", { chat_id: runtime.target_chat_id }).catch(() => null);
+          if (chat?.ok && chat.result.id === runtime.target_chat_id && ["group", "supergroup", "channel"].includes(String(chat.result.type))) targetKind = String(chat.result.type);
+        }
+      }
+      for (let attempt = 0; attempt < 6; attempt++) {
+        const qualification = await inspectConnectedBotEmojiQualification();
+        if (qualification.state !== "busy" || attempt === 5) {
+          console.info("Telegram relay emoji qualification audit.", JSON.stringify({ ...qualification, targetKind }));
           break;
         }
         await new Promise(resolve => setTimeout(resolve, 5_000));
