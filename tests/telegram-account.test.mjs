@@ -33,13 +33,13 @@ class MessageEntityCode extends Box {} class MessageEntityPre extends Box {} cla
 class MessageEntityFormattedDate extends Box {} class MessageEntityTextUrl extends Box {} class MessageEntityUrl extends Box {} class MessageEntityMentionName extends Box {}
 class MessageEntityHashtag extends Box {} class MessageEntityCashtag extends Box {} class MessageEntityBotCommand extends Box {}
 class MessageEntityUnknown extends Box {}
-class Authorization extends Box {} class SignIn extends Box {} class LogOut extends Box {} class GetAdminedBots extends Box {}
+class Authorization extends Box {} class SignIn extends Box {} class LogOut extends Box {} class GetAdminedBots extends Box {} class EditMessage extends Box {}
 exports.Api={User,Username,Channel,Photo,Document,MessageMediaPhoto,MessageMediaDocument,DocumentAttributeAnimated,DocumentAttributeVideo,Message,InputPeerChannel,PeerChannel,ReplyInlineMarkup,InlineButtonTypeUrl,KeyboardInlineButton,KeyboardInlineButtonRow,InlineButtonTypeCallback,
-MessageEntityCustomEmoji,MessageEntityBold,MessageEntityItalic,MessageEntityUnderline,MessageEntityStrike,MessageEntitySpoiler,MessageEntityCode,MessageEntityPre,MessageEntityBlockquote,MessageEntityFormattedDate,MessageEntityTextUrl,MessageEntityUrl,MessageEntityMentionName,MessageEntityHashtag,MessageEntityCashtag,MessageEntityBotCommand,MessageEntityUnknown,auth:{Authorization,SignIn,LogOut},bots:{GetAdminedBots}};
+MessageEntityCustomEmoji,MessageEntityBold,MessageEntityItalic,MessageEntityUnderline,MessageEntityStrike,MessageEntitySpoiler,MessageEntityCode,MessageEntityPre,MessageEntityBlockquote,MessageEntityFormattedDate,MessageEntityTextUrl,MessageEntityUrl,MessageEntityMentionName,MessageEntityHashtag,MessageEntityCashtag,MessageEntityBotCommand,MessageEntityUnknown,auth:{Authorization,SignIn,LogOut},bots:{GetAdminedBots},messages:{EditMessage}};
 exports.utils={getPeerId:entity=>'-100'+(entity.channelId||entity.id)};
 exports.Logger=class {setLevel(){};};
 exports.state={};
-exports.reset=()=>Object.assign(exports.state,{calls:[],dialogs:[],messages:[],error:null,passwordNeeded:false,media:Buffer.from('fixture-image'),consume:true,queue:[],onDownload:null,onEnqueue:null,me:null,ownedBots:[],onOwnedBots:null,resolvedTarget:null,onEntity:null,onGetMessages:null,onGetMe:null});
+exports.reset=()=>Object.assign(exports.state,{calls:[],dialogs:[],messages:[],error:null,passwordNeeded:false,media:Buffer.from('fixture-image'),consume:true,queue:[],onDownload:null,onEnqueue:null,me:null,ownedBots:[],onOwnedBots:null,resolvedTarget:null,onEntity:null,onGetMessages:null,onGetMe:null,onEdit:null,applyEdit:true});
 exports.reset();
 function fail(method){const e=exports.state.error;if(e&&e.method===method)throw Object.assign(new Error('PRIVATE RAW DETAIL'),e);}
 exports.TelegramClient=class {
@@ -49,9 +49,10 @@ exports.TelegramClient=class {
   async disconnect(){exports.state.calls.push({method:'disconnect'});}
   async destroy(){exports.state.calls.push({method:'destroy'});}
   async sendCode(){exports.state.calls.push({method:'sendCode'});fail('sendCode');return {phoneCodeHash:'private-code-hash',isCodeViaApp:true};}
-  async invoke(request){exports.state.calls.push({method:request.className});fail(request.className);
+  async invoke(request,_dcId,options){exports.state.calls.push({method:request.className,request,options});fail(request.className);
     if(request instanceof SignIn){if(exports.state.passwordNeeded)throw Object.assign(new Error(),{errorMessage:'SESSION_PASSWORD_NEEDED'});return new Authorization({user:new User()});}
     if(request instanceof GetAdminedBots){if(exports.state.onOwnedBots)await exports.state.onOwnedBots();return exports.state.ownedBots;}
+    if(request instanceof EditMessage){if(exports.state.onEdit)await exports.state.onEdit(request);if(exports.state.applyEdit)exports.state.messages=exports.state.messages.map(message=>message.id===request.id?new Message({...message,message:request.message,entities:request.entities}):message);return {};}
     return {};}
   async signInWithPassword(_creds,params){exports.state.calls.push({method:'password'});await params.password();fail('password');return new User();}
   async getMe(){exports.state.calls.push({method:'getMe'});fail('getMe');if(exports.state.onGetMe)await exports.state.onGetMe();return exports.state.me||new User();}
@@ -126,6 +127,18 @@ async function readyDelivery(value=delivery()) {
   telegram.state.messages=[value.message];
   sentReference(value);
   return value;
+}
+async function readyAccountEdit(value=delivery()) {
+  await readyDelivery(value);
+  telegram.state.resolvedTarget=new Api.Channel({id:'9999',broadcast:true,creator:true});
+  telegram.state.me=new Api.User({id:'private-owner',premium:true});
+  value.message.post=true;
+  value.message.media=new Api.MessageMediaPhoto({photo:new Api.Photo({id:{toString:()=>'555555555555555555'}})});
+  value.message.entities=value.message.entities.filter(entity=>!(entity instanceof Api.MessageEntityCustomEmoji));
+  const lease='fixture-edit-lease',until=Date.now()+60000;
+  db().prepare("UPDATE telegram_relay_outbox SET caption_edit_outcome='account_attempting',lease_id=?,lease_until=?").run(lease,until);
+  db().prepare('UPDATE telegram_relay_state SET send_lease_id=?,send_lease_until=?').run(lease,until);
+  return {targetChatId:target,relayRevision:'relay-generation',messageId:value.message.id,caption:value.caption,captionEntities:value.entities};
 }
 function cursor(id=source) { return db().prepare('SELECT last_message_id FROM telegram_personal_sources WHERE chat_id=?').get(id).last_message_id; }
 function closeDb() {
@@ -537,6 +550,167 @@ for(const scenario of [
   assert.equal(result.state,'ok');assert.equal(result.personalEditQualification,scenario.expected);
   assert.equal(result.sampledPosts,1);
   assert.equal(telegram.state.queue.length,0);
+});
+
+test('qualified personal account performs one caption-only MTProto edit and verifies actual emoji, media and fixed buttons',async()=>{
+  const input=await readyAccountEdit();
+  const before={...stored()},queue=db().prepare('SELECT * FROM telegram_relay_outbox').all(),beforeCursor=cursor();
+  const at=telegram.state.calls.length;
+  const result=await account.editVerifiedRelayCaptionWithAccount(input);
+  assert.deepEqual(result,{state:'ok',attempted:true,outcome:'preserved'});
+  const calls=telegram.state.calls.slice(at),edits=calls.filter(call=>call.method==='EditMessage');
+  assert.equal(edits.length,1);
+  assert.deepEqual(Object.keys(edits[0].request).sort(),['className','entities','id','message','peer']);
+  assert.equal(edits[0].request.id,input.messageId);assert.equal(edits[0].request.message,input.caption);
+  assert.equal(edits[0].request.entities.find(entity=>entity instanceof Api.MessageEntityCustomEmoji).documentId.toString(),'-9007199254740993123');
+  assert.equal(edits[0].options.maxRetryCount,0);assert.equal(edits[0].options.floodSleepThreshold,0);assert.ok(edits[0].options.timeout>0&&edits[0].options.timeout<=25000);
+  assert.equal(calls.filter(call=>call.method==='getMessages').length,2);
+  assert.ok(calls.filter(call=>call.method==='getMessages').every(call=>call.peer===telegram.state.resolvedTarget&&call.params.ids.length===1&&call.params.ids[0]===input.messageId));
+  assert.ok(calls.every(call=>['construct','connect','entity','getMe','getMessages','EditMessage','destroy'].includes(call.method)));
+  assert.deepEqual({...stored()},before);assert.equal(cursor(),beforeCursor);
+  assert.deepEqual(db().prepare('SELECT * FROM telegram_relay_outbox').all(),queue);
+  assert.doesNotMatch(JSON.stringify(result),/private|555555|900719|join365|token|session|caption|id/i);
+});
+
+test('personal caption edit supports all existing safe formatting, signed custom IDs, dates and website link entity types',async()=>{
+  const types=['bold','italic','underline','strikethrough','spoiler','code','pre','blockquote','expandable_blockquote','hashtag','cashtag','bot_command','date_time','text_link'];
+  const caption='⭐ '+types.map(()=> 'example').join(' ')+' https://365freebonus.com/';
+  const value=delivery(701,{caption});
+  let offset=2;
+  value.entities.push(...types.map(type=>{const entity={type,offset,length:7};offset+=8;
+    if(type==='pre')entity.language='typescript';
+    if(type==='date_time'){entity.unix_time=1900000000;entity.date_time_format='wDT';}
+    if(type==='text_link')entity.url='https://365freebonus.com/';
+    return entity;}));
+  const input=await readyAccountEdit(value);
+  const result=await account.editVerifiedRelayCaptionWithAccount(input);
+  assert.deepEqual(result,{state:'ok',attempted:true,outcome:'preserved'});
+  const edit=telegram.state.calls.find(call=>call.method==='EditMessage').request;
+  assert.equal(edit.entities.length,value.entities.length);
+  assert.ok(edit.entities.some(entity=>entity instanceof Api.MessageEntityBlockquote&&entity.collapsed===true));
+  assert.ok(edit.entities.some(entity=>entity instanceof Api.MessageEntityFormattedDate&&entity.dayOfWeek&&entity.longDate&&entity.longTime&&entity.date===1900000000));
+  assert.ok(edit.entities.some(entity=>entity instanceof Api.MessageEntityPre&&entity.language==='typescript'));
+  assert.ok(edit.entities.some(entity=>entity instanceof Api.MessageEntityTextUrl&&entity.url==='https://365freebonus.com/'));
+});
+
+for(const change of ['not-premium','not-admin','not-broadcast','min-channel','bot-account','min-account','wrong-target','wrong-revision','unleased','expired-relay-lease','expired-row-lease','row-caption','unsupported-entity','overflow-date'])
+test('personal caption edit refuses unsafe or unverified prerequisite '+change,async()=>{
+  const input=await readyAccountEdit();
+  if(change==='not-premium')telegram.state.me.premium=false;
+  if(change==='not-admin')telegram.state.resolvedTarget.creator=false;
+  if(change==='not-broadcast')telegram.state.resolvedTarget.broadcast=false;
+  if(change==='min-channel')telegram.state.resolvedTarget.min=true;
+  if(change==='bot-account')telegram.state.me.bot=true;
+  if(change==='min-account')telegram.state.me.min=true;
+  if(change==='wrong-target')input.targetChatId=source;
+  if(change==='wrong-revision')input.relayRevision='other-revision';
+  if(change==='unleased')db().prepare("UPDATE telegram_relay_outbox SET caption_edit_outcome='changed'").run();
+  if(change==='expired-relay-lease')db().prepare('UPDATE telegram_relay_state SET send_lease_until=0').run();
+  if(change==='expired-row-lease')db().prepare('UPDATE telegram_relay_outbox SET lease_until=0').run();
+  if(change==='row-caption')input.caption+=' changed';
+  if(change==='unsupported-entity')input.captionEntities.push({type:'text_mention',offset:2,length:5});
+  if(change==='overflow-date')input.captionEntities.push({type:'date_time',offset:2,length:5,unix_time:2147483648});
+  const result=await account.editVerifiedRelayCaptionWithAccount(input);
+  assert.equal(result.attempted,false);assert.notEqual(result.outcome,'preserved');
+  assert.equal(telegram.state.calls.filter(call=>call.method==='EditMessage').length,0);
+});
+
+for(const change of ['not-post','forwarded','via-bot','via-business','wrong-peer','wrong-id','caption','buttons','foreign-link','missing-media'])
+test('personal caption edit rejects an original post with '+change+' before invocation',async()=>{
+  const input=await readyAccountEdit(),message=telegram.state.messages[0];
+  if(change==='not-post')message.post=false;
+  if(change==='forwarded')message.fwdFrom={};
+  if(change==='via-bot')message.viaBotId='77';
+  if(change==='via-business')message.viaBusinessBotId='77';
+  if(change==='wrong-peer')message.peerId=new Api.PeerChannel({channelId:'1001'});
+  if(change==='wrong-id')message.id=999;
+  if(change==='caption')message.message+=' changed';
+  if(change==='buttons')message.replyMarkup.rows[0].buttons[0].text='Other';
+  if(change==='foreign-link')message.entities.push(new Api.MessageEntityTextUrl({offset:2,length:5,url:'https://foreign.example'}));
+  if(change==='missing-media')message.media=undefined;
+  const result=await account.editVerifiedRelayCaptionWithAccount(input);
+  assert.deepEqual(result,{state:'ok',attempted:false,outcome:'invalid'});
+  assert.equal(telegram.state.calls.filter(call=>call.method==='EditMessage').length,0);
+});
+
+for(const phase of ['entity','me','before-read','invoke'])test('personal caption edit does not outlive changed worker ownership at '+phase,async()=>{
+  const input=await readyAccountEdit();
+  const mutate=()=>db().prepare("UPDATE telegram_relay_outbox SET lease_id='new-owner'").run();
+  if(phase==='entity')telegram.state.onEntity=mutate;
+  if(phase==='me')telegram.state.onGetMe=mutate;
+  if(phase==='before-read')telegram.state.onGetMessages=mutate;
+  if(phase==='invoke')telegram.state.onEdit=mutate;
+  const result=await account.editVerifiedRelayCaptionWithAccount(input);
+  assert.equal(result.state,'unavailable');assert.equal(result.attempted,phase==='invoke');
+  assert.equal(result.outcome,phase==='invoke'?'uncertain':'unavailable');
+  assert.equal(telegram.state.calls.filter(call=>call.method==='EditMessage').length,phase==='invoke'?1:0);
+});
+
+for(const change of ['missing-emoji','media','caption','buttons','foreign-link','read-error'])test('personal caption edit requires actual post-read proof after '+change,async()=>{
+  const input=await readyAccountEdit();
+  telegram.state.applyEdit=change!=='missing-emoji';
+  telegram.state.onEdit=()=>{
+    if(change==='read-error')telegram.state.error={method:'getMessages',code:400,errorMessage:'CHANNEL_PRIVATE'};
+    else telegram.state.onGetMessages=()=>{
+      const message=telegram.state.messages[0];
+      if(change==='media')message.media=new Api.MessageMediaPhoto({photo:new Api.Photo({id:{toString:()=>'7777777'}})});
+      if(change==='caption')message.message+=' changed';
+      if(change==='buttons')message.replyMarkup=undefined;
+      if(change==='foreign-link')message.entities.push(new Api.MessageEntityTextUrl({offset:2,length:5,url:'https://foreign.example'}));
+    };
+  };
+  const result=await account.editVerifiedRelayCaptionWithAccount(input);
+  assert.equal(result.attempted,true);assert.equal(result.outcome,change==='read-error'?'uncertain':'changed');
+  assert.equal(telegram.state.calls.filter(call=>call.method==='EditMessage').length,1);
+});
+
+test('personal caption edit reports explicit rejection, uncertain timeout and real FloodWait without retry or credential revocation',async()=>{
+  const input=await readyAccountEdit(),session=stored().session_ciphertext;
+  telegram.state.error={method:'EditMessage',code:400,errorMessage:'MESSAGE_AUTHOR_REQUIRED'};
+  assert.deepEqual(await account.editVerifiedRelayCaptionWithAccount(input),{state:'ok',attempted:true,outcome:'rejected'});
+  telegram.state.error={method:'EditMessage',code:'ETIMEDOUT'};
+  assert.deepEqual(await account.editVerifiedRelayCaptionWithAccount(input),{state:'unavailable',attempted:true,outcome:'uncertain'});
+  const at=Date.now();telegram.state.error={method:'EditMessage',code:420,errorMessage:'FLOOD_WAIT_120',seconds:120};
+  assert.deepEqual(await account.editVerifiedRelayCaptionWithAccount(input),{state:'backoff',attempted:true,outcome:'rejected'});
+  assert.ok(stored().next_attempt_at>=at+120000);assert.equal(stored().session_ciphertext,session);
+  assert.equal(telegram.state.calls.filter(call=>call.method==='EditMessage').length,3);
+});
+
+test('personal caption edit returns retryable preflight busy/backoff and skips already preserved artwork',async()=>{
+  const input=await readyAccountEdit();
+  db().prepare('UPDATE telegram_personal_account SET lease_until=?').run(Date.now()+60000);
+  assert.deepEqual(await account.editVerifiedRelayCaptionWithAccount(input),{state:'busy',attempted:false,outcome:'unavailable'});
+  db().prepare('UPDATE telegram_personal_account SET lease_until=0,next_attempt_at=?').run(Date.now()+60000);
+  assert.deepEqual(await account.editVerifiedRelayCaptionWithAccount(input),{state:'backoff',attempted:false,outcome:'unavailable'});
+  db().prepare('UPDATE telegram_personal_account SET next_attempt_at=0').run();
+  telegram.state.messages[0].entities=delivery().message.entities;
+  assert.deepEqual(await account.editVerifiedRelayCaptionWithAccount(input),{state:'ok',attempted:false,outcome:'preserved'});
+  assert.equal(telegram.state.calls.filter(call=>call.method==='EditMessage').length,0);
+});
+
+for(const phase of ['getMe','pre-read'])test('personal caption edit stops when an account-origin source is deselected during '+phase,async()=>{
+  const input=await readyAccountEdit();
+  db().prepare("UPDATE telegram_relay_outbox SET origin='account',account_generation=?,queued_at=?").run(stored().generation,Date.now());
+  const cancel=()=>db().prepare('UPDATE telegram_personal_sources SET selected=0 WHERE chat_id=?').run(source);
+  if(phase==='getMe')telegram.state.onGetMe=cancel;else telegram.state.onGetMessages=cancel;
+  assert.deepEqual(await account.editVerifiedRelayCaptionWithAccount(input),{state:'unavailable',attempted:false,outcome:'unavailable'});
+  assert.equal(telegram.state.calls.filter(call=>call.method==='EditMessage').length,0);
+});
+
+test('personal caption edit accepts an edit-capable admin and preserves the original document attachment',async()=>{
+  const input=await readyAccountEdit();
+  db().prepare("UPDATE telegram_relay_outbox SET origin='account',account_generation=?,queued_at=?").run(stored().generation,Date.now());
+  telegram.state.resolvedTarget.creator=false;telegram.state.resolvedTarget.adminRights={editMessages:true};
+  telegram.state.messages[0].media=new Api.MessageMediaDocument({document:new Api.Document({id:{toString:()=>'-555555555555555555'},mimeType:'video/mp4'})});
+  assert.deepEqual(await account.editVerifiedRelayCaptionWithAccount(input),{state:'ok',attempted:true,outcome:'preserved'});
+});
+
+test('personal caption edit shares one absolute deadline across preflight RPCs',async t=>{
+  const input=await readyAccountEdit(),realNow=Date.now();
+  let clock=realNow;t.mock.method(Date,'now',()=>clock);
+  telegram.state.onGetMessages=()=>{clock=realNow+40001;};
+  assert.deepEqual(await account.editVerifiedRelayCaptionWithAccount(input),{state:'unavailable',attempted:false,outcome:'unavailable'});
+  assert.equal(telegram.state.calls.filter(call=>call.method==='EditMessage').length,0);
 });
 
 for (const scenario of [

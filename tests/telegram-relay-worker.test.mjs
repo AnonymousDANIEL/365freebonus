@@ -61,11 +61,21 @@ exports.relayMediaIdentity = async (bytes,kind) => {
   return {contentHash:createHash('sha256').update(bytes).digest('hex'),visualHash:''};
 };
 `);
+writeFileSync(path.join(fixture, 'telegram-account.js'), `
+exports.calls=[];exports.results=[];
+exports.editVerifiedRelayCaptionWithAccount=async input=>{
+  exports.calls.push(input);
+  const result=exports.results.length?exports.results.shift():{state:'unavailable',attempted:false,outcome:'unavailable'};
+  if(result instanceof Error)throw result;
+  return typeof result==='function'?await result(input):result;
+};
+`);
 
 const require = createRequire(import.meta.url);
 const relay = require(path.join(fixture, 'telegram-relay.js'));
 const telegram = require(path.join(fixture, 'telegram-bot.js'));
 const media = require(path.join(fixture, 'telegram-relay-media.js'));
+const personalEdit = require(path.join(fixture, 'telegram-account.js'));
 const { getSqlite } = require(path.join(fixture, 'sqlite.js'));
 const { relayKeyboard } = require(path.join(fixture, 'telegram-relay-content.js'));
 const previousDataDir = process.env.DATA_DIR;
@@ -85,6 +95,7 @@ function closeDatabase() {
 test.beforeEach(t => {
   process.env.DATA_DIR = mkdtempSync(path.join(fixture, 'case-'));
   media.files.clear(); media.onDownload=null; media.onIdentity=null;
+  personalEdit.calls.length=0;personalEdit.results.length=0;
   telegram.calls.length=0; telegram.polls.length=0; telegram.updates.length=0; telegram.sends.length=0; telegram.editReplies.length=0;
   telegram.webhook=''; telegram.targetAllowed=true; telegram.targetExists=true; telegram.targetType='supergroup'; telegram.onRequest=null; telegram.onPoll=null; telegram.now=now;
   t.mock.method(console,'info',()=>{});
@@ -822,6 +833,154 @@ test('unknown initial sends and malformed message references never guess a targe
 test('delivered anomalies older than 24 hours are not automatically edited',async()=>{
   await sentEmojiMismatch();getSqlite().prepare('UPDATE telegram_relay_outbox SET sent_at=?').run(now-86400001);
   await deliver(now+4000);assert.equal(edits().length,0);assert.equal(jobs()[0].caption_edit_attempted_at,0);
+});
+
+async function botEditStillChanged(options) {
+  const original=await sentEmojiMismatch(options);
+  telegram.editReplies.push(ok({message_id:88770,chat:{id:target,type:'supergroup'},caption:original.rewritten,
+    caption_entities:[],reply_markup:{inline_keyboard:relayKeyboard()}}));
+  await deliver(now+4000);assert.equal(jobs()[0].caption_edit_outcome,'changed');
+  assert.match(jobs()[0].last_error,/未保留.*自定义 Emoji/);
+  return original;
+}
+
+test('a qualified personal account may repair custom emoji once after the Bot edit is confirmed changed',async()=>{
+  const original=await botEditStillChanged();
+  personalEdit.results.push({state:'ok',attempted:true,outcome:'preserved'});
+  await deliver(now+8000);
+  assert.equal(personalEdit.calls.length,1);
+  assert.deepEqual(personalEdit.calls[0],{targetChatId:target,relayRevision:'relay-revision',messageId:88770,
+    caption:original.rewritten,captionEntities:original.expectedEntities});
+  assert.equal(jobs()[0].caption_edit_outcome,'account_preserved');assert.equal(jobs()[0].status,'sent');
+  assert.equal(jobs()[0].last_error,'');assert.equal(sends().length,1);assert.equal(edits().length,1);
+  closeDatabase();await deliver(now+12000);
+  assert.equal(personalEdit.calls.length,1);assert.equal(sends().length,1);assert.equal(edits().length,1);
+});
+
+for(const outcome of ['changed','rejected','uncertain','invalid'])test(`an attempted personal caption edit with ${outcome} is terminal across restart`,async()=>{
+  await botEditStillChanged();personalEdit.results.push({state:'ok',attempted:true,outcome});
+  await deliver(now+8000);
+  assert.equal(jobs()[0].caption_edit_outcome,`account_${outcome}`);assert.equal(jobs()[0].status,'sent');assert.ok(jobs()[0].last_error);
+  closeDatabase();await deliver(now+12000);await deliver(now+16000);
+  assert.equal(personalEdit.calls.length,1);assert.equal(sends().length,1);assert.equal(edits().length,1);
+});
+
+test('an exception after entering personal editing remains uncertain and never attempts it again',async()=>{
+  await botEditStillChanged();personalEdit.results.push(new Error('private transport detail'));
+  await deliver(now+8000);assert.equal(jobs()[0].caption_edit_outcome,'account_uncertain');
+  closeDatabase();await deliver(now+12000);
+  assert.equal(personalEdit.calls.length,1);assert.equal(sends().length,1);assert.equal(edits().length,1);
+});
+
+test('busy and backoff preflight waits are persisted without duplicate media and can lead to one qualified edit',async()=>{
+  await botEditStillChanged();personalEdit.results.push(
+    {state:'busy',attempted:false,outcome:'unavailable'},
+    {state:'backoff',attempted:false,outcome:'unavailable'},
+    {state:'ok',attempted:true,outcome:'preserved'});
+  await deliver(now+8000);assert.equal(jobs()[0].caption_edit_outcome,'account_waiting_1');
+  assert.equal(state().next_send_at,now+13000);
+  closeDatabase();await deliver(now+12999);assert.equal(personalEdit.calls.length,1);
+  await deliver(now+13000);assert.equal(jobs()[0].caption_edit_outcome,'account_waiting_2');
+  await deliver(now+17999);assert.equal(personalEdit.calls.length,2);
+  await deliver(now+18000);assert.equal(jobs()[0].caption_edit_outcome,'account_preserved');
+  assert.equal(personalEdit.calls.length,3);assert.equal(sends().length,1);assert.equal(edits().length,1);
+});
+
+test('a continually busy personal preflight stops after three bounded waits and never retries after restart',async()=>{
+  await botEditStillChanged();personalEdit.results.push(...Array.from({length:4},()=>({state:'busy',attempted:false,outcome:'unavailable'})));
+  for(let i=0;i<3;i++){
+    await deliver(now+8000+i*5000);assert.equal(jobs()[0].caption_edit_outcome,`account_waiting_${i+1}`);
+  }
+  await deliver(now+23000);assert.equal(jobs()[0].caption_edit_outcome,'account_unavailable');
+  closeDatabase();await deliver(now+28000);await deliver(now+33000);
+  assert.equal(personalEdit.calls.length,4);assert.equal(sends().length,1);assert.equal(edits().length,1);
+});
+
+for(const state of ['disconnected','unavailable'])test(`an unavailable personal account (${state}) is terminal without waiting or actual edit retries`,async()=>{
+  await botEditStillChanged();personalEdit.results.push({state,attempted:false,outcome:'unavailable'});
+  await deliver(now+8000);assert.equal(jobs()[0].caption_edit_outcome,'account_unavailable');
+  await deliver(now+12000);assert.equal(personalEdit.calls.length,1);assert.equal(sends().length,1);
+});
+
+test('a personal preflight invalid result is terminal rather than a reason to bypass editing checks',async()=>{
+  await botEditStillChanged();personalEdit.results.push({state:'unavailable',attempted:false,outcome:'invalid'});
+  await deliver(now+8000);assert.equal(jobs()[0].caption_edit_outcome,'account_invalid');
+  await deliver(now+12000);assert.equal(personalEdit.calls.length,1);assert.equal(sends().length,1);
+});
+
+test('a Bot edit rejection is never escalated to personal editing',async()=>{
+  await sentEmojiMismatch();telegram.editReplies.push({ok:false,code:400,retryAfter:0});
+  await deliver(now+4000);await deliver(now+8000);
+  assert.equal(jobs()[0].caption_edit_outcome,'rejected');assert.equal(personalEdit.calls.length,0);
+  assert.equal(sends().length,1);assert.equal(edits().length,1);
+});
+
+test('non-emoji Bot edit mismatches do not qualify for the personal account fallback',async()=>{
+  await botEditStillChanged();getSqlite().prepare('UPDATE telegram_relay_outbox SET last_error=?').run(
+    'Telegram 返回的文案与提交原文不一致，请检查原消息格式。该消息不会自动重发。');
+  await deliver(now+8000);assert.equal(personalEdit.calls.length,0);assert.equal(sends().length,1);
+});
+
+test('a fallback candidate without expected custom emoji is invalid and cannot start personal editing',async()=>{
+  await botEditStillChanged();getSqlite().prepare("UPDATE telegram_relay_outbox SET caption='Plain words',caption_entities='[]'").run();
+  await deliver(now+8000);assert.equal(jobs()[0].caption_edit_outcome,'account_invalid');
+  assert.equal(personalEdit.calls.length,0);assert.equal(sends().length,1);
+});
+
+for(const change of ['revision','token','target'])test(`a ${change} change prevents personal fallback on an earlier target message`,async()=>{
+  await botEditStillChanged();
+  if(change==='revision')getSqlite().prepare("UPDATE telegram_promotion_settings SET relay_revision='new-revision'").run();
+  if(change==='token')getSqlite().prepare("UPDATE telegram_promotion_settings SET token_ciphertext='replaced-token'").run();
+  if(change==='target')getSqlite().prepare("UPDATE telegram_promotion_settings SET relay_revision='new-target',relay_chat_id='@new_target'").run();
+  await deliver(now+8000);assert.equal(personalEdit.calls.length,0);assert.equal(sends().length,1);
+});
+
+for(const change of ['deselect','disconnect','blocked'])test(`a ${change} of the personal source stops the secondary account edit`,async t=>{
+  await botEditStillChanged({personal:true,t});
+  if(change==='disconnect')getSqlite().prepare("UPDATE telegram_personal_account SET generation='revoked',stage='disconnected'").run();
+  else getSqlite().prepare(`UPDATE telegram_personal_sources SET ${change==='blocked'?'blocked=1':'selected=0'} WHERE chat_id=?`).run(source);
+  await deliver(now+8000);assert.equal(personalEdit.calls.length,0);assert.equal(sends().length,1);
+  assert.equal(jobs()[0].caption_edit_outcome,'account_invalid');
+});
+
+test('configuration changed during an attempted account edit leaves an uncertain terminal result',async()=>{
+  await botEditStillChanged();personalEdit.results.push(async()=>{
+    getSqlite().prepare("UPDATE telegram_promotion_settings SET relay_revision='changed-during-account-edit'").run();
+    return {state:'ok',attempted:true,outcome:'preserved'};
+  });
+  await deliver(now+8000);assert.equal(jobs()[0].caption_edit_outcome,'account_uncertain');
+  await deliver(now+12000);assert.equal(personalEdit.calls.length,1);assert.equal(sends().length,1);
+});
+
+test('the personal fallback owns the global delivery lease and prevents overlapping edits or sends',async()=>{
+  await botEditStillChanged();await poll(now+5000,[photo(2)]);
+  personalEdit.results.push(async()=>{
+    await relay.deliverTelegramRelayOnce(decrypt,()=>now+8001);
+    return {state:'ok',attempted:true,outcome:'preserved'};
+  });
+  await deliver(now+8000);assert.equal(personalEdit.calls.length,1);assert.equal(sends().length,1);assert.equal(edits().length,1);
+  assert.equal(jobs()[0].caption_edit_outcome,'account_preserved');
+});
+
+test('an account attempt that outlives its lease becomes uncertain and is never attempted again after restart',async()=>{
+  await botEditStillChanged();let clock=now+8000;
+  personalEdit.results.push(async()=>{clock+=61000;return {state:'ok',attempted:true,outcome:'uncertain'};});
+  await relay.deliverTelegramRelayOnce(decrypt,()=>clock);closeDatabase();
+  await relay.deliverTelegramRelayOnce(decrypt,()=>clock);
+  assert.equal(jobs()[0].caption_edit_outcome,'account_uncertain');assert.equal(personalEdit.calls.length,1);
+  assert.equal(sends().length,1);assert.equal(edits().length,1);
+});
+
+test('personal fallback diagnostics contain only outcomes, flags and aggregate counts',async t=>{
+  const output=[];t.mock.method(console,'info',(...values)=>output.push(values));
+  const original=await botEditStillChanged();personalEdit.results.push({state:'ok',attempted:true,outcome:'preserved'});
+  await deliver(now+8000);
+  const entry=output.find(values=>values[0]==='Telegram relay account caption edit check.');assert.ok(entry);
+  const details=JSON.parse(entry[1]);
+  assert.deepEqual(Object.keys(details).sort(),['attempted','expectedCustomEmoji','outcome','verified','waitingCount']);
+  assert.equal(details.outcome,'account_preserved');assert.equal(details.attempted,true);assert.equal(details.verified,true);
+  const encoded=JSON.stringify(entry);
+  for(const sensitive of [original.caption,original.rewritten,token,ciphertext,String(source),'88770','100000000000000001'])assert.equal(encoded.includes(sensitive),false);
 });
 
 test('captioned source channel_post updates use the same fixed links and destination channel support',async()=>{

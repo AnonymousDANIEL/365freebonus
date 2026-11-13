@@ -4,7 +4,7 @@ import { Api, Logger, TelegramClient, utils } from "teleproto";
 import { StringSession } from "teleproto/sessions";
 import bigInt from "big-integer";
 import { getSqlite } from "./sqlite";
-import { inspectRelayDelivery, isRelayCustomEmojiId, normalizeRelayCaptionEntities, type RelayCaptionEntity } from "./telegram-relay-content";
+import { inspectRelayDelivery, isRelayCustomEmojiId, normalizeRelayCaptionEntities, relayKeyboard, type RelayCaptionEntity } from "./telegram-relay-content";
 
 type Stage = "disconnected" | "code" | "password" | "connected";
 type AccountRow = {
@@ -241,11 +241,11 @@ async function bounded<T>(client: TelegramClient, work: Promise<T>, timeout = RE
     })]);
   } finally { if (timer) clearTimeout(timer); }
 }
-async function closeClient(client: TelegramClient | undefined) {
+async function closeClient(client: TelegramClient | undefined, timeout = 2000) {
   if (!client) return;
   // destroy also stops update and keepalive loops created by a transient client.
   await Promise.race([client.destroy().catch(() => undefined), new Promise<void>(resolve => {
-    const timer = setTimeout(resolve, 2000); timer.unref();
+    const timer = setTimeout(resolve, Math.max(1, timeout)); timer.unref();
   })]);
 }
 function saveSession(db: DatabaseSync, claim: Claim, client: TelegramClient) {
@@ -500,6 +500,204 @@ type RelayDeliverySample = {
   safeLinkPosts: number; matchingButtonPosts: number; invalidReferences: number;
   personalEditQualification: "qualified" | "not_premium" | "not_channel_admin" | "unknown";
 };
+
+function relayDeliveryMessage(message: Api.Message) {
+  if (message.entities && (!Array.isArray(message.entities) || message.entities.length > 1024)) return null;
+  const entities = captionEntities(message.entities, true);
+  if (entities.length !== (message.entities || []).length) return null;
+  const markup = message.replyMarkup instanceof Api.ReplyInlineMarkup ? { inline_keyboard: message.replyMarkup.rows.map(buttonRow => buttonRow.buttons.map(button =>
+    button.type instanceof Api.InlineButtonTypeUrl ? { text: button.text, url: button.type.url } : { text: button.text, unsupported: true })) } : undefined;
+  return { caption: message.message, caption_entities: entities, reply_markup: markup };
+}
+
+/** Convert only validated relay entities; unsupported or lossy conversion forbids an edit. */
+function editableCaptionEntities(entities: RelayCaptionEntity[]): Api.TypeMessageEntity[] | null {
+  const converted: Api.TypeMessageEntity[] = [];
+  for (const entity of entities) {
+    const span = { offset: entity.offset, length: entity.length };
+    switch (entity.type) {
+      case "bold": converted.push(new Api.MessageEntityBold(span)); break;
+      case "italic": converted.push(new Api.MessageEntityItalic(span)); break;
+      case "underline": converted.push(new Api.MessageEntityUnderline(span)); break;
+      case "strikethrough": converted.push(new Api.MessageEntityStrike(span)); break;
+      case "spoiler": converted.push(new Api.MessageEntitySpoiler(span)); break;
+      case "code": converted.push(new Api.MessageEntityCode(span)); break;
+      case "pre": converted.push(new Api.MessageEntityPre({ ...span, language: entity.language || "" })); break;
+      case "blockquote": case "expandable_blockquote":
+        converted.push(new Api.MessageEntityBlockquote({ ...span, collapsed: entity.type === "expandable_blockquote" })); break;
+      case "hashtag": converted.push(new Api.MessageEntityHashtag(span)); break;
+      case "cashtag": converted.push(new Api.MessageEntityCashtag(span)); break;
+      case "bot_command": converted.push(new Api.MessageEntityBotCommand(span)); break;
+      case "url": converted.push(new Api.MessageEntityUrl(span)); break;
+      case "text_link":
+        if (typeof entity.url !== "string") return null;
+        converted.push(new Api.MessageEntityTextUrl({ ...span, url: entity.url })); break;
+      case "custom_emoji":
+        if (!isRelayCustomEmojiId(entity.custom_emoji_id)) return null;
+        converted.push(new Api.MessageEntityCustomEmoji({ ...span, documentId: bigInt(entity.custom_emoji_id) })); break;
+      case "date_time": {
+        if (!Number.isSafeInteger(entity.unix_time) || Number(entity.unix_time) < 0 || Number(entity.unix_time) > 2147483647) return null;
+        const format = entity.date_time_format || "";
+        if (!/^(?:r|w?[dD]?[tT]?)$/.test(format)) return null;
+        converted.push(new Api.MessageEntityFormattedDate({ ...span, date: Number(entity.unix_time), relative: format === "r",
+          shortTime: format.includes("t"), longTime: format.includes("T"), shortDate: format.includes("d"), longDate: format.includes("D"), dayOfWeek: format.includes("w") }));
+        break;
+      }
+      default: return null;
+    }
+  }
+  return converted;
+}
+
+type AccountCaptionEdit = {
+  state: SourceEmojiSample["state"]; attempted: boolean;
+  outcome: "preserved" | "changed" | "rejected" | "uncertain" | "invalid" | "unavailable";
+};
+
+/** One authorized caption-only edit of one leased relay post, followed by actual readback. */
+export async function editVerifiedRelayCaptionWithAccount(input: {
+  targetChatId: number; relayRevision: string; messageId: number; caption: string; captionEntities: RelayCaptionEntity[];
+}): Promise<AccountCaptionEdit> {
+  let attempted = false;
+  let editReturned = false;
+  const unavailable = (): AccountCaptionEdit => ({ state: "unavailable", attempted, outcome: attempted ? "uncertain" : "unavailable" });
+  const invalid = (): AccountCaptionEdit => ({ state: "ok", attempted: false, outcome: "invalid" });
+  if (!Number.isSafeInteger(input.targetChatId) || input.targetChatId >= 0
+    || !Number.isSafeInteger(input.messageId) || input.messageId <= 0 || input.messageId > 2147483647
+    || typeof input.relayRevision !== "string" || !input.relayRevision
+    || typeof input.caption !== "string" || !input.caption.trim() || input.caption.length > 1024
+    || !Array.isArray(input.captionEntities) || input.captionEntities.length > 1024) return invalid();
+  const expected = normalizeRelayCaptionEntities(input.caption, input.captionEntities);
+  const entities = expected.length === input.captionEntities.length ? editableCaptionEntities(expected) : null;
+  const prepared = inspectRelayDelivery(input.caption, expected,
+    { caption: input.caption, caption_entities: expected, reply_markup: { inline_keyboard: relayKeyboard() } });
+  if (!entities || !prepared.linksSafe || !prepared.buttonsMatch) return invalid();
+  const db = getSqlite(), current = row(db), now = Date.now();
+  if (current.stage !== "connected" || !current.session_ciphertext) return { state: "disconnected", attempted: false, outcome: "unavailable" };
+  if (current.lease_until > now) return { state: "busy", attempted: false, outcome: "unavailable" };
+  if (current.next_attempt_at > now) return { state: "backoff", attempted: false, outcome: "unavailable" };
+  const configuration = () => db.prepare(`SELECT relay_enabled,relay_chat_id,relay_revision,token_ciphertext
+    FROM telegram_promotion_settings WHERE id='primary'`).get() as {
+      relay_enabled: number; relay_chat_id: string; relay_revision: string; token_ciphertext: string;
+    } | undefined;
+  const runtime = () => db.prepare(`SELECT target_chat_id,target_verified_at,ready_until,revision,bot_id,send_lease_id,send_lease_until
+    FROM telegram_relay_state WHERE id='primary'`).get() as {
+      target_chat_id: number; target_verified_at: number; ready_until: number; revision: string; bot_id: number;
+      send_lease_id: string; send_lease_until: number;
+    } | undefined;
+  type EditReference = { id: number; caption: string; caption_entities: string; lease_id: string; lease_until: number; caption_edit_outcome: string;
+    origin: string; account_generation: string; queued_at: number; source_chat_id: number };
+  const references = () => db.prepare(`SELECT id,caption,caption_entities,lease_id,lease_until,caption_edit_outcome,origin,account_generation,queued_at,source_chat_id
+    FROM telegram_relay_outbox WHERE status='sent' AND revision=? AND message_id=? LIMIT 2`)
+    .all(input.relayRevision, input.messageId) as EditReference[];
+  const settings = configuration(), target = runtime(), storedReferences = references();
+  const reference = storedReferences.length === 1 ? storedReferences[0] : undefined;
+  const sourceAllowed = (value: EditReference) => value.origin !== "account" || value.account_generation === current.generation
+    && Boolean(db.prepare(`SELECT 1 FROM telegram_personal_sources WHERE chat_id=? AND selected=1 AND joined=1
+      AND blocked=0 AND selected_at<=?`).get(value.source_chat_id, value.queued_at));
+  const publicTarget = settings?.relay_chat_id.match(/^(?:@([A-Za-z][A-Za-z0-9_]{3,31})|https:\/\/t\.me\/([A-Za-z][A-Za-z0-9_]{3,31})\/?)$/);
+  const username = publicTarget?.[1] || publicTarget?.[2];
+  if (!settings || settings.relay_enabled !== 1 || settings.relay_revision !== input.relayRevision || !settings.token_ciphertext || !username
+    || !target || target.target_chat_id !== input.targetChatId || target.revision !== input.relayRevision
+    || !Number.isSafeInteger(target.bot_id) || target.bot_id <= 0 || target.target_verified_at <= 0 || target.target_verified_at > now
+    || target.ready_until <= now || !reference || reference.caption !== input.caption || reference.caption_edit_outcome !== "account_attempting"
+    || !reference.lease_id || reference.lease_until <= now || target.send_lease_id !== reference.lease_id || target.send_lease_until <= now
+    || !sourceAllowed(reference)) return unavailable();
+  try {
+    const storedEntities: unknown = JSON.parse(reference.caption_entities);
+    const normalized = normalizeRelayCaptionEntities(reference.caption, storedEntities);
+    if (!Array.isArray(storedEntities) || normalized.length !== storedEntities.length || JSON.stringify(normalized) !== JSON.stringify(expected)) return invalid();
+  } catch { return invalid(); }
+  let claim: Claim;
+  try { claim = claimAccount(db, Date.now(), { connected: true, respectBackoff: true }); }
+  catch (error) {
+    const state = error instanceof TelegramAccountError && error.status === 429 ? "backoff"
+      : error instanceof TelegramAccountError && error.message === BUSY_ERROR ? "busy"
+      : error instanceof TelegramAccountError && error.message === REAUTH_ERROR ? "disconnected" : "unavailable";
+    return { state, attempted: false, outcome: "unavailable" };
+  }
+  const deadline = Date.now() + 40_000;
+  const remaining = () => Math.max(1, Math.min(REQUEST_MS, deadline - Date.now()));
+  const allowed = () => {
+    const latest = configuration(), latestTarget = runtime(), account = row(db), matches = references();
+    const latestReference = matches.length === 1 ? matches[0] : undefined;
+    return Date.now() < deadline && owns(db, claim) && account.stage === "connected"
+      && account.config_ciphertext === current.config_ciphertext && account.session_ciphertext === current.session_ciphertext
+      && latest?.relay_enabled === 1 && latest.relay_chat_id === settings.relay_chat_id
+      && latest.relay_revision === settings.relay_revision && latest.token_ciphertext === settings.token_ciphertext
+      && latestTarget?.target_chat_id === input.targetChatId && latestTarget.bot_id === target.bot_id
+      && latestTarget.revision === input.relayRevision && latestTarget.target_verified_at > 0 && latestTarget.target_verified_at <= Date.now()
+      && latestTarget.ready_until > Date.now() && latestTarget.send_lease_id === reference.lease_id && latestTarget.send_lease_until > Date.now()
+      && latestReference?.id === reference.id && latestReference.caption === input.caption && latestReference.caption_entities === reference.caption_entities
+      && latestReference.caption_edit_outcome === "account_attempting" && latestReference.lease_id === reference.lease_id && latestReference.lease_until > Date.now()
+      && latestReference.origin === reference.origin && latestReference.account_generation === reference.account_generation
+      && latestReference.queued_at === reference.queued_at && latestReference.source_chat_id === reference.source_chat_id && sourceAllowed(latestReference);
+  };
+  const identity = (message: Api.Message) => message.id === input.messageId && message.post === true && !!message.peerId
+    && Number(utils.getPeerId(message.peerId)) === input.targetChatId && message.viaBotId == null
+    && (message as Api.Message & { viaBusinessBotId?: unknown }).viaBusinessBotId == null && message.fwdFrom == null;
+  const mediaIdentity = (message: Api.Message): string | null => {
+    const media = message.media instanceof Api.MessageMediaPhoto && message.media.photo instanceof Api.Photo ? message.media.photo
+      : message.media instanceof Api.MessageMediaDocument && message.media.document instanceof Api.Document ? message.media.document : null;
+    if (!media) return null;
+    const id = media.id.toString();
+    return isRelayCustomEmojiId(id) ? `${media.className}:${id}` : null;
+  };
+  let client: TelegramClient | undefined;
+  try {
+    if (!allowed()) return unavailable();
+    client = makeClient(unseal<Credentials>(claim.row.config_ciphertext), unseal<string>(claim.row.session_ciphertext));
+    await bounded(client, client.connect(), remaining());
+    if (!allowed()) return unavailable();
+    renew(db, claim);
+    const entity = await bounded(client, client.getEntity(`@${username}`), remaining());
+    if (!allowed()) return unavailable();
+    if (!(entity instanceof Api.Channel) || entity.min || entity.broadcast !== true || Number(utils.getPeerId(entity)) !== input.targetChatId
+      || !(entity.creator === true || entity.adminRights?.editMessages === true)) return { state: "ok", attempted: false, outcome: "rejected" };
+    renew(db, claim);
+    const me = await bounded(client, client.getMe(), remaining());
+    if (!allowed()) return unavailable();
+    if (!(me instanceof Api.User) || me.bot || me.deleted || me.min || me.premium !== true) return { state: "ok", attempted: false, outcome: "rejected" };
+    renew(db, claim);
+    const before = await bounded(client, client.getMessages(entity, { ids: [input.messageId], limit: 1 }), remaining());
+    if (!allowed()) return unavailable();
+    renew(db, claim);
+    if (before.length !== 1 || !(before[0] instanceof Api.Message) || !identity(before[0])) return invalid();
+    const originalMedia = mediaIdentity(before[0]), original = relayDeliveryMessage(before[0]);
+    if (!originalMedia || !original) return invalid();
+    const verified = inspectRelayDelivery(input.caption, expected, original);
+    if (!verified.captionMatches || !verified.linksSafe || !verified.buttonsMatch) return invalid();
+    if (verified.customEmojiPreserved) return { state: "ok", attempted: false, outcome: "preserved" };
+    if (!allowed()) return unavailable();
+    // Deliberately omit replyMarkup/media. The actual readback, not the RPC
+    // response, must prove Telegram preserved the original media and keyboard.
+    const request = new Api.messages.EditMessage({ peer: entity, id: input.messageId, message: input.caption, entities });
+    attempted = true;
+    await bounded(client, client.invoke(request, undefined, { maxRetryCount: 0, floodSleepThreshold: 0, timeout: remaining() }), remaining());
+    editReturned = true;
+    if (!allowed()) return unavailable();
+    renew(db, claim);
+    const after = await bounded(client, client.getMessages(entity, { ids: [input.messageId], limit: 1 }), remaining());
+    if (!allowed()) return unavailable();
+    renew(db, claim);
+    if (after.length !== 1 || !(after[0] instanceof Api.Message) || !identity(after[0])) return { state: "ok", attempted: true, outcome: "uncertain" };
+    const actual = relayDeliveryMessage(after[0]);
+    if (!actual) return { state: "ok", attempted: true, outcome: "changed" };
+    const inspected = inspectRelayDelivery(input.caption, expected, actual);
+    return { state: "ok", attempted: true, outcome: mediaIdentity(after[0]) === originalMedia && inspected.captionMatches
+      && inspected.customEmojiPreserved && inspected.linksSafe && inspected.buttonsMatch ? "preserved" : "changed" };
+  } catch (error) {
+    if (allowed() && safeError(error).status === 429 && failureCategory(error) === "telegram-rate-limit") {
+      recordFailure(db, claim, error, "relay-account-caption-edit");
+      return { state: "backoff", attempted, outcome: attempted ? editReturned ? "uncertain" : "rejected" : "unavailable" };
+    }
+    const rpc = error as { code?: unknown; errorMessage?: unknown } | null;
+    if (attempted && !editReturned && typeof rpc?.code === "number" && rpc.code >= 400 && rpc.code < 500 && typeof rpc.errorMessage === "string") {
+      return { state: "ok", attempted: true, outcome: "rejected" };
+    }
+    return unavailable();
+  } finally { release(db, claim); await closeClient(client, Math.max(1, Math.min(2000, deadline - Date.now()))); }
+}
 
 /** Read back only recently sent posts in the currently verified relay destination. */
 export async function inspectRecentRelayDeliveries(): Promise<RelayDeliverySample> {
