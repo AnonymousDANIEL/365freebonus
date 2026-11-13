@@ -149,7 +149,7 @@ test('migration15 preserves existing keyword rules as visible buttons', () => {
   try {
     process.env.DATA_DIR = legacyDataDir;
     const upgraded = getSqlite();
-    assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version, 22);
+    assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version, 23);
     assert.deepEqual({ ...upgraded.prepare('SELECT * FROM telegram_keyword_rules WHERE id=7').get() }, {
       id: 7, keyword: 'Existing keyword', keyword_key: 'existing keyword', match_mode: 'contains', response: 'Existing reply', show_button: 1,
     });

@@ -197,13 +197,31 @@ test('the persisted cursor and per-message key prevent redelivery across polls a
   assert.equal(jobs().length,1);assert.equal(sends().length,1);
 });
 
-test('album parts and repeated canonical photo/caption echoes are deduplicated across source groups',async()=>{
+test('different captioned photos in one album both send while the same photo echoed in another group is skipped',async()=>{
   configure();const first=photo(1,{media_group_id:'album-1'});
-  const albumOther=photo(2,{media_group_id:'album-1'});
+  const albumOther=photo(2,{media_group_id:'album-1',caption:first.message.caption});
   const echo=photo(3,{chat:{id:source-1,type:'supergroup'},caption:'Offer 1\nhttps://another.example/signup',photo:first.message.photo});
   await poll(now,[first,albumOther,echo]);
-  assert.equal(jobs().length,1);
-  await deliver();assert.equal(sends().length,1);
+  assert.equal(jobs().length,2);
+  await deliver();await deliver(now+3000);assert.equal(sends().length,2);
+  assert.equal(sends()[0].parameters.caption,sends()[1].parameters.caption);
+});
+
+for(const kind of ['photo','video','animation'])test(`the same caption on two different Bot ${kind} attachments does not suppress either media`,async()=>{
+  configure();const caption='Same offer https://source.example/offer';
+  const input=id=>kind==='video'?video(id,{caption}):kind==='animation'
+    ?photo(id,{photo:undefined,caption,animation:{file_id:`gif-${id}`,file_unique_id:`gif-unique-${id}`}}):photo(id,{caption});
+  await poll(now,[input(1),input(2)]);assert.equal(jobs().length,2);
+  await deliver(now);await deliver(now+3000);
+  assert.equal(sends().length,2);assert.ok(jobs().every(job=>job.status==='sent'));
+  assert.equal(sends()[0].parameters.caption,sends()[1].parameters.caption);
+});
+
+test('the same photo repeated inside one album still forwards only once',async()=>{
+  configure();const first=photo(1,{media_group_id:'same-photo-album'});
+  await poll(now,[first,photo(2,{media_group_id:'same-photo-album',caption:'Changed words',photo:first.message.photo})]);
+  await deliver(now);await deliver(now+3000);
+  assert.equal(jobs().length,1);assert.equal(sends().length,1);
 });
 
 test('global group pacing retains queued notices and sends no faster than every three seconds',async()=>{
@@ -427,7 +445,7 @@ test('v17 migration preserves notes, credentials and existing queues while activ
     ALTER TABLE telegram_promotion_settings DROP COLUMN relay_revision;
     PRAGMA user_version=17;`);
   closeDatabase();const migrated=getSqlite();
-  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,22);
+  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,23);
   const current=migrated.prepare("SELECT * FROM telegram_promotion_settings WHERE id='primary'").get();
   assert.equal(current.relay_enabled,1);assert.equal(current.relay_started_at,now);assert.ok(current.relay_revision);
   assert.equal(current.relay_chat_id,'@join365freebonusgroup');
@@ -1231,6 +1249,36 @@ test('disconnecting a queued personal account cancels its media before the bot c
   await deliver(now);assert.equal(sends().length,0);assert.equal(jobs()[0].status,'cancelled');assert.equal(jobs()[0].media_bytes,null);
 });
 
+test('different personal photos sharing one caption and album both forward while replaying a source message does not',async t=>{
+  await configureAccount(t);const first=accountPhoto({mediaGroupId:'personal-album'});
+  assert.equal(await relay.enqueuePersonalRelayMedia(first),true);
+  assert.equal(await relay.enqueuePersonalRelayMedia(accountPhoto({mediaGroupId:'personal-album',sourceMessageId:2002,
+    sourceMediaId:'different-personal-photo',bytes:Buffer.from('different-personal-photo')})),true);
+  assert.equal(await relay.enqueuePersonalRelayMedia({...first,sourceMediaId:'changed-source-id',bytes:Buffer.from('changed-source-bytes')}),true);
+  assert.equal(jobs().length,2);
+  await deliver(now);await deliver(now+3000);
+  assert.equal(sends().length,2);assert.ok(jobs().every(job=>job.status==='sent'));
+  assert.equal(sends()[0].parameters.caption,sends()[1].parameters.caption);
+});
+
+test('a personal album still skips repeated photo content even under a different media ID and caption',async t=>{
+  await configureAccount(t);
+  assert.equal(await relay.enqueuePersonalRelayMedia(accountPhoto({mediaGroupId:'personal-repeated-photo'})),true);
+  assert.equal(await relay.enqueuePersonalRelayMedia(accountPhoto({mediaGroupId:'personal-repeated-photo',sourceMessageId:2002,
+    sourceMediaId:'reuploaded-personal-photo',caption:'A different caption'})),true);
+  await deliver(now);await deliver(now+3000);
+  assert.equal(jobs().length,1);assert.equal(sends().length,1);
+});
+
+test('the same caption from Bot and personal sources permits different photo content from both sources',async t=>{
+  await configureAccount(t);const caption='Same caption https://source.example/offer';
+  assert.equal(await relay.enqueuePersonalRelayMedia(accountPhoto({caption})),true);
+  await poll(now+1000,[photo(1,{caption})]);assert.equal(jobs().length,2);
+  await deliver(now+1000);await deliver(now+4000);
+  assert.equal(sends().length,2);assert.ok(jobs().every(job=>job.status==='sent'));
+  assert.equal(sends()[0].parameters.caption,sends()[1].parameters.caption);
+});
+
 test('same personal photo across selected channels is deduplicated independently of caption or media ID',async t=>{
   await configureAccount(t);accountSource(source-1);
   assert.equal(await relay.enqueuePersonalRelayMedia(accountPhoto()),true);
@@ -1333,7 +1381,7 @@ test('v18 upgrade preserves settings and PIN while seeding permanent image ident
   }
   db.exec('PRAGMA user_version=18');closeDatabase();
   const migrated=getSqlite();
-  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,22);
+  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,23);
   assert.deepEqual({...migrated.prepare("SELECT * FROM telegram_promotion_settings WHERE id='primary'").get()},settingsBefore);
   assert.deepEqual({...migrated.prepare("SELECT * FROM notes_vault_settings WHERE id='primary'").get()},vaultBefore);
   assert.deepEqual({...migrated.prepare("SELECT * FROM telegram_relay_state WHERE id='primary'").get()},stateBefore);
@@ -1379,7 +1427,7 @@ test('v19 upgrade preserves queued media bytes, permanent identities, settings a
   assert.throws(()=>db.prepare(`INSERT INTO telegram_relay_outbox(source_chat_id,source_message_id,fingerprint,
     queued_at,revision,media_kind,file_id,file_unique_id,caption) VALUES(? ,9999,'before-video',?,'relay-revision','video','v','vu','Video')`).run(source,now),/CHECK/);
   closeDatabase();const migrated=getSqlite();
-  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,22);
+  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,23);
   assert.deepEqual(jobs().map(({caption_entities,...row})=>({...row})),rowsBefore);
   assert.ok(jobs().every(row=>row.caption_entities===''));
   assert.deepEqual(migrated.prepare('SELECT * FROM telegram_relay_media_keys ORDER BY media_key').all().map(row=>({...row})),keysBefore);
@@ -1390,8 +1438,10 @@ test('v19 upgrade preserves queued media bytes, permanent identities, settings a
     queued_at,revision,media_kind,file_id,file_unique_id,caption) VALUES(? ,9999,'after-video',?,'relay-revision','video','v','vu','Video')`).run(source,now);
   assert.ok(Number(inserted.lastInsertRowid)>Math.max(...rowsBefore.map(row=>row.id)));
   assert.equal(jobs().at(-1).media_kind,'video');
+  assert.doesNotThrow(()=>migrated.prepare(`INSERT INTO telegram_relay_outbox(source_chat_id,source_message_id,media_group_id,
+    fingerprint,queued_at,revision,media_kind,file_id,file_unique_id,caption) VALUES(? ,9998,'pending-album','album-copy',?,'relay-revision','photo','p','pu','Photo')`).run(source,now));
   assert.throws(()=>migrated.prepare(`INSERT INTO telegram_relay_outbox(source_chat_id,source_message_id,media_group_id,
-    fingerprint,queued_at,revision,media_kind,file_id,file_unique_id,caption) VALUES(? ,9998,'pending-album','album-copy',?,'relay-revision','photo','p','pu','Photo')`).run(source,now),/UNIQUE/);
+    fingerprint,queued_at,revision,media_kind,file_id,file_unique_id,caption) VALUES(? ,9998,'another-album','same-source-event',?,'relay-revision','photo','p2','pu2','Photo')`).run(source,now),/UNIQUE/);
 });
 
 test('v20 upgrade marks unavailable legacy caption entities without changing jobs, media keys, settings or PIN',async t=>{
@@ -1408,7 +1458,7 @@ test('v20 upgrade marks unavailable legacy caption entities without changing job
   const beforePin={...db.prepare("SELECT * FROM notes_vault_settings WHERE id='primary'").get()};
   db.exec('DROP INDEX telegram_relay_caption_edits; ALTER TABLE telegram_relay_outbox DROP COLUMN caption_edit_attempted_at; ALTER TABLE telegram_relay_outbox DROP COLUMN caption_edit_outcome; ALTER TABLE telegram_relay_outbox DROP COLUMN caption_entities; PRAGMA user_version=20');
   closeDatabase();const migrated=getSqlite();
-  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,22);
+  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,23);
   assert.deepEqual(jobs().map(({caption_entities,...row})=>({...row})),beforeJobs);
   assert.ok(jobs().every(row=>row.caption_entities===''),'old queues mark unavailable original custom emoji metadata instead of fabricating an empty entity list');
   assert.deepEqual(migrated.prepare('SELECT * FROM telegram_relay_media_keys ORDER BY media_key').all().map(row=>({...row})),beforeKeys);
@@ -1436,7 +1486,7 @@ test('v21 upgrade preserves sent messages, pending media, identities, settings a
   const beforePin={...db.prepare("SELECT * FROM notes_vault_settings WHERE id='primary'").get()};
   db.exec('DROP INDEX telegram_relay_caption_edits; ALTER TABLE telegram_relay_outbox DROP COLUMN caption_edit_attempted_at; ALTER TABLE telegram_relay_outbox DROP COLUMN caption_edit_outcome; PRAGMA user_version=21');
   closeDatabase();const migrated=getSqlite();
-  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,22);
+  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,23);
   assert.deepEqual(jobs().map(({caption_edit_attempted_at,caption_edit_outcome,...row})=>({...row})),beforeJobs);
   assert.ok(jobs().every(row=>row.caption_edit_attempted_at===0&&row.caption_edit_outcome===''));
   assert.deepEqual(migrated.prepare('SELECT * FROM telegram_relay_media_keys ORDER BY media_key').all().map(row=>({...row})),beforeKeys);
@@ -1445,6 +1495,37 @@ test('v21 upgrade preserves sent messages, pending media, identities, settings a
   assert.deepEqual({...migrated.prepare("SELECT * FROM notes_vault_settings WHERE id='primary'").get()},beforePin);
   assert.equal(migrated.prepare("SELECT seq FROM sqlite_sequence WHERE name='telegram_relay_outbox'").get().seq,9000);
   assert.ok(migrated.prepare("PRAGMA index_list(telegram_relay_outbox)").all().some(row=>row.name==='telegram_relay_caption_edits'));
+});
+
+test('v22 upgrade removes only album uniqueness and preserves messages, media keys, PIN, settings and sequence',async t=>{
+  await configureAccount(t);
+  await relay.enqueuePersonalRelayMedia(accountPhoto({mediaGroupId:'sent-album'}));await deliver(now);
+  await relay.enqueuePersonalRelayMedia(accountPhoto({sourceMessageId:2002,mediaGroupId:'pending-album',
+    sourceMediaId:'v22-pending-photo',bytes:Buffer.from('v22-pending-photo')}));
+  const db=getSqlite();
+  db.prepare("INSERT INTO notes_vault_settings(id,pin_hash,revision,created_at,updated_at) VALUES('primary','v22-pin','v22-vault',51,52)").run();
+  db.prepare("UPDATE sqlite_sequence SET seq=9100 WHERE name='telegram_relay_outbox'").run();
+  const beforeJobs=jobs().map(row=>({...row}));
+  const beforeKeys=db.prepare('SELECT * FROM telegram_relay_media_keys ORDER BY media_key').all().map(row=>({...row}));
+  const beforeSettings={...db.prepare("SELECT * FROM telegram_promotion_settings WHERE id='primary'").get()};
+  const beforeState={...db.prepare("SELECT * FROM telegram_relay_state WHERE id='primary'").get()};
+  const beforePin={...db.prepare("SELECT * FROM notes_vault_settings WHERE id='primary'").get()};
+  db.exec("DROP INDEX telegram_relay_album; CREATE UNIQUE INDEX telegram_relay_album ON telegram_relay_outbox(source_chat_id,media_group_id) WHERE media_group_id<>''; PRAGMA user_version=22");
+  closeDatabase();const migrated=getSqlite();
+  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,23);
+  assert.deepEqual(jobs().map(row=>({...row})),beforeJobs);
+  assert.deepEqual(migrated.prepare('SELECT * FROM telegram_relay_media_keys ORDER BY media_key').all().map(row=>({...row})),beforeKeys);
+  assert.deepEqual({...migrated.prepare("SELECT * FROM telegram_promotion_settings WHERE id='primary'").get()},beforeSettings);
+  assert.deepEqual({...migrated.prepare("SELECT * FROM telegram_relay_state WHERE id='primary'").get()},beforeState);
+  assert.deepEqual({...migrated.prepare("SELECT * FROM notes_vault_settings WHERE id='primary'").get()},beforePin);
+  assert.equal(migrated.prepare("SELECT seq FROM sqlite_sequence WHERE name='telegram_relay_outbox'").get().seq,9100);
+  assert.equal(migrated.prepare('PRAGMA index_list(telegram_relay_outbox)').all().find(row=>row.name==='telegram_relay_album').unique,0);
+  assert.equal(await relay.enqueuePersonalRelayMedia(accountPhoto({sourceMessageId:2003,mediaGroupId:'pending-album',
+    sourceMediaId:'v23-new-photo',bytes:Buffer.from('v23-new-photo')})),true);
+  assert.equal(jobs().length,3);assert.ok(jobs()[2].id>9100);
+  assert.equal(await relay.enqueuePersonalRelayMedia(accountPhoto({sourceChatId:source,sourceMessageId:2004,
+    sourceMediaId:'v23-reuploaded-original',caption:'Changed caption'})),true);
+  assert.equal(jobs().length,3,'permanent media identities still prevent an already sent photo from being requeued');
 });
 
 test('a full bot queue retains the source update until capacity is available and then queues it exactly once',async()=>{

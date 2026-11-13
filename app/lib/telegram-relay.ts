@@ -157,8 +157,8 @@ export async function enqueuePersonalRelayMedia(input: {
     if (latestSelection.selected_at !== selected.selected_at) return false;
     const keys = [`account:${input.mediaKind}:${sourceId}`, ...identityKeys(input.mediaKind, hashes.contentHash, hashes.visualHash)];
     const duplicate = mediaOwner(db, keys);
-    const exists = db.prepare(`SELECT 1 FROM telegram_relay_outbox WHERE source_chat_id=? AND (source_message_id=?
-      OR (?<>'' AND media_group_id=?))`).get(input.sourceChatId, input.sourceMessageId, input.mediaGroupId, input.mediaGroupId);
+    const exists = db.prepare("SELECT 1 FROM telegram_relay_outbox WHERE source_chat_id=? AND source_message_id=?")
+      .get(input.sourceChatId, input.sourceMessageId);
     if (duplicate || exists) { db.prepare("UPDATE telegram_relay_state SET skipped_count=skipped_count+1 WHERE id='primary'").run(); return true; }
     const queue = db.prepare("SELECT COUNT(*) AS count,COALESCE(SUM(length(media_bytes)),0) AS bytes FROM telegram_relay_outbox WHERE status IN ('pending','sending')").get() as { count: number; bytes: number };
     if (queue.count >= 128 || queue.bytes + input.bytes.length > QUEUE_MAX_BYTES) return false;

@@ -140,7 +140,7 @@ test('migrations preserve brand data and existing expiry without creating Telegr
       process.env.DATA_DIR = legacyPath;
       const saved = await repository.readDirectory(true, now);
       const upgraded = sqlite.getSqlite();
-      assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version, 22);
+      assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version, 23);
       assert.equal(upgraded.prepare('SELECT COUNT(*) AS count FROM telegram_promotion_outbox').get().count, version >= 5 ? 1 : 0);
       assert.equal(upgraded.prepare('SELECT COUNT(*) AS count FROM telegram_private_contacts').get().count, 0);
       const runtime = upgraded.prepare("SELECT revision, next_offset, last_polled_at, sent, keyword_replies, private_replies FROM telegram_welcome_state WHERE id='primary'").get();

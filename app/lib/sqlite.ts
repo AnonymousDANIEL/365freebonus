@@ -12,7 +12,7 @@ export function getDataDirectory(): string {
 function migrate(db: DatabaseSync) {
   if (migrated.has(db)) return;
   const readVersion = () => (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
-  if (readVersion() < 22) {
+  if (readVersion() < 23) {
     db.exec("BEGIN IMMEDIATE");
     try {
       // Read again inside the write lock, so concurrent process starts cannot
@@ -389,6 +389,16 @@ function migrate(db: DatabaseSync) {
           CREATE INDEX telegram_relay_caption_edits ON telegram_relay_outbox(revision,sent_at,id)
             WHERE status='sent' AND caption_edit_attempted_at=0 AND last_error<>'';
           PRAGMA user_version=22;
+        `);
+      }
+      if (version < 23) {
+        // Different captioned media in the same album are independent posts.
+        // Exact media identities and source message IDs still prevent repeats.
+        db.exec(`
+          DROP INDEX telegram_relay_album;
+          CREATE INDEX telegram_relay_album ON telegram_relay_outbox(source_chat_id,media_group_id)
+            WHERE media_group_id<>'';
+          PRAGMA user_version=23;
         `);
       }
       db.exec("COMMIT");
