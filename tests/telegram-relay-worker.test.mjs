@@ -20,8 +20,8 @@ writeFileSync(path.join(fixture, 'telegram-bot.js'), `
 exports.calls = []; exports.polls = []; exports.updates = []; exports.sends = [];
 exports.webhook = ''; exports.targetAllowed = true; exports.targetExists = true;
 exports.targetType = 'supergroup'; exports.onRequest = null; exports.onPoll = null; exports.now = 0;
-exports.telegramRequest = async (token, method, parameters = {}) => {
-  exports.calls.push({token,method,parameters});
+exports.telegramRequest = async (token, method, parameters = {}, upload) => {
+  exports.calls.push({token,method,parameters,upload});
   if (exports.onRequest) { const overridden = await exports.onRequest(method,parameters); if (overridden !== undefined) return overridden; }
   if (method === 'getMe') return {ok:true,result:{id:12345678,is_bot:true,username:'FreeBonus365Bot',can_read_all_group_messages:true}};
   if (method === 'getWebhookInfo') return {ok:true,result:{url:exports.webhook}};
@@ -40,9 +40,24 @@ exports.telegramRelayUpdates = async (token, offset) => {
 };
 `);
 
+writeFileSync(path.join(fixture, 'telegram-relay-media.js'), `
+const {createHash}=require('node:crypto');
+exports.files = new Map(); exports.onDownload=null; exports.onIdentity=null;
+exports.relayMediaMaxBytes = kind => kind==='photo'?10*1024*1024:20*1024*1024;
+exports.downloadBotRelayMedia = async (token,fileId,kind) => {
+  if(exports.onDownload) return await exports.onDownload(token,fileId,kind);
+  return exports.files.has(fileId)?exports.files.get(fileId):Buffer.from(fileId);
+};
+exports.relayMediaIdentity = async (bytes,kind) => {
+  if(exports.onIdentity) await exports.onIdentity(bytes,kind);
+  return {contentHash:createHash('sha256').update(bytes).digest('hex'),visualHash:''};
+};
+`);
+
 const require = createRequire(import.meta.url);
 const relay = require(path.join(fixture, 'telegram-relay.js'));
 const telegram = require(path.join(fixture, 'telegram-bot.js'));
+const media = require(path.join(fixture, 'telegram-relay-media.js'));
 const { getSqlite } = require(path.join(fixture, 'sqlite.js'));
 const { relayKeyboard } = require(path.join(fixture, 'telegram-relay-content.js'));
 const previousDataDir = process.env.DATA_DIR;
@@ -61,6 +76,7 @@ function closeDatabase() {
 }
 test.beforeEach(t => {
   process.env.DATA_DIR = mkdtempSync(path.join(fixture, 'case-'));
+  media.files.clear(); media.onDownload=null; media.onIdentity=null;
   telegram.calls.length=0; telegram.polls.length=0; telegram.updates.length=0; telegram.sends.length=0;
   telegram.webhook=''; telegram.targetAllowed=true; telegram.targetExists=true; telegram.targetType='supergroup'; telegram.onRequest=null; telegram.onPoll=null; telegram.now=now;
   t.mock.method(console,'info',()=>{});
@@ -117,13 +133,13 @@ test('photo relay verifies its target and uses the promotion bot independently o
   assert.equal(getSqlite().prepare("SELECT enabled FROM telegram_promotion_settings WHERE id='primary'").get().enabled,0);
 });
 
-test('only captioned group photos or animations enter the queue, including received third-party bot posts',async()=>{
+test('only captioned group/channel photos or animations enter the queue, including received third-party bot posts',async()=>{
   configure();
   const inputs=[
     photo(1,{photo:undefined,text:'Text alone',caption:undefined}),
     photo(2,{caption:'   '}),
     photo(3,{chat:{id:123,type:'private'}}),
-    photo(4,{chat:{id:source,type:'channel'}}),
+    photo(4,{chat:{id:source,type:'channel'},has_protected_content:true}),
     photo(5,{has_protected_content:true}),
     photo(6,{chat:{id:target,type:'supergroup'}}),
     photo(7,{from:{id:botId,is_bot:true}}),
@@ -380,14 +396,14 @@ test('v17 migration preserves notes, credentials and existing queues while activ
   const note={...db.prepare('SELECT * FROM secure_notes').get()};
   const channelJob={...db.prepare('SELECT * FROM telegram_promotion_outbox').get()};
   const privateJob={...db.prepare('SELECT * FROM telegram_private_brand_updates').get()};
-  db.exec(`DROP TABLE telegram_relay_outbox;DROP TABLE telegram_relay_state;
+  db.exec(`DROP TABLE telegram_relay_media_keys;DROP TABLE telegram_relay_outbox;DROP TABLE telegram_relay_state;
     ALTER TABLE telegram_promotion_settings DROP COLUMN relay_enabled;
     ALTER TABLE telegram_promotion_settings DROP COLUMN relay_chat_id;
     ALTER TABLE telegram_promotion_settings DROP COLUMN relay_started_at;
     ALTER TABLE telegram_promotion_settings DROP COLUMN relay_revision;
     PRAGMA user_version=17;`);
   closeDatabase();const migrated=getSqlite();
-  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,18);
+  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,19);
   const current=migrated.prepare("SELECT * FROM telegram_promotion_settings WHERE id='primary'").get();
   assert.equal(current.relay_enabled,1);assert.equal(current.relay_started_at,now);assert.ok(current.relay_revision);
   assert.equal(current.relay_chat_id,'@join365freebonusgroup');
@@ -399,4 +415,273 @@ test('v17 migration preserves notes, credentials and existing queues while activ
   assert.deepEqual({...migrated.prepare('SELECT * FROM telegram_private_brand_updates').get()},privateJob);
   assert.deepEqual({...migrated.prepare('SELECT * FROM telegram_private_contacts WHERE user_id=701').get()},{user_id:701,updates_enabled:0,updates_started_at:123});
   assert.equal(migrated.prepare('SELECT COUNT(*) AS count FROM telegram_relay_outbox').get().count,0);
+});
+
+function accountSource(chatId=source,{selected=1,joined=1,selectedAt=now-5000}={}) {
+  getSqlite().prepare(`INSERT OR REPLACE INTO telegram_personal_sources(chat_id,selected,joined,selected_at)
+    VALUES(?,?,?,?)`).run(chatId,selected,joined,selectedAt);
+}
+async function configureAccount(t) {
+  t.mock.method(Date,'now',()=>now);
+  configure();
+  getSqlite().exec(`CREATE TABLE telegram_personal_account(id TEXT PRIMARY KEY,generation TEXT,stage TEXT);
+    CREATE TABLE telegram_personal_sources(chat_id INTEGER PRIMARY KEY,selected INTEGER,joined INTEGER,selected_at INTEGER,blocked INTEGER NOT NULL DEFAULT 0);
+    INSERT INTO telegram_personal_account VALUES('primary','account-generation','connected');`);
+  accountSource();
+  await poll(now,[]);
+}
+function accountPhoto(overrides={}) {
+  return {sourceChatId:source,sourceMessageId:2001,sourceDate:now/1000,mediaGroupId:'',
+    caption:'New photo https://other.example/signup',captionEntities:[],mediaKind:'photo',
+    bytes:Buffer.from('personal-photo-one'),hasSpoiler:false,sourceMediaId:'personal-photo-one',
+    accountGeneration:'account-generation',relayRevision:'relay-revision',...overrides};
+}
+
+test('captioned source channel_post updates use the same fixed links and destination channel support',async()=>{
+  configure();telegram.targetType='channel';
+  const input=photo();const message={...input.message,chat:{id:source,type:'channel'}};
+  await poll(now,[{update_id:input.update_id,channel_post:message}]);
+  assert.equal(jobs().length,1);await deliver();
+  assert.equal(sends().length,1);assert.equal(sends()[0].parameters.chat_id,target);
+  assert.deepEqual(sends()[0].parameters.reply_markup,{inline_keyboard:relayKeyboard()});
+  assert.equal(sends()[0].parameters.caption.includes('source.example'),false);
+});
+
+test('identical file identity is not resent after caption changes, a new day, or settings generation change',async()=>{
+  configure();const first=photo();await poll(now,[first]);await deliver();
+  const later=now+2*86_400_000;
+  getSqlite().prepare("UPDATE telegram_promotion_settings SET relay_revision='second-generation',relay_started_at=? WHERE id='primary'").run(later);
+  await poll(later,[photo(2,{date:later/1000,caption:'Different caption and source link https://changed.example',photo:first.message.photo})]);
+  await deliver(later);
+  assert.equal(jobs().length,1);assert.equal(sends().length,1);
+  assert.equal(jobs()[0].status,'sent');assert.ok(state().skipped_count>=1);
+});
+
+test('same downloaded image under different Telegram file IDs and captions sends only once',async()=>{
+  configure();media.files.set('photo-1',Buffer.from('shared-image'));media.files.set('photo-2',Buffer.from('shared-image'));
+  await poll(now,[photo(1),photo(2,{caption:'Completely different caption'})]);
+  await deliver(now);await deliver(now+3000);
+  assert.equal(sends().length,1);assert.deepEqual(jobs().map(job=>job.status),['sent','cancelled']);
+  assert.ok(state().skipped_count>=1);
+});
+
+test('an uncertain image transmission permanently reserves its image identity across database reopening',async()=>{
+  configure();media.files.set('photo-1',Buffer.from('shared-image'));media.files.set('photo-2',Buffer.from('shared-image'));
+  await poll(now,[photo(1)]);telegram.sends.push(null);await deliver(now);
+  assert.equal(jobs()[0].status,'unknown');closeDatabase();
+  await poll(now+4000,[photo(2,{caption:'Retry via another caption'})]);await deliver(now+4000);
+  assert.equal(sends().length,1);assert.deepEqual(jobs().map(job=>job.status),['unknown','cancelled']);
+});
+
+test('personal-account photos are multipart uploaded by the bot with rewritten links and original keyboards removed',async t=>{
+  await configureAccount(t);const input=accountPhoto({hasSpoiler:true});
+  assert.equal(await relay.enqueuePersonalRelayMedia(input),true);
+  assert.equal(jobs().length,1);assert.equal(jobs()[0].origin,'account');
+  assert.ok(jobs()[0].media_bytes.length>0);assert.equal(jobs()[0].file_id,'');
+  await deliver(now);
+  assert.equal(sends().length,1);const call=sends()[0];
+  assert.equal(call.method,'sendPhoto');assert.equal(call.parameters.photo,undefined);
+  assert.equal(call.parameters.has_spoiler,true);
+  assert.equal(call.parameters.caption,'New photo https://365freebonus.com/');
+  assert.deepEqual(call.parameters.reply_markup,{inline_keyboard:relayKeyboard()});
+  assert.equal(call.upload.field,'photo');assert.deepEqual(call.upload.bytes,input.bytes);
+  assert.equal(jobs()[0].status,'sent');assert.equal(jobs()[0].media_bytes,null);
+});
+
+test('personal-account animations are uploaded as animation bytes instead of personal media IDs',async t=>{
+  await configureAccount(t);const input=accountPhoto({mediaKind:'animation',bytes:Buffer.from('animation-file'),sourceMediaId:'animation-file'});
+  assert.equal(await relay.enqueuePersonalRelayMedia(input),true);await deliver(now);
+  assert.equal(sends()[0].method,'sendAnimation');assert.equal(sends()[0].parameters.animation,undefined);
+  assert.equal(sends()[0].upload.field,'animation');assert.deepEqual(sends()[0].upload.bytes,input.bytes);
+  assert.equal(jobs()[0].media_bytes,null);
+});
+
+test('personal-account enqueue rejects unselected, departed, stale-account and stale-relay sources',async t=>{
+  await configureAccount(t);
+  assert.equal(await relay.enqueuePersonalRelayMedia(accountPhoto({accountGeneration:'old-account'})),false);
+  assert.equal(await relay.enqueuePersonalRelayMedia(accountPhoto({relayRevision:'old-relay'})),false);
+  accountSource(source,{selected:0});assert.equal(await relay.enqueuePersonalRelayMedia(accountPhoto()),false);
+  accountSource(source,{joined:0});assert.equal(await relay.enqueuePersonalRelayMedia(accountPhoto()),false);
+  assert.equal(await relay.enqueuePersonalRelayMedia(accountPhoto({sourceChatId:source-1})),false);
+  assert.equal(jobs().length,0);
+});
+
+test('personal-account selection and activation boundaries consume old media without importing history',async t=>{
+  await configureAccount(t);accountSource(source,{selectedAt:now});
+  assert.equal(await relay.enqueuePersonalRelayMedia(accountPhoto({sourceDate:now/1000-1})),true);
+  assert.equal(jobs().length,0);
+  accountSource(source,{selectedAt:now-60_000});
+  assert.equal(await relay.enqueuePersonalRelayMedia(accountPhoto({sourceDate:now/1000-20})),true);
+  assert.equal(jobs().length,0,'relay activation boundary also excludes historical media');
+  assert.equal(await relay.enqueuePersonalRelayMedia(accountPhoto({sourceDate:now/1000})),true);
+  assert.equal(jobs().length,1);
+});
+
+test('personal-account text only, empty media, captionless media and destination echo are consumed without sending',async t=>{
+  await configureAccount(t);
+  for(const overrides of [{caption:'  '},{bytes:Buffer.alloc(0)},{sourceChatId:target}]) {
+    if(overrides.sourceChatId)accountSource(target);
+    assert.equal(await relay.enqueuePersonalRelayMedia(accountPhoto(overrides)),true);
+  }
+  assert.equal(jobs().length,0);await deliver(now);assert.equal(sends().length,0);
+});
+
+test('deselecting a queued personal source cancels its job and releases stored media without affecting bot jobs',async t=>{
+  await configureAccount(t);assert.equal(await relay.enqueuePersonalRelayMedia(accountPhoto()),true);
+  await poll(now+1000,[photo()]);accountSource(source,{selected:0});
+  await deliver(now+1000);
+  assert.deepEqual(jobs().map(job=>job.status),['cancelled','sent']);
+  assert.equal(jobs()[0].media_bytes,null);assert.equal(sends().length,1);
+  assert.equal(sends()[0].parameters.photo,'photo-1');
+});
+
+test('disconnecting a queued personal account cancels its media before the bot can send',async t=>{
+  await configureAccount(t);assert.equal(await relay.enqueuePersonalRelayMedia(accountPhoto()),true);
+  getSqlite().prepare("UPDATE telegram_personal_account SET stage='disconnected' WHERE id='primary'").run();
+  await deliver(now);assert.equal(sends().length,0);assert.equal(jobs()[0].status,'cancelled');assert.equal(jobs()[0].media_bytes,null);
+});
+
+test('same personal photo across selected channels is deduplicated independently of caption or media ID',async t=>{
+  await configureAccount(t);accountSource(source-1);
+  assert.equal(await relay.enqueuePersonalRelayMedia(accountPhoto()),true);
+  assert.equal(await relay.enqueuePersonalRelayMedia(accountPhoto({sourceChatId:source-1,sourceMessageId:2002,sourceMediaId:'new-file-id',caption:'Different wording'})),true);
+  assert.equal(jobs().length,1);await deliver(now);assert.equal(sends().length,1);
+});
+
+test('bot and personal account sources share the same persistent media-content deduplication ledger',async t=>{
+  await configureAccount(t);media.files.set('photo-1',accountPhoto().bytes);
+  await poll(now+1000,[photo()]);await deliver(now+1000);
+  assert.equal(await relay.enqueuePersonalRelayMedia(accountPhoto()),true);
+  assert.equal(jobs().length,1);assert.equal(sends().length,1);
+  accountSource(source-1);
+  assert.equal(await relay.enqueuePersonalRelayMedia(accountPhoto({sourceChatId:source-1,sourceMediaId:'different-id',caption:'New text'})),true);
+  assert.equal(jobs().length,1);
+});
+
+test('queued personal media also prevents a duplicate bot upload before the personal job sends',async t=>{
+  await configureAccount(t);assert.equal(await relay.enqueuePersonalRelayMedia(accountPhoto()),true);
+  media.files.set('photo-1',accountPhoto().bytes);await poll(now+1000,[photo()]);
+  await deliver(now+1000);await deliver(now+4000);
+  assert.equal(sends().length,1);assert.deepEqual(jobs().map(job=>job.status),['sent','cancelled']);
+});
+
+test('personal media queue capacity applies backpressure instead of acknowledging media that cannot be stored',async t=>{
+  await configureAccount(t);
+  getSqlite().exec(`INSERT INTO telegram_relay_outbox(source_chat_id,source_message_id,fingerprint,queued_at,revision,media_kind,file_id,file_unique_id,caption,next_attempt_at,media_bytes)
+    VALUES(-1007654321,1,'capacity-fixture',${now},'relay-revision','photo','','capacity','x',${now},zeroblob(67108864));`);
+  assert.equal(await relay.enqueuePersonalRelayMedia(accountPhoto()),false);
+  assert.equal(jobs().length,1);assert.equal(sends().length,0);
+});
+
+test('personal enqueue revalidates source and settings after asynchronous media identity work',async t=>{
+  await configureAccount(t);
+  media.onIdentity=async()=>getSqlite().prepare("UPDATE telegram_personal_sources SET selected=0 WHERE chat_id=?").run(source);
+  assert.equal(await relay.enqueuePersonalRelayMedia(accountPhoto()),false);assert.equal(jobs().length,0);
+  accountSource();media.onIdentity=async()=>getSqlite().prepare("UPDATE telegram_promotion_settings SET relay_revision='changed-during-hash' WHERE id='primary'").run();
+  assert.equal(await relay.enqueuePersonalRelayMedia(accountPhoto()),false);assert.equal(jobs().length,0);
+});
+
+test('bot delivery rechecks settings after downloading media and never sends to a stale target',async()=>{
+  configure();await poll(now,[photo()]);
+  media.onDownload=async()=>{getSqlite().prepare("UPDATE telegram_promotion_settings SET relay_revision='new-destination' WHERE id='primary'").run();return Buffer.from('downloaded');};
+  await deliver(now);assert.equal(sends().length,0);assert.equal(jobs()[0].status,'cancelled');
+  assert.equal(state().send_lease_until,0);
+});
+
+test('personal uncertain delivery removes stored bytes but preserves deduplication after restart',async t=>{
+  await configureAccount(t);assert.equal(await relay.enqueuePersonalRelayMedia(accountPhoto()),true);
+  telegram.sends.push(null);await deliver(now);assert.equal(jobs()[0].status,'unknown');assert.equal(jobs()[0].media_bytes,null);
+  closeDatabase();accountSource(source-1);
+  assert.equal(await relay.enqueuePersonalRelayMedia(accountPhoto({sourceChatId:source-1,sourceMediaId:'reuploaded-image',caption:'Another text'})),true);
+  await deliver(now+4000);assert.equal(sends().length,1);assert.equal(jobs().length,1);
+});
+
+test('a source reselected during asynchronous photo hashing cannot enqueue the previous selection message',async t=>{
+  await configureAccount(t);
+  media.onIdentity=async()=>accountSource(source,{selectedAt:now});
+  assert.equal(await relay.enqueuePersonalRelayMedia(accountPhoto()),false);
+  assert.equal(jobs().length,0);assert.equal(sends().length,0);
+});
+
+test('a queued personal photo from an earlier selection is cancelled and purged after reselecting its channel',async t=>{
+  await configureAccount(t);assert.equal(await relay.enqueuePersonalRelayMedia(accountPhoto()),true);
+  accountSource(source,{selectedAt:now+1});
+  await deliver(now+1000);
+  assert.equal(sends().length,0);assert.equal(jobs()[0].status,'cancelled');assert.equal(jobs()[0].media_bytes,null);
+});
+
+test('configuration cancellation during an in-flight send preserves uncertain image deduplication',async()=>{
+  configure();const original=photo();await poll(now,[original]);
+  telegram.sends.push(async()=>{
+    getSqlite().prepare("UPDATE telegram_promotion_settings SET relay_enabled=0 WHERE id='primary'").run();
+    relay.cancelRelayPending(getSqlite());
+    return ok({message_id:654321,date:now/1000});
+  });
+  await deliver(now);
+  assert.equal(sends().length,1);assert.equal(jobs()[0].status,'unknown');
+  assert.ok(jobs()[0].last_error);assert.equal(jobs()[0].media_bytes,null);
+  const resumed=now+4000;
+  getSqlite().prepare("UPDATE telegram_promotion_settings SET relay_enabled=1,relay_revision='re-enabled',relay_started_at=? WHERE id='primary'").run(resumed);
+  await poll(resumed,[photo(2,{date:resumed/1000,caption:'Different caption',photo:original.message.photo})]);
+  await deliver(resumed);
+  assert.equal(sends().length,1);assert.equal(jobs().length,1,'uncertain transmission must keep its media key reservation');
+});
+
+test('v18 upgrade preserves settings and PIN while seeding permanent image identities from existing sent jobs',async()=>{
+  configure();const original=photo();await poll(now,[original]);await deliver(now);
+  const db=getSqlite();
+  db.prepare("INSERT INTO notes_vault_settings(id,pin_hash,revision,created_at,updated_at) VALUES('primary','persistent-pin-hash','persistent-vault',11,12)").run();
+  db.prepare(`INSERT INTO telegram_relay_outbox(source_chat_id,source_message_id,fingerprint,queued_at,revision,media_kind,file_id,file_unique_id,caption,next_attempt_at)
+    VALUES(? ,2222,'old-caption-fingerprint',?,'relay-revision','photo','old-duplicate-file','photo-unique-1','Old repeated caption',?)`).run(source-1,now,now);
+  const settingsBefore={...db.prepare("SELECT * FROM telegram_promotion_settings WHERE id='primary'").get()};
+  const vaultBefore={...db.prepare("SELECT * FROM notes_vault_settings WHERE id='primary'").get()};
+  const stateBefore={...db.prepare("SELECT * FROM telegram_relay_state WHERE id='primary'").get()};
+  const sentId=jobs()[0].id;
+  db.exec('DROP TABLE telegram_relay_media_keys');
+  for(const column of ['origin','account_generation','media_bytes','content_hash','visual_hash','media_prepared']) {
+    db.exec(`ALTER TABLE telegram_relay_outbox DROP COLUMN ${column}`);
+  }
+  db.exec('PRAGMA user_version=18');closeDatabase();
+  const migrated=getSqlite();
+  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,19);
+  assert.deepEqual({...migrated.prepare("SELECT * FROM telegram_promotion_settings WHERE id='primary'").get()},settingsBefore);
+  assert.deepEqual({...migrated.prepare("SELECT * FROM notes_vault_settings WHERE id='primary'").get()},vaultBefore);
+  assert.deepEqual({...migrated.prepare("SELECT * FROM telegram_relay_state WHERE id='primary'").get()},stateBefore);
+  assert.equal(migrated.prepare("SELECT outbox_id FROM telegram_relay_media_keys WHERE media_key='file:photo:photo-unique-1'").get().outbox_id,sentId);
+  assert.deepEqual(jobs().map(job=>job.status),['sent','cancelled']);
+  await poll(now+4000,[photo(3,{caption:'New caption from another group',photo:original.message.photo,chat:{id:source-2,type:'supergroup'}})]);
+  await deliver(now+4000);assert.equal(sends().length,1);assert.equal(jobs().length,2);
+});
+
+test('a full bot queue retains the source update until capacity is available and then queues it exactly once',async()=>{
+  configure();await poll(now,[]);
+  getSqlite().exec(`WITH RECURSIVE numbers(n) AS (
+      VALUES(1) UNION ALL SELECT n+1 FROM numbers WHERE n<128
+    ) INSERT INTO telegram_relay_outbox(source_chat_id,source_message_id,fingerprint,queued_at,revision,
+      media_kind,file_id,file_unique_id,caption,next_attempt_at)
+    SELECT -1009876543,n,'capacity-'||n,${now},'relay-revision','photo','capacity-file-'||n,
+      'capacity-identity-'||n,'Existing queued photo',${now} FROM numbers;`);
+  const incoming=photo(900);
+  await poll(now+1000,[incoming]);
+  assert.equal(jobs().length,128);assert.equal(state().next_offset,incoming.update_id,
+    'the full queue must not acknowledge the unqueued update');
+  assert.equal(jobs().some(job=>job.source_message_id===incoming.message.message_id),false);
+  getSqlite().prepare("UPDATE telegram_relay_outbox SET status='cancelled' WHERE id=(SELECT MIN(id) FROM telegram_relay_outbox)").run();
+  await poll(now+2000,[incoming]);
+  assert.equal(telegram.polls.at(-1).offset,incoming.update_id);
+  assert.equal(jobs().length,129);assert.equal(state().next_offset,incoming.update_id+1);
+  assert.equal(jobs().filter(job=>job.source_message_id===incoming.message.message_id).length,1);
+  assert.equal(jobs().filter(job=>job.status==='pending').length,128);
+  await poll(now+3000,[incoming]);
+  assert.equal(jobs().length,129);assert.equal(sends().length,0);
+});
+
+
+test('a source newly observed as protected cancels queued personal media and blocks further enqueue',async t=>{
+  await configureAccount(t);assert.equal(await relay.enqueuePersonalRelayMedia(accountPhoto()),true);
+  getSqlite().prepare('UPDATE telegram_personal_sources SET blocked=1 WHERE chat_id=?').run(source);
+  assert.equal(await relay.enqueuePersonalRelayMedia(accountPhoto({sourceMessageId:2002,sourceMediaId:'another-image',bytes:Buffer.from('another-image')})),false);
+  await deliver(now);
+  assert.equal(sends().length,0);assert.equal(jobs().length,1);
+  assert.equal(jobs()[0].status,'cancelled');assert.equal(jobs()[0].media_bytes,null);
 });

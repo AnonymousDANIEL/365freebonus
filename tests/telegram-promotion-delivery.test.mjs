@@ -18,6 +18,7 @@ for (const name of ['auth-core', 'brand-links', 'directory', 'image-url', 'sqlit
     { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, esModuleInterop: true } },
   ).outputText);
 }
+writeFileSync(path.join(fixture, 'telegram-relay-media.js'), 'exports.relayMediaMaxBytes = () => 20971520;');
 writeFileSync(path.join(fixture, 'telegram-welcome.js'), 'exports.startTelegramWelcomeWorker = () => { throw new Error("Unexpected background worker"); };');
 writeFileSync(path.join(fixture, 'telegram-bot.js'), `
 exports.calls = [];

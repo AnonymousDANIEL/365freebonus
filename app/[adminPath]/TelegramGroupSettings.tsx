@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Check, LoaderCircle, Pencil, Plus, Trash2 } from "lucide-react";
 import "./telegram-keywords-admin.css";
+import TelegramPersonalAccount from "./TelegramPersonalAccount";
 
 type RelayStatus = { enabled: boolean; chatId: string; ready: boolean; counts: { pending: number; sending: number; sent: number; failed: number; unknown: number; cancelled: number; skipped: number }; lastError: string; lastPolledAt: number | null };
 type WelcomeDraft = { enabled: boolean; chatId: string; message: string };
@@ -418,14 +419,14 @@ export default function TelegramGroupSettings({ request, signInPath }: AdminProp
         </section>
         <section className="cms-settings-panel" aria-labelledby="telegram-relay-title">
           <div>
-            <h2 id="telegram-relay-title">群图片自动转发</h2>
-            <p>@FreeBonus365Bot 自动整理它在其他群收到的照片或 GIF＋文案，发送到你的目标群。</p>
+            <h2 id="telegram-relay-title">图片自动转发</h2>
+            <p>将来源群、频道的照片或 GIF＋文案整理后，由 @FreeBonus365Bot 发送到你的群或频道。个人账号来源在下方单独选择。</p>
             <span className={`cms-telegram-status${config.relay.enabled && config.relay.ready ? " cms-telegram-enabled" : ""}`}>{config.relay.enabled ? config.relay.ready ? "目标已连接" : "等待连接" : "已停用"}</span>
           </div>
           <div className="cms-settings-fields">
             <label className="cms-telegram-switch">
               <input type="checkbox" role="switch" checked={draft.relay.enabled} onChange={event => setDraft({ ...draft, relay: { ...draft.relay, enabled: event.target.checked } })} />
-              启用群图片自动转发
+              启用图片自动转发
             </label>
             <label>转发目标群组或频道
               <input type="text" autoComplete="off" spellCheck={false} maxLength={80} required={draft.relay.enabled}
@@ -439,6 +440,7 @@ export default function TelegramGroupSettings({ request, signInPath }: AdminProp
             <small>💬 NEED HELP? — https://t.me/FreeBonus365ChatBot</small>
             <small>来源群需允许机器人接收普通消息：将机器人设为管理员，或在 BotFather 关闭 Group Privacy。其他机器人发出的消息还可能需要开启 Bot-to-Bot Communication Mode。</small>
             <small>不要同时为此机器人使用其他 Webhook 或轮询接收服务。系统会去重、限速，并忽略自己的消息和目标群消息。</small>
+            <small>相同 Telegram 图片身份或相同图片内容会跳过，文案、链接或来源改变也不会重复发送。去重记录在重新开启和重启后保留。</small>
             <dl className="cms-telegram-counts" aria-label="群图片转发记录">
               {Object.entries(config.relay.counts).map(([key, count]) => <div key={key}><dt>{({ ...deliveryLabels, cancelled: "已取消" } as Record<string, string>)[key] || key}</dt><dd>{count}</dd></div>)}
               <div><dt>最近检查（MYT）</dt><dd>{config.relay.lastPolledAt === null ? "尚未检查" : pollTimeFormat.format(config.relay.lastPolledAt)}</dd></div>
@@ -446,6 +448,7 @@ export default function TelegramGroupSettings({ request, signInPath }: AdminProp
             {config.relay.lastError && <p className="cms-telegram-last-error">最近转发异常 · {config.relay.lastError}</p>}
           </div>
         </section>
+        <TelegramPersonalAccount request={request} signInPath={signInPath} />
         <section className="cms-settings-panel" aria-labelledby="telegram-welcome-title">
           <div>
             <h2 id="telegram-welcome-title">聊天机器人</h2>

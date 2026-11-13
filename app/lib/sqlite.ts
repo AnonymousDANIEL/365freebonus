@@ -12,7 +12,7 @@ export function getDataDirectory(): string {
 function migrate(db: DatabaseSync) {
   if (migrated.has(db)) return;
   const readVersion = () => (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
-  if (readVersion() < 18) {
+  if (readVersion() < 19) {
     db.exec("BEGIN IMMEDIATE");
     try {
       // Read again inside the write lock, so concurrent process starts cannot
@@ -310,6 +310,30 @@ function migrate(db: DatabaseSync) {
           relay_started_at = ?, relay_revision = lower(hex(randomblob(16)))
           WHERE token_ciphertext <> ''`).run(Date.now());
         db.exec("PRAGMA user_version = 18;");
+      }
+      if (version < 19) {
+        db.exec(`
+          ALTER TABLE telegram_relay_outbox ADD COLUMN origin TEXT NOT NULL DEFAULT 'bot';
+          ALTER TABLE telegram_relay_outbox ADD COLUMN account_generation TEXT NOT NULL DEFAULT '';
+          ALTER TABLE telegram_relay_outbox ADD COLUMN media_bytes BLOB;
+          ALTER TABLE telegram_relay_outbox ADD COLUMN content_hash TEXT NOT NULL DEFAULT '';
+          ALTER TABLE telegram_relay_outbox ADD COLUMN visual_hash TEXT NOT NULL DEFAULT '';
+          ALTER TABLE telegram_relay_outbox ADD COLUMN media_prepared INTEGER NOT NULL DEFAULT 0;
+          CREATE TABLE telegram_relay_media_keys (
+            media_key TEXT PRIMARY KEY, outbox_id INTEGER NOT NULL
+          );
+          CREATE INDEX telegram_relay_media_key_job ON telegram_relay_media_keys(outbox_id);
+          INSERT OR IGNORE INTO telegram_relay_media_keys(media_key,outbox_id)
+            SELECT 'file:' || media_kind || ':' || file_unique_id, id
+            FROM telegram_relay_outbox
+            WHERE status IN ('pending','sending','sent','unknown') AND file_unique_id <> ''
+            ORDER BY CASE status WHEN 'sent' THEN 0 WHEN 'unknown' THEN 1 ELSE 2 END,id;
+          UPDATE telegram_relay_outbox SET status='cancelled'
+            WHERE status='pending' AND EXISTS(SELECT 1 FROM telegram_relay_media_keys k
+              WHERE k.media_key='file:' || telegram_relay_outbox.media_kind || ':' || telegram_relay_outbox.file_unique_id
+                AND k.outbox_id<>telegram_relay_outbox.id);
+          PRAGMA user_version = 19;
+        `);
       }
       db.exec("COMMIT");
     } catch (error) { db.exec("ROLLBACK"); throw error; }

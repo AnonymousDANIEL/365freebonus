@@ -124,7 +124,7 @@ export function prepareRelayMessage(
 ): RelayMessage | null {
   if (!positive(context.botId) || !negative(context.targetChatId) || !positive(context.startedAt)) return null;
   const chat = record(message.chat);
-  if (!chat || !negative(chat.id) || !["group", "supergroup"].includes(String(chat.type))
+  if (!chat || !negative(chat.id) || !["group", "supergroup", "channel"].includes(String(chat.type))
     || chat.id === context.targetChatId || !positive(message.message_id)
     || !positive(message.date) || message.date > Math.floor(Number.MAX_SAFE_INTEGER / 1000)
     || message.date * 1000 < Math.floor(context.startedAt / 1000) * 1000) return null;

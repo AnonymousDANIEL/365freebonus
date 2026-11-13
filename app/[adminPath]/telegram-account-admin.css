@@ -1,0 +1,15 @@
+.cms-shell .cms-telegram-account-fields { border: 0; padding: 0; margin: 0; min-inline-size: 0; }
+.cms-shell .cms-telegram-account-grid { display: grid; grid-template-columns: minmax(110px, .65fr) minmax(0, 1.35fr); gap: 16px; }
+.cms-shell .cms-telegram-account-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+.cms-shell .cms-telegram-account-help { font-size: 11px; line-height: 1.9; color: var(--cms-muted); margin: 0; max-width: none; }
+.cms-shell .cms-telegram-account-help a { color: var(--cms-green); text-decoration: underline; text-underline-offset: 3px; }
+.cms-shell .cms-telegram-channel-list { display: grid; max-height: 340px; overflow-y: auto; overscroll-behavior: contain; border: 1px solid var(--cms-line); border-radius: 8px; background: var(--cms-input); }
+.cms-shell label.cms-telegram-channel { display: flex; align-items: flex-start; gap: 11px; padding: 13px 14px; cursor: pointer; margin: 0; }
+.cms-shell label.cms-telegram-channel + label.cms-telegram-channel { border-top: 1px solid var(--cms-line); }
+.cms-shell label.cms-telegram-channel input { width: 17px; height: 17px; min-width: 17px; margin: 2px 0 0; accent-color: var(--cms-green); }
+.cms-shell .cms-telegram-channel > span { display: grid; gap: 3px; min-width: 0; }
+.cms-shell .cms-telegram-channel strong { font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; font-weight: 600; }
+.cms-shell .cms-telegram-channel small { font-size: 10px; color: var(--cms-muted); overflow-wrap: anywhere; }
+.cms-shell .cms-telegram-channel-left { opacity: .65; }
+.cms-shell .cms-telegram-account-empty { padding: 18px 14px; margin: 0; max-width: none; font-size: 11px; color: var(--cms-muted); }
+@media (max-width: 600px) { .cms-shell .cms-telegram-account-grid { grid-template-columns: 1fr; } }

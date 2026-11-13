@@ -14,11 +14,13 @@
     "test": "node --test tests/*.test.mjs"
   },
   "dependencies": {
+    "big-integer": "1.6.52",
     "lucide-react": "1.31.0",
     "next": "16.4.6",
     "react": "19.2.6",
     "react-dom": "19.2.6",
     "sharp": "0.35.5",
+    "teleproto": "1.233.0",
     "zod": "4.6.7"
   },
   "devDependencies": {

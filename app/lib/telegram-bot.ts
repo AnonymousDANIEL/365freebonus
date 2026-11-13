@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { request } from "node:https";
 
-type TelegramMethod = "getMe" | "getChat" | "getChatMember" | "getWebhookInfo" | "sendMessage" | "sendPhoto" | "sendAnimation" | "sendDocument";
+type TelegramMethod = "getMe" | "getChat" | "getChatMember" | "getWebhookInfo" | "getFile" | "sendMessage" | "sendPhoto" | "sendAnimation" | "sendDocument";
 export type TelegramUpload = { field: "photo" | "animation" | "document"; fileName: string; mime: string; bytes: Buffer };
 type TelegramReply<Result> =
   | { ok: true; result: Result }
@@ -97,7 +97,7 @@ export function telegramUpdates(token: string, offset: number) {
 
 /** The promotion bot owns a separate update stream from the private ChatBot. */
 export function telegramRelayUpdates(token: string, offset: number) {
-  return requestTelegram(token, "getUpdates", { offset, timeout: 10, limit: 20, allowed_updates: ["message", "my_chat_member"] }, asUpdates);
+  return requestTelegram(token, "getUpdates", { offset, timeout: 10, limit: 20, allowed_updates: ["message", "channel_post", "my_chat_member"] }, asUpdates);
 }
 
 export async function answerTelegramCallback(token: string, queryId: string): Promise<boolean> {

@@ -180,7 +180,7 @@ async function verifyRelayReceiver(token: string) {
     throw new TelegramSettingsError("暂时无法检查通知机器人的接收方式，请稍后重试。", 503);
   }
   if (webhook.result.url) {
-    throw new TelegramSettingsError("@FreeBonus365Bot 已连接到其他 Webhook，请先解除该连接再启用群图片转发。");
+    throw new TelegramSettingsError("@FreeBonus365Bot 已连接到其他 Webhook，请先解除该连接再启用图片转发。");
   }
 }
 
@@ -303,8 +303,8 @@ export async function saveTelegramPromotionSettings(input: SettingsInput) {
   const promotionMessage = input.promotionMessage?.trim() ?? previous.promotion_message;
   const relayEnabled = input.relay?.enabled ?? (previous.relay_enabled === 1);
   const relayChatId = input.relay ? normalizeChatTarget(input.relay.chatId) : previous.relay_chat_id || RELAY_DEFAULT_TARGET;
-  if (relayEnabled && !token) throw new TelegramSettingsError(`请填写 @${PROMOTION_BOT} 的 Token，再启用群图片转发。`);
-  if (relayEnabled && !relayChatId) throw new TelegramSettingsError("请填写群图片转发的目标群组或频道。");
+  if (relayEnabled && !token) throw new TelegramSettingsError(`请填写 @${PROMOTION_BOT} 的 Token，再启用图片转发。`);
+  if (relayEnabled && !relayChatId) throw new TelegramSettingsError("请填写图片转发的目标群组或频道。");
   const promotionIdentityChanged = tokenChanged && token.split(":", 1)[0] !== previousToken.split(":", 1)[0];
 
   const welcomeEnabled = input.welcome?.enabled ?? (previous.welcome_enabled === 1);
@@ -510,6 +510,8 @@ export function startTelegramPromotionWorker() {
   startTelegramWelcomeWorker(decryptToken);
   startTelegramPrivateUpdatesWorker(decryptToken);
   startTelegramRelayWorker(decryptToken);
+  void import("./telegram-account").then(account => account.startTelegramAccountWorker())
+    .catch(() => console.error("Telegram personal account receiver could not start."));
   let running = false;
   let reportedError = false;
   const tick = async () => {

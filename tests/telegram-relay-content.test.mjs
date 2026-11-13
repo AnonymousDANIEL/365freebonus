@@ -76,7 +76,6 @@ test('text-only, captionless images, videos and image documents are never turned
 test('only valid source groups and messages received since activation qualify', () => {
   for (const input of [
     message({ chat: { id: 701, type: 'private' } }),
-    message({ chat: { id: -1001111111111, type: 'channel' } }),
     message({ chat: { id: context.targetChatId, type: 'supergroup' } }),
     message({ chat: { id: '-1001111111111', type: 'supergroup' } }),
     message({ message_id: 0 }), message({ message_id: 1.5 }),
@@ -204,7 +203,7 @@ test('relay long polling uses a separate allowed-update stream and keeps the Cha
   const relay = await transport.telegramRelayUpdates('fixture-promotion-token', 17);
   const chat = await transport.telegramUpdates('fixture-chat-token', 23);
   assert.equal(relay.ok, true); assert.equal(chat.ok, true);
-  assert.deepEqual(calls[0].parameters, { offset: 17, timeout: 10, limit: 20, allowed_updates: ['message', 'my_chat_member'] });
+  assert.deepEqual(calls[0].parameters, { offset: 17, timeout: 10, limit: 20, allowed_updates: ['message', 'channel_post', 'my_chat_member'] });
   assert.deepEqual(calls[1].parameters, { offset: 23, timeout: 10, limit: 10, allowed_updates: ['chat_member', 'message', 'callback_query'] });
   assert.ok(calls[0].path.startsWith('/botfixture-promotion-token/'));
   assert.ok(calls[1].path.startsWith('/botfixture-chat-token/'));

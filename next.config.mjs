@@ -4,7 +4,7 @@ const nextConfig = {
   allowedDevOrigins: ['terminal.local'],
   poweredByHeader: false,
   reactStrictMode: true,
-  serverExternalPackages: ['node:sqlite'],
+  serverExternalPackages: ['node:sqlite', 'teleproto', 'big-integer'],
   async headers() {
     return [{ source: '/:path*', headers: [
       { key: 'X-Content-Type-Options', value: 'nosniff' },

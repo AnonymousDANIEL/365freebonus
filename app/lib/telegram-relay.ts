@@ -1,8 +1,9 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { getSqlite } from "./sqlite";
 import { telegramRelayUpdates, telegramRequest } from "./telegram-bot";
 import { prepareRelayMessage, relayKeyboard } from "./telegram-relay-content";
+import { downloadBotRelayMedia, relayMediaIdentity, relayMediaMaxBytes } from "./telegram-relay-media";
 
 type DecryptToken = (ciphertext: string) => string;
 type RelaySettings = { relay_enabled: number; relay_chat_id: string; relay_started_at: number; relay_revision: string; token_ciphertext: string };
@@ -16,6 +17,8 @@ type RelayJob = {
   id: number; source_chat_id: number; source_message_id: number; media_group_id: string; fingerprint: string;
   revision: string; media_kind: "photo" | "animation"; file_id: string; file_unique_id: string; caption: string;
   has_spoiler: number; attempts: number; lease_id: string; lease_until: number;
+  origin: string; account_generation: string; queued_at: number; media_bytes: Uint8Array | null;
+  content_hash: string; visual_hash: string; media_prepared: number;
 };
 type SendClaim = { settings: RelaySettings; targetChatId: number; job: RelayJob };
 const LEASE_MS = 60_000;
@@ -23,12 +26,12 @@ const VERIFY_MS = 60_000;
 const POLL_MS = 1_000;
 const SEND_MS = 3_000;
 const MAX_ATTEMPTS = 5;
-const DAY_MS = 86_400_000;
+const QUEUE_MAX_BYTES = 64 * 1024 * 1024;
 const UNCERTAIN = "Telegram 未确认图片转发的发送结果，已停止自动重试以避免重复。";
 const TOKEN_ERROR = "无法使用品牌机器人凭据，请重新填写 @FreeBonus365Bot 的 Token。";
-const TARGET_ERROR = "请将 @FreeBonus365Bot 加入目标群，并允许它发送照片。";
-const TARGET_CHANGED_ERROR = "目标群身份已改变，请在后台核对目标并重新关闭／开启转发。";
-const WEBHOOK_ERROR = "品牌机器人已连接其他 Webhook，请先解除该接收连接后再启用群图片转发。";
+const TARGET_ERROR = "请将 @FreeBonus365Bot 加入目标群或频道，并允许它发送照片；目标频道需要发布消息权限。";
+const TARGET_CHANGED_ERROR = "目标群或频道身份已改变，请在后台核对目标并重新关闭／开启转发。";
+const WEBHOOK_ERROR = "品牌机器人已连接其他 Webhook，请先解除该接收连接后再启用图片转发。";
 const CONFLICT_ERROR = "品牌机器人正由另一项轮询或 Webhook 使用，请检查其他接收程序。";
 const TEMP_ERROR = "暂时无法验证图片转发连接，稍后自动检查。";
 
@@ -55,8 +58,94 @@ function state(db: DatabaseSync): RelayState {
 }
 /** Invalidates queued work but keeps a global in-flight send lease until it settles. */
 export function cancelRelayPending(db: DatabaseSync) {
-  db.prepare(`UPDATE telegram_relay_outbox SET status='cancelled',lease_id='',lease_until=0
-    WHERE status IN ('pending','sending')`).run();
+  db.prepare(`UPDATE telegram_relay_outbox SET status='cancelled',lease_id='',lease_until=0,media_bytes=NULL
+    WHERE status='pending'`).run();
+  // A request already handed to Telegram may still succeed after settings
+  // change. Retain its media identity instead of making it eligible again.
+  db.prepare(`UPDATE telegram_relay_outbox SET status='unknown',last_error=?,lease_id='',lease_until=0,media_bytes=NULL
+    WHERE status='sending'`).run(UNCERTAIN);
+}
+
+/** Persistent media identities are independent of caption, source, target and settings generations. */
+function mediaOwner(db: DatabaseSync, keys: string[], exceptId = 0): number {
+  for (const key of keys) {
+    const existing = db.prepare(`SELECT k.outbox_id,o.status FROM telegram_relay_media_keys k
+      JOIN telegram_relay_outbox o ON o.id=k.outbox_id WHERE k.media_key=?`).get(key) as { outbox_id: number; status: string } | undefined;
+    if (!existing) continue;
+    if (["failed", "cancelled"].includes(existing.status)) {
+      db.prepare("DELETE FROM telegram_relay_media_keys WHERE media_key=?").run(key);
+    } else if (existing.outbox_id !== exceptId) return existing.outbox_id;
+  }
+  return 0;
+}
+function registerMedia(db: DatabaseSync, id: number, keys: string[]): boolean {
+  const duplicate = mediaOwner(db, keys, id);
+  const owner = duplicate || id;
+  for (const key of keys) db.prepare("INSERT OR IGNORE INTO telegram_relay_media_keys(media_key,outbox_id) VALUES(?,?)").run(key, owner);
+  if (!duplicate) return true;
+  db.prepare("UPDATE telegram_relay_outbox SET status='cancelled',media_bytes=NULL,lease_id='',lease_until=0,last_error='' WHERE id=?").run(id);
+  db.prepare("UPDATE telegram_relay_state SET skipped_count=skipped_count+1 WHERE id='primary'").run();
+  return false;
+}
+function identityKeys(kind: string, contentHash: string, visualHash: string) {
+  return [contentHash ? `content:${kind}:${contentHash}` : "", visualHash ? `visual:${kind}:${visualHash}` : ""].filter(Boolean);
+}
+function accountAllowed(db: DatabaseSync, sourceChatId: number, generation: string, queuedAt = Number.MAX_SAFE_INTEGER): boolean {
+  if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='telegram_personal_account'").get()) return false;
+  return Boolean(db.prepare(`SELECT 1 FROM telegram_personal_account a JOIN telegram_personal_sources s
+    WHERE a.id='primary' AND a.stage='connected' AND a.generation=? AND s.chat_id=? AND s.selected=1 AND s.joined=1 AND s.blocked=0 AND s.selected_at<=?`)
+    .get(generation, sourceChatId, queuedAt));
+}
+
+/** User-account media is uploaded as bytes, never as a Bot API file_id. */
+export async function enqueuePersonalRelayMedia(input: {
+  sourceChatId: number; sourceMessageId: number; sourceDate: number; mediaGroupId: string; caption: string; captionEntities: unknown;
+  mediaKind: "photo" | "animation"; bytes: Buffer; hasSpoiler: boolean; sourceMediaId: string;
+  accountGeneration: string; relayRevision: string;
+}): Promise<boolean> {
+  const db = getSqlite();
+  const current = settings(db);
+  if (!enabled(current) || current.relay_revision !== input.relayRevision || !accountAllowed(db, input.sourceChatId, input.accountGeneration)) return false;
+  const runtime = state(db);
+  if (runtime.ready_until <= Date.now() || runtime.revision !== current.relay_revision || runtime.target_chat_id >= 0) return false;
+  const selected = db.prepare("SELECT selected_at FROM telegram_personal_sources WHERE chat_id=?").get(input.sourceChatId) as { selected_at: number };
+  if (input.sourceDate * 1000 < Math.floor(selected.selected_at / 1000) * 1000) return true;
+  if (!Buffer.isBuffer(input.bytes) || !input.bytes.length || input.bytes.length > relayMediaMaxBytes(input.mediaKind)) return true;
+  const sourceId = createHash("sha256").update(input.sourceMediaId).digest("hex");
+  const content = prepareRelayMessage({ chat: { id: input.sourceChatId, type: "channel" },
+    message_id: input.sourceMessageId, date: input.sourceDate, media_group_id: input.mediaGroupId || undefined,
+    caption: input.caption, caption_entities: input.captionEntities, has_media_spoiler: input.hasSpoiler,
+    [input.mediaKind === "photo" ? "photo" : "animation"]: input.mediaKind === "photo"
+      ? [{ file_id: sourceId, file_unique_id: sourceId, width: 1, height: 1 }]
+      : { file_id: sourceId, file_unique_id: sourceId },
+  }, { botId: runtime.bot_id, targetChatId: runtime.target_chat_id, startedAt: current.relay_started_at });
+  if (!content) return true;
+  const hashes = await relayMediaIdentity(input.bytes, input.mediaKind);
+  return transaction(db, () => {
+    const latest = settings(db);
+    const target = state(db);
+    if (!enabled(latest) || latest.relay_revision !== input.relayRevision || target.ready_until <= Date.now()
+      || target.target_chat_id !== runtime.target_chat_id || !accountAllowed(db, input.sourceChatId, input.accountGeneration)) return false;
+    const latestSelection = db.prepare("SELECT selected_at FROM telegram_personal_sources WHERE chat_id=?").get(input.sourceChatId) as { selected_at: number };
+    if (latestSelection.selected_at !== selected.selected_at) return false;
+    const keys = [`account:${input.mediaKind}:${sourceId}`, ...identityKeys(input.mediaKind, hashes.contentHash, hashes.visualHash)];
+    const duplicate = mediaOwner(db, keys);
+    const exists = db.prepare(`SELECT 1 FROM telegram_relay_outbox WHERE source_chat_id=? AND (source_message_id=?
+      OR (?<>'' AND media_group_id=?))`).get(input.sourceChatId, input.sourceMessageId, input.mediaGroupId, input.mediaGroupId);
+    if (duplicate || exists) { db.prepare("UPDATE telegram_relay_state SET skipped_count=skipped_count+1 WHERE id='primary'").run(); return true; }
+    const queue = db.prepare("SELECT COUNT(*) AS count,COALESCE(SUM(length(media_bytes)),0) AS bytes FROM telegram_relay_outbox WHERE status IN ('pending','sending')").get() as { count: number; bytes: number };
+    if (queue.count >= 128 || queue.bytes + input.bytes.length > QUEUE_MAX_BYTES) return false;
+    const now = Date.now();
+    const inserted = db.prepare(`INSERT OR IGNORE INTO telegram_relay_outbox
+      (source_chat_id,source_message_id,media_group_id,fingerprint,queued_at,revision,media_kind,file_id,file_unique_id,caption,has_spoiler,
+       next_attempt_at,origin,account_generation,media_bytes,content_hash,visual_hash,media_prepared)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)`)
+      .run(content.sourceChatId, content.sourceMessageId, content.mediaGroupId, content.fingerprint, now, current.relay_revision,
+        content.mediaKind, "", sourceId, content.caption, Number(content.hasSpoiler), now, "account", input.accountGeneration,
+        input.bytes, hashes.contentHash, hashes.visualHash);
+    if (inserted.changes) registerMedia(db, Number(inserted.lastInsertRowid), keys);
+    return true;
+  });
 }
 function synchronize(db: DatabaseSync, current: RelaySettings, identity: number): RelayState {
   const previous = state(db);
@@ -206,7 +295,7 @@ export async function pollTelegramRelayOnce(decryptToken: DecryptToken, clock = 
         const chat = change.chat as Record<string, unknown> | undefined;
         const member = change.new_chat_member as Record<string, unknown> | undefined;
         const user = member?.user as Record<string, unknown> | undefined;
-        if (chat && ["group", "supergroup"].includes(String(chat.type))
+        if (chat && ["group", "supergroup", "channel"].includes(String(chat.type))
           && typeof chat.id === "number" && Number.isSafeInteger(chat.id) && chat.id < 0 && chat.id !== runtime.target_chat_id
           && user?.id === identity && ["left", "kicked"].includes(String(member?.status))
           && typeof change.date === "number" && Number.isSafeInteger(change.date)
@@ -214,21 +303,25 @@ export async function pollTelegramRelayOnce(decryptToken: DecryptToken, clock = 
           // Source removal revokes queued forwarding for that group. An HTTP
           // request already in flight cannot be recalled, so only queued work
           // is cancelled; other sources retain their independent pending jobs.
-          db.prepare(`UPDATE telegram_relay_outbox SET status='cancelled',last_error='',lease_id='',lease_until=0
-            WHERE source_chat_id=? AND status='pending'`).run(chat.id);
+          db.prepare(`UPDATE telegram_relay_outbox SET status='cancelled',last_error='',lease_id='',lease_until=0,media_bytes=NULL
+            WHERE source_chat_id=? AND origin='bot' AND status='pending'`).run(chat.id);
         }
       }
-      const message = update.message;
+      const message = update.message ?? update.channel_post;
       if (typeof message !== "object" || message === null || Array.isArray(message)) continue;
       let content;
       try { content = prepareRelayMessage(message as Record<string, unknown>, { botId: identity, targetChatId: runtime.target_chat_id, startedAt: claim.settings.relay_started_at }); }
       catch { content = null; }
       if (!content) { skipped++; continue; }
-      const duplicate = db.prepare("SELECT 1 FROM telegram_relay_outbox WHERE fingerprint=? AND queued_at>? LIMIT 1").get(content.fingerprint, now - DAY_MS);
+      const mediaKey = `file:${content.mediaKind}:${content.fileUniqueId}`;
+      const duplicate = mediaOwner(db, [mediaKey]);
       if (duplicate) { skipped++; continue; }
+      const queued = db.prepare("SELECT COUNT(*) AS count FROM telegram_relay_outbox WHERE status IN ('pending','sending')").get() as { count: number };
+      if (queued.count >= 128) { offset = id; break; }
       const result = insert.run(content.sourceChatId, content.sourceMessageId, content.mediaGroupId, content.fingerprint, now,
         claim.settings.relay_revision, content.mediaKind, content.fileId, content.fileUniqueId, content.caption, Number(content.hasSpoiler), now);
       if (!result.changes) skipped++;
+      else registerMedia(db, Number(result.lastInsertRowid), [mediaKey]);
     }
     db.prepare(`UPDATE telegram_relay_state SET next_offset=?,last_polled_at=?,next_poll_at=MAX(next_poll_at,?),
       skipped_count=skipped_count+?,last_error=CASE WHEN ready_until>? THEN '' ELSE last_error END
@@ -248,7 +341,8 @@ function sendAllowed(db: DatabaseSync, claim: SendClaim, now: number): boolean {
   return enabled(current) && current.relay_revision === claim.settings.relay_revision
     && current.relay_chat_id === claim.settings.relay_chat_id && current.token_ciphertext === claim.settings.token_ciphertext
     && runtime.revision === current.relay_revision && runtime.ready_until > now && runtime.target_chat_id === claim.targetChatId
-    && claim.job.source_chat_id !== runtime.target_chat_id && ownsSend(db, claim, now);
+    && claim.job.source_chat_id !== runtime.target_chat_id && ownsSend(db, claim, now)
+    && (claim.job.origin !== "account" || accountAllowed(db, claim.job.source_chat_id, claim.job.account_generation, claim.job.queued_at));
 }
 export async function deliverTelegramRelayOnce(decryptToken: DecryptToken, clock = Date.now) {
   const db = getSqlite();
@@ -263,10 +357,16 @@ export async function deliverTelegramRelayOnce(decryptToken: DecryptToken, clock
     if (!enabled(current) || current.token_ciphertext !== snapshot.token_ciphertext) return null;
     const runtime = synchronize(db, current, identity);
     const now = clock();
-    db.prepare(`UPDATE telegram_relay_outbox SET status='unknown',last_error=?,lease_id='',lease_until=0
+    db.prepare(`UPDATE telegram_relay_outbox SET status='unknown',last_error=?,lease_id='',lease_until=0,media_bytes=NULL
       WHERE status='sending' AND lease_until<=?`).run(UNCERTAIN, now);
-    db.prepare(`UPDATE telegram_relay_outbox SET status='cancelled',lease_id='',lease_until=0
+    db.prepare(`UPDATE telegram_relay_outbox SET status='cancelled',lease_id='',lease_until=0,media_bytes=NULL
       WHERE status='pending' AND (revision<>? OR source_chat_id=?)`).run(current.relay_revision, runtime.target_chat_id);
+    if (db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='telegram_personal_account'").get()) {
+      db.prepare(`UPDATE telegram_relay_outbox SET status='cancelled',media_bytes=NULL WHERE status='pending' AND origin='account'
+        AND NOT EXISTS(SELECT 1 FROM telegram_personal_account a JOIN telegram_personal_sources s
+          WHERE a.id='primary' AND a.stage='connected' AND a.generation=account_generation
+            AND s.chat_id=source_chat_id AND s.selected=1 AND s.joined=1 AND s.blocked=0 AND s.selected_at<=queued_at)`).run();
+    }
     if (runtime.ready_until <= now || runtime.target_chat_id >= 0 || runtime.send_lease_until > now || runtime.next_send_at > now) return null;
     const job = db.prepare(`SELECT * FROM telegram_relay_outbox WHERE status='pending' AND revision=? AND next_attempt_at<=?
       ORDER BY next_attempt_at,id LIMIT 1`).get(current.relay_revision, now) as RelayJob | undefined;
@@ -288,9 +388,55 @@ export async function deliverTelegramRelayOnce(decryptToken: DecryptToken, clock
     });
     return;
   }
-  const parameters = { chat_id: claim.targetChatId, [claim.job.media_kind]: claim.job.file_id, caption: claim.job.caption,
+  // Read and hash before sending. Bot downloads are only for cross-source
+  // duplicate checks; Bot API still sends its own file_id. Account files must
+  // be uploaded because the two Telegram transports have different media IDs.
+  let uploadBytes = claim.job.media_bytes ? Buffer.from(claim.job.media_bytes) : null;
+  if (!claim.job.media_prepared) {
+    const bytes = await downloadBotRelayMedia(token, claim.job.file_id, claim.job.media_kind).catch(() => null);
+    if (!bytes) {
+      transaction(db, () => {
+        if (ownsSend(db, claim, clock())) db.prepare(`UPDATE telegram_relay_outbox SET status=?,next_attempt_at=?,last_error=?,lease_id='',lease_until=0
+          WHERE id=? AND lease_id=?`).run(claim.job.attempts < MAX_ATTEMPTS ? "pending" : "failed", clock() + VERIFY_MS,
+          "暂时无法读取转发图片，稍后重试；未发送消息。", claim.job.id, claim.job.lease_id);
+        db.prepare("UPDATE telegram_relay_state SET send_lease_id='',send_lease_until=0,next_send_at=? WHERE id='primary' AND send_lease_id=?")
+          .run(clock() + SEND_MS, claim.job.lease_id);
+      });
+      return;
+    }
+    const hashes = await relayMediaIdentity(bytes, claim.job.media_kind);
+    const accepted = transaction(db, () => {
+      if (!sendAllowed(db, claim, clock())) return false;
+      if (!registerMedia(db, claim.job.id, identityKeys(claim.job.media_kind, hashes.contentHash, hashes.visualHash))) return false;
+      db.prepare("UPDATE telegram_relay_outbox SET content_hash=?,visual_hash=?,media_prepared=1 WHERE id=? AND lease_id=?")
+        .run(hashes.contentHash, hashes.visualHash, claim.job.id, claim.job.lease_id);
+      return true;
+    });
+    if (!accepted) {
+      transaction(db, () => {
+        db.prepare("UPDATE telegram_relay_outbox SET status='cancelled',media_bytes=NULL,lease_id='',lease_until=0 WHERE id=? AND status='sending' AND lease_id=?")
+          .run(claim.job.id, claim.job.lease_id);
+        db.prepare("UPDATE telegram_relay_state SET send_lease_id='',send_lease_until=0 WHERE id='primary' AND send_lease_id=?").run(claim.job.lease_id);
+      });
+      return;
+    }
+  }
+  if (!sendAllowed(db, claim, clock()) || (claim.job.origin === "account" && !uploadBytes?.length)) {
+    transaction(db, () => {
+      db.prepare("UPDATE telegram_relay_outbox SET status='cancelled',media_bytes=NULL,lease_id='',lease_until=0 WHERE id=? AND status='sending' AND lease_id=?")
+        .run(claim.job.id, claim.job.lease_id);
+      db.prepare("UPDATE telegram_relay_state SET send_lease_id='',send_lease_until=0 WHERE id='primary' AND send_lease_id=?").run(claim.job.lease_id);
+    });
+    return;
+  }
+  const parameters = { chat_id: claim.targetChatId, ...(claim.job.origin !== "account" ? { [claim.job.media_kind]: claim.job.file_id } : {}), caption: claim.job.caption,
     reply_markup: { inline_keyboard: relayKeyboard() }, ...(claim.job.has_spoiler ? { has_spoiler: true } : {}) };
-  const reply = await telegramRequest(token, claim.job.media_kind === "photo" ? "sendPhoto" : "sendAnimation", parameters).catch(() => null);
+  const isGif = uploadBytes && /^GIF8[79]a$/.test(uploadBytes.subarray(0, 6).toString("ascii"));
+  const upload = claim.job.origin === "account" && uploadBytes ? { field: claim.job.media_kind,
+    fileName: claim.job.media_kind === "photo" ? "photo.jpg" : isGif ? "animation.gif" : "animation.mp4",
+    mime: claim.job.media_kind === "photo" ? "image/jpeg" : isGif ? "image/gif" : "video/mp4", bytes: uploadBytes } : undefined;
+  const reply = await telegramRequest(token, claim.job.media_kind === "photo" ? "sendPhoto" : "sendAnimation", parameters, upload).catch(() => null);
+  uploadBytes = null;
   transaction(db, () => {
     const now = clock();
     let nextSend = now + SEND_MS;
@@ -312,7 +458,7 @@ export async function deliverTelegramRelayOnce(decryptToken: DecryptToken, clock
             .run(nextSend, TARGET_ERROR);
         } else {
           const status = code === 400 || code === 401 ? "failed" : "unknown";
-          const error = code === 401 ? TOKEN_ERROR : code === 400 ? "Telegram 拒绝图片转发，请检查目标群权限和图片状态。" : UNCERTAIN;
+          const error = code === 401 ? TOKEN_ERROR : code === 400 ? "Telegram 拒绝图片转发，请检查目标群或频道权限和图片状态。" : UNCERTAIN;
           db.prepare("UPDATE telegram_relay_outbox SET status=?,last_error=?,lease_id='',lease_until=0 WHERE id=? AND lease_id=?")
             .run(status, error, claim.job.id, claim.job.lease_id);
           if (code === 401 || code === 400) db.prepare("UPDATE telegram_relay_state SET ready_until=0,next_poll_at=MAX(next_poll_at,?),last_error=? WHERE id='primary'")
@@ -320,6 +466,7 @@ export async function deliverTelegramRelayOnce(decryptToken: DecryptToken, clock
         }
       }
     }
+    db.prepare("UPDATE telegram_relay_outbox SET media_bytes=NULL WHERE id=? AND status NOT IN ('pending','sending')").run(claim.job.id);
     db.prepare(`UPDATE telegram_relay_state SET send_lease_id='',send_lease_until=0,next_send_at=MAX(next_send_at,?)
       WHERE id='primary' AND send_lease_id=?`).run(nextSend, claim.job.lease_id);
   });
