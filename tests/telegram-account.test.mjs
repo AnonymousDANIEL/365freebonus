@@ -154,6 +154,39 @@ test('send-code throttle survives disconnect',async()=>{
   assert.equal(telegram.state.calls.length,before);
 });
 
+test('connection failure exposes a local cooldown without blaming Telegram rate limits or leaking details',async t=>{
+  const logs=[];t.mock.method(console,'warn',(...values)=>logs.push(values.join(' ')));
+  telegram.state.error={method:'connect'};
+  await assert.rejects(sendCode(),error=>error.status===502);
+  const status=account.accountStatus();
+  assert.equal(status.retrySource,'connection');
+  assert.ok(status.retryAt>Date.now());
+  assert.doesNotMatch(status.lastError,/自动重试/);
+  const calls=telegram.state.calls.length;
+  await assert.rejects(sendCode(),error=>error.status===429&&/系统正在等待重试/.test(error.message)&&!/限制请求频率/.test(error.message));
+  assert.equal(telegram.state.calls.length,calls);
+  assert.doesNotMatch(logs.join('\n'),/PRIVATE RAW DETAIL|secret-access-hash/);
+  assert.ok(logs.some(line=>line.includes('unexpected')));
+});
+
+test('Telegram wait status remains distinct and blocks another code request without shortening the wait',async()=>{
+  telegram.state.error={method:'sendCode',errorMessage:'FLOOD_WAIT_120',seconds:120};
+  await assert.rejects(sendCode(),error=>error.status===429);
+  const status=account.accountStatus();
+  assert.equal(status.retrySource,'telegram');
+  assert.ok(status.retryAt>=Date.now()+119000);
+  const calls=telegram.state.calls.length;
+  await assert.rejects(sendCode(),error=>error.status===429&&/Telegram 正在限制请求频率/.test(error.message));
+  assert.equal(telegram.state.calls.length,calls);
+  assert.equal(account.accountStatus().retryAt,status.retryAt);
+});
+
+test('published API credentials error is actionable instead of a generic Telegram flood wait',async()=>{
+  telegram.state.error={method:'sendCode',errorMessage:'API_ID_PUBLISHED_FLOOD'};
+  await assert.rejects(sendCode(),error=>error.status===400&&/API ID 和 API Hash/.test(error.message));
+  assert.equal(account.accountStatus().retrySource,'connection');
+});
+
 test('long Telegram flood wait blocks refresh, selection and relogin without shortening it',async()=>{
   await login();
   telegram.state.error={method:'dialogs',errorMessage:'FLOOD_WAIT_200000',seconds:200000};

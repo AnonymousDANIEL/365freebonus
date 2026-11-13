@@ -35,7 +35,7 @@ const POLL_MS = 10_000;
 const RETRY_MS = 60_000;
 const MAX_PHOTO = 10 * 1024 * 1024;
 const MAX_ANIMATION = 20 * 1024 * 1024;
-const TEMP_ERROR = "暂时无法连接 Telegram 个人账号，稍后自动重试。";
+const TEMP_ERROR = "暂时无法连接 Telegram 个人账号，请稍后再试。";
 const REAUTH_ERROR = "Telegram 个人账号连接已失效，请在后台重新连接。";
 const BUSY_ERROR = "正在处理 Telegram 账号连接，请稍后再试。";
 const PENDING_ERROR = "登录步骤已过期，请重新获取验证码。";
@@ -124,6 +124,7 @@ export function accountStatus() {
   const db = getSqlite();
   const current = row(db);
   const expired = (current.stage === "code" || current.stage === "password") && current.pending_until <= Date.now();
+  const retryAt = Math.max(current.next_attempt_at, current.stage === "disconnected" || expired ? current.next_code_at : 0);
   return {
     connected: current.stage === "connected" && Boolean(current.session_ciphertext),
     stage: expired ? "disconnected" as const : current.stage,
@@ -131,6 +132,8 @@ export function accountStatus() {
     lastError: expired ? PENDING_ERROR : current.last_error,
     lastPolledAt: current.last_polled_at || null,
     syncedAt: current.synced_at || null,
+    retryAt: retryAt > Date.now() ? retryAt : null,
+    retrySource: retryAt > Date.now() ? (/^Telegram 正在限制请求频率/.test(current.last_error) ? "telegram" as const : "connection" as const) : null,
     channels: (db.prepare("SELECT chat_id,title,username,selected,joined FROM telegram_personal_sources WHERE joined=1 OR selected=1 ORDER BY title COLLATE NOCASE,chat_id").all() as SourceRow[])
       .map(source => ({ id: String(source.chat_id), title: source.title, username: source.username, selected: source.selected === 1, joined: source.joined === 1 })),
   };
@@ -141,7 +144,12 @@ function claimAccount(db: DatabaseSync, now: number, options: { connected?: bool
     const current = row(db);
     if (options.connected && (current.stage !== "connected" || !current.session_ciphertext)) throw new TelegramAccountError(REAUTH_ERROR, 409);
     if (current.lease_until > now) throw new TelegramAccountError(BUSY_ERROR, 409);
-    if (options.respectBackoff && current.next_attempt_at > now) throw new TelegramAccountError("Telegram 请求过于频繁，请稍后再试。", 429);
+    if (options.respectBackoff && current.next_attempt_at > now) {
+      const seconds = Math.max(1, Math.ceil((current.next_attempt_at - now) / 1000));
+      const explanation = /^Telegram 正在限制请求频率/.test(current.last_error)
+        ? "Telegram 正在限制请求频率" : "上次操作未完成，系统正在等待重试";
+      throw new TelegramAccountError(`${explanation}，请在 ${seconds} 秒后再试。`, 429);
+    }
     const leaseId = randomUUID();
     db.prepare("UPDATE telegram_personal_account SET lease_id=?,lease_until=? WHERE id='primary'").run(leaseId, now + LEASE_MS);
     return { row: current, leaseId };
@@ -161,6 +169,7 @@ function release(db: DatabaseSync, claim: Claim) {
 function safeError(error: unknown): { message: string; status: number; delay: number; revoked: boolean } {
   const raw = error as { errorMessage?: string; message?: string; seconds?: number } | null;
   const code = raw?.errorMessage || raw?.message || "";
+  if (/API_ID_INVALID|API_ID_PUBLISHED_FLOOD/.test(code)) return { message: "请检查你自己的 Telegram API ID 和 API Hash。", status: 400, delay: RETRY_MS, revoked: false };
   if (/FLOOD|SLOWMODE|PHONE_NUMBER_FLOOD|PHONE_PASSWORD_FLOOD/.test(code)) {
     const delay = Number.isSafeInteger(raw?.seconds) && Number(raw?.seconds) > 0 ? Math.min(Number.MAX_SAFE_INTEGER, Number(raw?.seconds) * 1000) : RETRY_MS;
     return { message: "Telegram 正在限制请求频率，请稍后再试。", status: 429, delay, revoked: false };
@@ -169,13 +178,28 @@ function safeError(error: unknown): { message: string; status: number; delay: nu
   if (/PHONE_CODE_INVALID|PHONE_CODE_EMPTY/.test(code)) return { message: "验证码不正确，请重新输入。", status: 400, delay: 5000, revoked: false };
   if (/PHONE_CODE_EXPIRED|PHONE_CODE_HASH_EMPTY/.test(code)) return { message: PENDING_ERROR, status: 400, delay: 5000, revoked: false };
   if (/PASSWORD_HASH_INVALID/.test(code)) return { message: "两步验证密码不正确，请重新输入。", status: 400, delay: 5000, revoked: false };
-  if (/API_ID_INVALID|API_ID_PUBLISHED_FLOOD/.test(code)) return { message: "请检查你自己的 Telegram API ID 和 API Hash。", status: 400, delay: RETRY_MS, revoked: false };
   if (/PHONE_NUMBER_INVALID|PHONE_NUMBER_BANNED|PHONE_NUMBER_UNOCCUPIED|AUTH_SIGNUP_REQUIRED/.test(code)) return { message: "请使用有效且已注册的 Telegram 手机号码。", status: 400, delay: RETRY_MS, revoked: false };
+  if (/PHONE_MIGRATE|NETWORK_MIGRATE|USER_MIGRATE/.test(code)) return { message: "Telegram 数据中心切换暂未完成，请稍后重试。", status: 502, delay: RETRY_MS, revoked: false };
+  if (/RECAPTCHA_CHECK|CAPTCHA_CHECK/.test(code)) return { message: "Telegram 要求额外验证码验证，当前连接流程暂不支持。", status: 409, delay: RETRY_MS, revoked: false };
+  if (/FROZEN|USER_RESTRICTED/.test(code)) return { message: "Telegram 已限制此账号的部分操作，请先在官方应用检查账号状态。", status: 409, delay: RETRY_MS, revoked: false };
   if (error instanceof TelegramAccountError) return { message: error.message, status: error.status, delay: error.status === 429 ? RETRY_MS : 5000, revoked: false };
   return { message: TEMP_ERROR, status: 502, delay: RETRY_MS, revoked: false };
 }
-function recordFailure(db: DatabaseSync, claim: Claim, error: unknown) {
+function failureCategory(error: unknown) {
+  const raw = error as { errorMessage?: string; message?: string; name?: string; code?: string } | null;
+  const value = raw?.errorMessage || raw?.code || raw?.message || "";
+  if (/PHONE_MIGRATE|NETWORK_MIGRATE|USER_MIGRATE/.test(value)) return "data-center-migration";
+  if (/API_ID_INVALID|API_ID_PUBLISHED_FLOOD/.test(value)) return "api-credentials";
+  if (/FLOOD|SLOWMODE/.test(value)) return "telegram-rate-limit";
+  if (/TIMEOUT|ETIMEDOUT|timed out/i.test(value) || raw?.name === "TimeoutError") return "timeout";
+  if (/ECONNRESET|ECONNREFUSED|ENETUNREACH|EHOSTUNREACH|ENOTFOUND|EAI_AGAIN/.test(value)) return "network";
+  if (error instanceof TelegramAccountError) return "handled-operation";
+  return raw?.errorMessage ? "telegram-rpc" : "unexpected";
+}
+function recordFailure(db: DatabaseSync, claim: Claim, error: unknown, operation = "poll") {
   const safe = safeError(error);
+  // Log only fixed categories. RPC messages can include private account data.
+  console.warn("Telegram personal account operation failed.", JSON.stringify({ operation, category: failureCategory(error) }));
   if (owns(db, claim)) transaction(db, () => {
     db.prepare("UPDATE telegram_personal_account SET last_error=?,next_attempt_at=MAX(next_attempt_at,?) WHERE id='primary' AND lease_id=?")
       .run(safe.message, Math.min(Number.MAX_SAFE_INTEGER, Date.now() + safe.delay), claim.leaseId);
@@ -193,7 +217,9 @@ function makeClient(credentials: Credentials, session: string) {
   const logger = new Logger();
   logger.handler = () => undefined;
   const client = new TelegramClient(new StringSession(session), credentials.apiId, credentials.apiHash, {
-    baseLogger: logger, timeout: 10, connectionRetries: 1, reconnectRetries: 0, requestRetries: 1,
+    // One attempt prevents the SDK from applying PHONE_MIGRATE recovery.
+    // Allow a bounded migration/retry while surfacing every FloodWait immediately.
+    baseLogger: logger, timeout: 10, connectionRetries: 1, reconnectRetries: 0, requestRetries: 3,
     autoReconnect: false, catchUp: false, floodSleepThreshold: 0,
     deviceModel: "365 Free Bonus relay", appVersion: "1.0", systemVersion: "Linux",
     downloadPool: { sessions: 1, maxSessions: 1, requestRetries: 1, requestDeadlineMs: REQUEST_MS },
@@ -343,7 +369,7 @@ export async function handleAccountAction(input: TelegramAccountAction) {
   try {
     if (input.action === "sendCode") {
       if (claim.row.stage === "connected") throw new TelegramAccountError("请先断开当前账号，再连接其他账号。", 409);
-      if (claim.row.next_code_at > Date.now()) throw new TelegramAccountError("验证码刚刚发送，请稍后再重新获取。", 429);
+      if (claim.row.next_code_at > Date.now()) throw new TelegramAccountError(`验证码刚刚请求过，请在 ${Math.max(1, Math.ceil((claim.row.next_code_at - Date.now()) / 1000))} 秒后再试。`, 429);
       if (!Number.isSafeInteger(input.apiId) || input.apiId <= 0 || !/^[a-f0-9]{32}$/i.test(input.apiHash) || !/^\+[1-9]\d{6,14}$/.test(input.phone)) throw new TelegramAccountError("请检查 API ID、API Hash 和国际格式手机号码。", 400);
       const credentials = { apiId: input.apiId, apiHash: input.apiHash };
       client = makeClient(credentials, "");
@@ -393,7 +419,7 @@ export async function handleAccountAction(input: TelegramAccountAction) {
       else await selectChannels(db, claim, client, input.channelIds);
     }
     return accountStatus();
-  } catch (error) { throw recordFailure(db, claim, error); }
+  } catch (error) { throw recordFailure(db, claim, error, input.action); }
   finally { release(db, claim); await closeClient(client); }
 }
 
@@ -532,3 +558,5 @@ export function startTelegramAccountWorker() {
   void poll();
   setInterval(() => void poll(), POLL_MS).unref();
 }
+
+export { makeClient as createTelegramAccountClient };

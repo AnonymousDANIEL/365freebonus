@@ -12,6 +12,8 @@ type AccountStatus = {
   lastError: string;
   lastPolledAt: number | null;
   syncedAt: number | null;
+  retryAt?: number | null;
+  retrySource?: "telegram" | "connection" | null;
   channels: Channel[];
 };
 type AdminRequest = <T>(path: string, method?: string, body?: unknown) => Promise<T>;
@@ -36,6 +38,7 @@ export default function TelegramPersonalAccount({ request, signInPath }: Props) 
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState<string[]>([]);
   const [dirty, setDirty] = useState(false);
+  const [clock, setClock] = useState(() => Date.now());
   const dirtyRef = useRef(false);
   const busyRef = useRef(false);
   const requestVersion = useRef(0);
@@ -45,6 +48,8 @@ export default function TelegramPersonalAccount({ request, signInPath }: Props) 
 
   function accept(value: AccountStatus, force = false) {
     setStatus(value);
+    setClock(Date.now());
+    if (value.connected || value.stage !== "disconnected") setApiHash("");
     if (force || !dirtyRef.current) {
       setSelected(value.channels.filter(channel => channel.selected && channel.joined).map(channel => channel.id));
       dirtyRef.current = false;
@@ -73,22 +78,36 @@ export default function TelegramPersonalAccount({ request, signInPath }: Props) 
     return () => { alive.current = false; clearInterval(timer); };
   }, []);
 
+  useEffect(() => {
+    const timer = setInterval(() => setClock(Date.now()), 1_000);
+    return () => clearInterval(timer);
+  }, []);
+
   async function act(body: Record<string, unknown>, message: string, forceSelection = false) {
     if (busyRef.current) return;
     busyRef.current = true;
-    requestVersion.current++;
+    const version = ++requestVersion.current;
     setBusy(true);
     setNotice(null);
     try {
       const value = await requestRef.current<AccountStatus>(endpoint, "POST", body);
       if (!alive.current) return;
       accept(value, forceSelection);
-      if (body.action === "sendCode" || body.action === "disconnect") { setApiId(""); setPhone(""); }
+      if (body.action === "sendCode" || body.action === "disconnect") { setApiId(""); setApiHash(""); setPhone(""); }
       setNotice({ message });
-    } catch (error) { if (alive.current) showError(error); }
+    } catch (error) {
+      if (alive.current) showError(error);
+      // This reads local saved state only; it never requests another login code.
+      // Refresh immediately so a failed connection shows its actual retry timer.
+      try {
+        const value = await requestRef.current<AccountStatus>(endpoint);
+        if (alive.current && version === requestVersion.current) accept(value);
+      } catch { /* Keep the original action failure visible. */ }
+    }
     finally {
-      // Credentials, verification codes and 2FA passwords stay in memory only.
-      setApiHash(""); setCode(""); setPassword("");
+      // Retain a failed login's masked API Hash in React memory for retry only.
+      // It is cleared after successful authorization and never stored in the browser.
+      setCode(""); setPassword("");
       busyRef.current = false;
       if (alive.current) setBusy(false);
     }
@@ -114,6 +133,8 @@ export default function TelegramPersonalAccount({ request, signInPath }: Props) 
   const channels = (status?.channels ?? []).filter(channel => !search || `${channel.title} ${channel.username}`.toLocaleLowerCase().includes(search));
   const selectedCount = selected.filter(id => status?.channels.some(channel => channel.id === id && channel.joined)).length;
   const stage = status?.stage ?? "disconnected";
+  const retrySeconds = Math.max(0, Math.ceil(((status?.retryAt ?? 0) - clock) / 1_000));
+  const waiting = retrySeconds > 0;
 
   return <section className="cms-settings-panel cms-telegram-account" aria-labelledby="telegram-personal-account-title"
     onKeyDown={event => { if (event.key === "Enter" && event.target instanceof HTMLInputElement) event.preventDefault(); }}>
@@ -143,8 +164,8 @@ export default function TelegramPersonalAccount({ request, signInPath }: Props) 
             <label>Telegram 手机号码（含国家码）
               <input type="tel" autoComplete="off" maxLength={20} value={phone} onChange={event => setPhone(event.target.value)} placeholder="+60123456789" />
             </label>
-            <div><button type="button" className="cms-primary" disabled={!/^\d{1,10}$/.test(apiId) || !/^[a-fA-F0-9]{32}$/.test(apiHash.trim()) || !/^\+[1-9]\d{6,14}$/.test(phone.replace(/\s/g, ""))}
-              onClick={() => void act({ action: "sendCode", apiId: Number(apiId), apiHash: apiHash.trim(), phone: phone.replace(/\s/g, "") }, "验证码已请求，请在 Telegram 中查看。")}>获取登入验证码</button></div>
+            <div><button type="button" className="cms-primary" disabled={waiting || !/^\d{1,10}$/.test(apiId) || !/^[a-fA-F0-9]{32}$/.test(apiHash.trim()) || !/^\+[1-9]\d{6,14}$/.test(phone.replace(/\s/g, ""))}
+              onClick={() => void act({ action: "sendCode", apiId: Number(apiId), apiHash: apiHash.trim(), phone: phone.replace(/\s/g, "") }, "验证码已请求，请在 Telegram 中查看。")}>{waiting ? `${retrySeconds} 秒后可重试` : "获取登入验证码"}</button></div>
           </>}
           {!status.connected && stage === "code" && <>
             <label>Telegram 登入验证码
@@ -153,7 +174,7 @@ export default function TelegramPersonalAccount({ request, signInPath }: Props) 
               <small>验证码仅用于这次登入，过期后请取消连接并重新获取。</small>
             </label>
             <div className="cms-telegram-account-actions">
-              <button type="button" className="cms-primary" disabled={!/^\d{3,12}$/.test(code)} onClick={() => void act({ action: "code", code }, "验证码已提交，请查看连接状态。", true)}>确认验证码</button>
+              <button type="button" className="cms-primary" disabled={waiting || !/^\d{3,12}$/.test(code)} onClick={() => void act({ action: "code", code }, "验证码已提交，请查看连接状态。", true)}>确认验证码</button>
               <button type="button" className="cms-secondary" onClick={() => void act({ action: "disconnect" }, "已取消个人账号连接。", true)}>取消连接</button>
             </div>
           </>}
@@ -163,13 +184,13 @@ export default function TelegramPersonalAccount({ request, signInPath }: Props) 
               <small>这是你在 Telegram 设置的两步验证密码，只用于这次登入。</small>
             </label>
             <div className="cms-telegram-account-actions">
-              <button type="button" className="cms-primary" disabled={!password} onClick={() => void act({ action: "password", password }, "个人账号连接已更新。", true)}>确认两步验证</button>
+              <button type="button" className="cms-primary" disabled={waiting || !password} onClick={() => void act({ action: "password", password }, "个人账号连接已更新。", true)}>确认两步验证</button>
               <button type="button" className="cms-secondary" onClick={() => void act({ action: "disconnect" }, "已取消个人账号连接。", true)}>取消连接</button>
             </div>
           </>}
           {status.connected && <>
             <div className="cms-telegram-account-actions">
-              <button type="button" className="cms-secondary" onClick={() => void act({ action: "refresh" }, "频道列表已更新。") }><RefreshCw size={15} />刷新频道列表</button>
+              <button type="button" className="cms-secondary" disabled={waiting} onClick={() => void act({ action: "refresh" }, "频道列表已更新。") }><RefreshCw size={15} />刷新频道列表</button>
               <button type="button" className="cms-secondary" onClick={() => void act({ action: "disconnect" }, "个人账号已断开，已停止读取来源频道。", true)}>断开个人账号</button>
             </div>
             <small>你的账号加入新频道后会自动更新列表；只有勾选并保存的频道才会转发。首次勾选从保存后的新消息开始，不补发历史内容。</small>
@@ -185,11 +206,14 @@ export default function TelegramPersonalAccount({ request, signInPath }: Props) 
                 </label>)}
             </div>
             <div className="cms-telegram-account-actions">
-              <button type="button" className="cms-primary" disabled={!dirty} onClick={() => void act({ action: "select", channelIds: selected.filter(id => status.channels.some(channel => channel.id === id && channel.joined)) }, "来源频道选择已保存。", true)}><Check size={15} />保存来源频道</button>
+              <button type="button" className="cms-primary" disabled={waiting || !dirty} onClick={() => void act({ action: "select", channelIds: selected.filter(id => status.channels.some(channel => channel.id === id && channel.joined)) }, "来源频道选择已保存。", true)}><Check size={15} />保存来源频道</button>
               <small>已选择 {selectedCount} 个频道{dirty ? " · 尚未保存" : ""}</small>
             </div>
             <small>发送目标使用「图片自动转发」中的群组或频道；请启用转发并保存目标设置。发到频道时，@FreeBonus365Bot 需要目标频道的管理员发布权限。</small>
           </>}
+          {waiting && <small className="cms-telegram-account-retry">
+            {status.retrySource === "telegram" ? "Telegram 要求暂缓请求" : "上次连接失败，系统正在等待重试"}，{retrySeconds} 秒后可以再次操作。等待期间可以修改资料。
+          </small>}
           <small>最近读取（马来西亚时间）：{status.lastPolledAt ? myt.format(status.lastPolledAt) : "尚未读取"}；列表同步：{status.syncedAt ? myt.format(status.syncedAt) : "尚未同步"}</small>
           {status.lastError && <p className="cms-telegram-last-error" role="alert">个人账号异常 · {status.lastError}</p>}
         </fieldset>}
