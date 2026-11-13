@@ -504,7 +504,7 @@ function auditAccountCaptionEdit(outcome: string, entities: RelayCaptionEntity[]
     verified: outcome === "account_preserved",
   }));
 }
-/** Only a Bot edit known to have lost custom emoji can reach this qualified fallback. */
+/** An incomplete or rejected Bot edit can reach this qualified custom-emoji fallback. */
 async function repairTelegramRelayCaptionWithAccountOnce(identity: number, snapshot: RelaySettings, clock: () => number): Promise<boolean> {
   const db = getSqlite();
   const claim = transaction(db, () => {
@@ -517,9 +517,10 @@ async function repairTelegramRelayCaptionWithAccountOnce(identity: number, snaps
     const job = db.prepare(`SELECT * FROM telegram_relay_outbox WHERE status='sent' AND revision=? AND message_id>0
       AND sent_at>=? AND sent_at<=? AND next_attempt_at<=? AND caption_edit_attempted_at>0
       AND ((caption_edit_outcome IN ('changed','account_waiting_1','account_waiting_2','account_waiting_3') AND last_error=?)
-        OR (caption_edit_outcome='account_unavailable' AND last_error=?))
+        OR (caption_edit_outcome='account_unavailable' AND last_error=?)
+        OR (caption_edit_outcome='rejected' AND last_error=? AND instr(caption_entities,'"custom_emoji"')>0))
       ORDER BY sent_at DESC,id DESC LIMIT 1`).get(current.relay_revision, now - CAPTION_EDIT_WINDOW_MS, now, now,
-        CUSTOM_EMOJI_CHANGED_ERROR, ACCOUNT_CAPTION_UNAVAILABLE_ERROR) as RelayJob | undefined;
+        CUSTOM_EMOJI_CHANGED_ERROR, ACCOUNT_CAPTION_UNAVAILABLE_ERROR, CAPTION_EDIT_REJECTED_ERROR) as RelayJob | undefined;
     if (!job) return null;
     const entities = storedCaptionEntities(job);
     const preparedSafe = entities && inspectRelayDelivery(job.caption, entities,

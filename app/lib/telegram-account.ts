@@ -968,10 +968,12 @@ export async function pollTelegramAccountOnce() {
   if (ready && db.prepare(`SELECT 1 FROM telegram_relay_outbox WHERE status='sent' AND revision=? AND message_id>0
     AND sent_at>=? AND sent_at<=? AND caption_edit_attempted_at>0 AND next_attempt_at<=?
     AND ((caption_edit_outcome IN ('changed','account_waiting_1','account_waiting_2','account_waiting_3') AND last_error=?)
-      OR (caption_edit_outcome='account_unavailable' AND last_error=?)) LIMIT 1`)
+      OR (caption_edit_outcome='account_unavailable' AND last_error=?)
+      OR (caption_edit_outcome='rejected' AND last_error=? AND instr(caption_entities,'"custom_emoji"')>0)) LIMIT 1`)
     .get(relay.relay_revision, repairNow - 24 * 60 * 60_000, repairNow, repairNow,
       "Telegram 未保留部分原始自定义 Emoji，请检查机器人的自定义 Emoji 使用权限。该消息不会自动重发。",
-      "个人账号备用补正当前不可用，请检查本人账号连接和编辑权限；原媒体不会重复发送。")) return;
+      "个人账号备用补正当前不可用，请检查本人账号连接和编辑权限；原媒体不会重复发送。",
+      "Telegram 拒绝补正文案或按钮，请检查机器人权限及原消息格式；不会重复发送媒体。")) return;
   const refreshDue = current.synced_at < Date.now() - REFRESH_MS;
   const source = ready ? db.prepare(`SELECT * FROM telegram_personal_sources WHERE selected=1 AND joined=1
     AND chat_id<>? ORDER BY CASE WHEN chat_id>? THEN 0 ELSE 1 END,chat_id LIMIT 1`).get(target.target_chat_id, current.poll_source_id) as SourceRow | undefined : undefined;

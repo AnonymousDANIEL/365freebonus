@@ -698,12 +698,13 @@ test('personal caption edit exposes the actual Telegram wait deadline when read-
   assert.equal(telegram.state.calls.filter(call=>call.method==='EditMessage').length,0);
 });
 
-for(const outcome of ['changed','account_waiting_1','account_waiting_2','account_waiting_3','account_unavailable'])
+for(const outcome of ['changed','account_waiting_1','account_waiting_2','account_waiting_3','account_unavailable','rejected'])
 test('personal receive yields its lease to a due current-revision caption repair '+outcome,async()=>{
   await readyDelivery();
   db().prepare('UPDATE telegram_relay_outbox SET caption_edit_attempted_at=?,caption_edit_outcome=?,last_error=?,next_attempt_at=?')
     .run(Date.now()-1000,outcome,outcome==='account_unavailable'
       ?'个人账号备用补正当前不可用，请检查本人账号连接和编辑权限；原媒体不会重复发送。'
+      :outcome==='rejected'?'Telegram 拒绝补正文案或按钮，请检查机器人权限及原消息格式；不会重复发送媒体。'
       :'Telegram 未保留部分原始自定义 Emoji，请检查机器人的自定义 Emoji 使用权限。该消息不会自动重发。',Date.now()-1);
   telegram.state.messages=[photo()];
   const at=telegram.state.calls.length,before={...stored()},beforeCursor=cursor();
@@ -711,7 +712,8 @@ test('personal receive yields its lease to a due current-revision caption repair
   assert.equal(telegram.state.calls.length,at);assert.deepEqual({...stored()},before);assert.equal(cursor(),beforeCursor);
 });
 
-for(const reason of ['future-due','terminal','preserved','old-revision','old-post','not-ready','no-custom-error'])
+for(const reason of ['future-due','terminal','preserved','old-revision','old-post','not-ready','no-custom-error',
+  'bot-rejected-without-custom','bot-rejected-future-due','account-rejected','account-changed','account-uncertain'])
 test('personal receive remains available when caption repair is '+reason,async()=>{
   await readyDelivery();
   db().prepare("UPDATE telegram_relay_outbox SET caption_edit_attempted_at=?,caption_edit_outcome='changed',last_error=?,next_attempt_at=?")
@@ -723,6 +725,16 @@ test('personal receive remains available when caption repair is '+reason,async()
   if(reason==='old-post')db().prepare('UPDATE telegram_relay_outbox SET sent_at=?').run(Date.now()-25*3600000);
   if(reason==='not-ready')db().prepare('UPDATE telegram_relay_state SET ready_until=0').run();
   if(reason==='no-custom-error')db().prepare("UPDATE telegram_relay_outbox SET last_error='other-error'").run();
+  if(reason.startsWith('bot-rejected')) {
+    db().prepare("UPDATE telegram_relay_outbox SET caption_edit_outcome='rejected',last_error=?")
+      .run('Telegram 拒绝补正文案或按钮，请检查机器人权限及原消息格式；不会重复发送媒体。');
+    if(reason==='bot-rejected-without-custom')db().prepare("UPDATE telegram_relay_outbox SET caption_entities='[]'").run();
+    if(reason==='bot-rejected-future-due')db().prepare('UPDATE telegram_relay_outbox SET next_attempt_at=?').run(Date.now()+60000);
+  }
+  if(['account-rejected','account-changed','account-uncertain'].includes(reason)) {
+    db().prepare('UPDATE telegram_relay_outbox SET caption_edit_outcome=?,last_error=?')
+      .run(reason.replace('-','_'),'Telegram 拒绝补正文案或按钮，请检查机器人权限及原消息格式；不会重复发送媒体。');
+  }
   telegram.state.messages=[photo()];
   if(reason==='not-ready')db().prepare('UPDATE telegram_personal_account SET synced_at=0').run();
   const at=telegram.state.calls.length;

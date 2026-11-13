@@ -733,7 +733,7 @@ for(const response of [null,{ok:false,code:500,retryAfter:0}])test(`an uncertain
   await sentEmojiMismatch();telegram.editReplies.push(response);await deliver(now+4000);
   assert.equal(jobs()[0].caption_edit_outcome,'uncertain');assert.equal(jobs()[0].status,'sent');
   assert.ok(jobs()[0].last_error);closeDatabase();await deliver(now+8000);
-  assert.equal(edits().length,1);assert.equal(sends().length,1);
+  assert.equal(edits().length,1);assert.equal(sends().length,1);assert.equal(personalEdit.calls.length,0);
 });
 
 test('an edit that still changes custom emoji records the result once without another edit or media fallback',async()=>{
@@ -750,16 +750,21 @@ test('an edit rate limit delays other sends but never repeats the same caption e
   assert.equal(jobs()[0].caption_edit_outcome,'rejected');assert.equal(edits().length,1);
   assert.ok(state().next_send_at>=now+124000);
   await deliver(now+123999);assert.equal(sends().length,1);assert.equal(edits().length,1);
+  assert.equal(personalEdit.calls.length,0);
   await poll(now+124000,[]);await deliver(now+124000);
-  assert.equal(sends().length,2);assert.equal(edits().length,1);
+  assert.equal(personalEdit.calls.length,1);assert.equal(sends().length,1);
+  await deliver(now+127000);assert.equal(sends().length,2);assert.equal(edits().length,1);
 });
 
 for(const code of [401,403])test(`caption edit permission failure ${code} invalidates readiness without retrying its edit`,async()=>{
   await sentEmojiMismatch();telegram.editReplies.push({ok:false,code,retryAfter:0});await deliver(now+4000);
   assert.equal(jobs()[0].caption_edit_outcome,'rejected');assert.equal(state().ready_until,0);
   assert.match(state().last_error,code===401?/Token|凭据/:/目标|允许|权限/);
-  await poll(now+64000,[]);await deliver(now+64000);
-  assert.equal(edits().length,1);assert.equal(sends().length,1);
+  await deliver(now+8000);assert.equal(personalEdit.calls.length,0);
+  telegram.targetAllowed=false;await poll(now+64000,[]);await deliver(now+64000);
+  assert.equal(personalEdit.calls.length,0);assert.equal(state().ready_until,0);
+  telegram.targetAllowed=true;await poll(now+124000,[]);await deliver(now+124000);
+  assert.equal(personalEdit.calls.length,1);assert.equal(edits().length,1);assert.equal(sends().length,1);
 });
 
 test('concurrent delivery ticks share the caption edit lease and cannot edit or send twice',async()=>{
@@ -859,6 +864,14 @@ async function botEditStillChanged(options) {
     caption_entities:[],reply_markup:{inline_keyboard:relayKeyboard()}}));
   await deliver(now+4000);assert.equal(jobs()[0].caption_edit_outcome,'changed');
   assert.match(jobs()[0].last_error,/未保留.*自定义 Emoji/);
+  return original;
+}
+
+async function botEditRejected(options) {
+  const original=await sentEmojiMismatch(options);
+  telegram.editReplies.push({ok:false,code:400,retryAfter:0});
+  await deliver(now+4000);assert.equal(jobs()[0].caption_edit_outcome,'rejected');
+  assert.match(jobs()[0].last_error,/拒绝补正/);
   return original;
 }
 
@@ -976,11 +989,49 @@ test('a personal preflight invalid result is terminal rather than a reason to by
   await deliver(now+12000);assert.equal(personalEdit.calls.length,1);assert.equal(sends().length,1);
 });
 
-test('a Bot edit rejection is never escalated to personal editing',async()=>{
-  await sentEmojiMismatch();telegram.editReplies.push({ok:false,code:400,retryAfter:0});
-  await deliver(now+4000);await deliver(now+8000);
+test('a Bot edit rejection with expected custom emoji permits one qualified personal correction of the existing message',async()=>{
+  const original=await botEditRejected();personalEdit.results.push({state:'ok',attempted:true,outcome:'preserved'});
+  await deliver(now+8000);
+  assert.equal(jobs()[0].caption_edit_outcome,'account_preserved');assert.equal(jobs()[0].last_error,'');
+  assert.equal(personalEdit.calls.length,1);
+  assert.deepEqual(personalEdit.calls[0],{targetChatId:target,relayRevision:'relay-revision',messageId:88770,
+    caption:original.rewritten,captionEntities:original.expectedEntities});
+  closeDatabase();await deliver(now+12000);await deliver(now+16000);
+  assert.equal(personalEdit.calls.length,1);assert.equal(sends().length,1);assert.equal(edits().length,1);
+});
+
+test('a Bot edit rejection without expected custom emoji never invokes personal editing',async()=>{
+  configure();await poll(now,[photo(1,{caption:'Plain original message'})]);
+  telegram.sends.push(ok({message_id:88770,caption:'Changed original message'}));await deliver(now);
+  telegram.editReplies.push({ok:false,code:400,retryAfter:0});await deliver(now+4000);
+  await deliver(now+8000);
   assert.equal(jobs()[0].caption_edit_outcome,'rejected');assert.equal(personalEdit.calls.length,0);
   assert.equal(sends().length,1);assert.equal(edits().length,1);
+});
+
+test('personal terminal outcomes never reopen even when their stored error matches a Bot rejection',async()=>{
+  await botEditRejected();
+  for(const [index,outcome] of ['account_preserved','account_rejected','account_uncertain','account_changed','account_invalid','account_unavailable_final'].entries()){
+    getSqlite().prepare('UPDATE telegram_relay_outbox SET caption_edit_outcome=?').run(outcome);
+    await deliver(now+8000+index*4000);
+    assert.equal(jobs()[0].caption_edit_outcome,outcome);assert.equal(personalEdit.calls.length,0);
+  }
+  assert.equal(sends().length,1);assert.equal(edits().length,1);
+});
+
+test('a changed personal source blocks fallback after a rejected Bot edit',async t=>{
+  await botEditRejected({personal:true,t});
+  getSqlite().prepare('UPDATE telegram_personal_sources SET selected=0 WHERE chat_id=?').run(source);
+  await deliver(now+8000);
+  assert.equal(jobs()[0].caption_edit_outcome,'account_invalid');assert.equal(personalEdit.calls.length,0);
+  assert.equal(sends().length,1);assert.equal(edits().length,1);
+});
+
+test('a rejected Bot edit still obeys personal preflight refusal without repeating its media or edit',async()=>{
+  await botEditRejected();personalEdit.results.push({state:'unavailable',attempted:false,outcome:'invalid'});
+  await deliver(now+8000);assert.equal(jobs()[0].caption_edit_outcome,'account_invalid');
+  closeDatabase();await deliver(now+12000);
+  assert.equal(personalEdit.calls.length,1);assert.equal(sends().length,1);assert.equal(edits().length,1);
 });
 
 test('non-emoji Bot edit mismatches do not qualify for the personal account fallback',async()=>{
