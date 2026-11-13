@@ -40,6 +40,7 @@ const LEGACY_CAPTION_ERROR = "旧转发记录未保存原始 Emoji 和格式，�
 const CUSTOM_EMOJI_ERROR = "Telegram 拒绝发送含自定义 Emoji 的消息。请检查机器人的自定义 Emoji 使用权限及原消息格式；不会改成普通 Emoji 重发。";
 const CUSTOM_EMOJI_CHANGED_ERROR = "Telegram 未保留部分原始自定义 Emoji，请检查机器人的自定义 Emoji 使用权限。该消息不会自动重发。";
 const CAPTION_CHANGED_ERROR = "Telegram 返回的文案与提交原文不一致，请检查原消息格式。该消息不会自动重发。";
+const CUSTOM_EMOJI_DROPPED_ERROR = "原始自定义 Emoji 资料未能完整保留，已停止发送，避免表情变样。";
 
 function transaction<T>(db: DatabaseSync, work: () => T): T {
   db.exec("BEGIN IMMEDIATE");
@@ -106,7 +107,7 @@ function accountAllowed(db: DatabaseSync, sourceChatId: number, generation: stri
 /** User-account media is uploaded as bytes, never as a Bot API file_id. */
 export async function enqueuePersonalRelayMedia(input: {
   sourceChatId: number; sourceMessageId: number; sourceDate: number; mediaGroupId: string; caption: string; captionEntities: unknown;
-  mediaKind: "photo" | "animation" | "video"; bytes: Buffer; hasSpoiler: boolean; sourceMediaId: string; mimeType?: string;
+  mediaKind: "photo" | "animation" | "video"; bytes: Buffer; hasSpoiler: boolean; sourceMediaId: string; mimeType?: string; expectedCustomEmojiCount?: number;
   accountGeneration: string; relayRevision: string;
 }): Promise<boolean> {
   const db = getSqlite();
@@ -126,6 +127,9 @@ export async function enqueuePersonalRelayMedia(input: {
       : { file_id: sourceId, file_unique_id: sourceId },
   }, { botId: runtime.bot_id, targetChatId: runtime.target_chat_id, startedAt: current.relay_started_at });
   if (!content) return true;
+  const expectedCustom = Number.isSafeInteger(input.expectedCustomEmojiCount) && Number(input.expectedCustomEmojiCount) >= 0 ? Number(input.expectedCustomEmojiCount) : 0;
+  const droppedCustom = content.customEmojiLost || expectedCustom > content.captionEntities.filter(entity => entity.type === "custom_emoji").length;
+  const contentError = content.captionTruncated ? CAPTION_LIMIT_ERROR : droppedCustom ? CUSTOM_EMOJI_DROPPED_ERROR : "";
   const mimeType = input.mediaKind === "video" && input.mimeType && /^video\/[a-z0-9.+-]{1,80}$/i.test(input.mimeType)
     ? input.mimeType.toLowerCase() : input.mediaKind === "video" ? "video/mp4" : "";
   const hashes = await relayMediaIdentity(input.bytes, input.mediaKind);
@@ -150,8 +154,8 @@ export async function enqueuePersonalRelayMedia(input: {
       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,?,?)`)
       .run(content.sourceChatId, content.sourceMessageId, content.mediaGroupId, content.fingerprint, now, current.relay_revision,
         content.mediaKind, "", sourceId, content.caption, Number(content.hasSpoiler), now, "account", input.accountGeneration,
-        content.captionTruncated ? null : input.bytes, hashes.contentHash, hashes.visualHash, mimeType,
-        JSON.stringify(content.captionEntities), content.captionTruncated ? "failed" : "pending", content.captionTruncated ? CAPTION_LIMIT_ERROR : "");
+        contentError ? null : input.bytes, hashes.contentHash, hashes.visualHash, mimeType,
+        JSON.stringify(content.captionEntities), contentError ? "failed" : "pending", contentError);
     if (inserted.changes) registerMedia(db, Number(inserted.lastInsertRowid), keys);
     return true;
   });
@@ -178,7 +182,7 @@ export function relayStatus(db: DatabaseSync) {
   const runtime = state(db);
   const latest = db.prepare("SELECT last_error FROM telegram_relay_outbox WHERE status IN ('failed','unknown','sent') ORDER BY id DESC LIMIT 1").get() as { last_error: string } | undefined;
   const custom = db.prepare(`SELECT last_error FROM telegram_relay_outbox WHERE status IN ('failed','unknown','sent')
-    AND instr(caption_entities,'"custom_emoji"')>0 ORDER BY id DESC LIMIT 1`).get() as { last_error: string } | undefined;
+    AND (instr(caption_entities,'"custom_emoji"')>0 OR last_error=?) ORDER BY id DESC LIMIT 1`).get(CUSTOM_EMOJI_DROPPED_ERROR) as { last_error: string } | undefined;
   counts.skipped += runtime.skipped_count;
   return { ready: enabled(current) && runtime.revision === current.relay_revision && runtime.ready_until > Date.now() && runtime.target_chat_id < 0,
     counts, lastError: current?.relay_enabled === 1 ? (!current.token_ciphertext ? TOKEN_ERROR : runtime.last_error || custom?.last_error || latest?.last_error || "") : "",
@@ -325,6 +329,7 @@ export async function pollTelegramRelayOnce(decryptToken: DecryptToken, clock = 
       try { content = prepareRelayMessage(message as Record<string, unknown>, { botId: identity, targetChatId: runtime.target_chat_id, startedAt: claim.settings.relay_started_at }); }
       catch { content = null; }
       if (!content) { skipped++; continue; }
+      const contentError = content.captionTruncated ? CAPTION_LIMIT_ERROR : content.customEmojiLost ? CUSTOM_EMOJI_DROPPED_ERROR : "";
       const mediaKey = `file:${content.mediaKind}:${content.fileUniqueId}`;
       const duplicate = mediaOwner(db, [mediaKey]);
       if (duplicate) { skipped++; continue; }
@@ -332,7 +337,7 @@ export async function pollTelegramRelayOnce(decryptToken: DecryptToken, clock = 
       if (queued.count >= 128) { offset = id; break; }
       const result = insert.run(content.sourceChatId, content.sourceMessageId, content.mediaGroupId, content.fingerprint, now,
         claim.settings.relay_revision, content.mediaKind, content.fileId, content.fileUniqueId, content.caption, Number(content.hasSpoiler), now,
-        JSON.stringify(content.captionEntities), content.captionTruncated ? "failed" : "pending", content.captionTruncated ? CAPTION_LIMIT_ERROR : "");
+        JSON.stringify(content.captionEntities), contentError ? "failed" : "pending", contentError);
       if (!result.changes) skipped++;
       else registerMedia(db, Number(result.lastInsertRowid), [mediaKey]);
     }
@@ -372,6 +377,20 @@ function preservedCustomEmoji(expected: RelayCaptionEntity[], actual: unknown): 
   return custom.every(entity => actual.some(candidate => candidate && typeof candidate === "object"
     && candidate.type === "custom_emoji" && candidate.custom_emoji_id === entity.custom_emoji_id
     && candidate.offset === entity.offset && candidate.length === entity.length));
+}
+let successfulEmojiAuditBudget = 5;
+function auditEmojiDelivery(expected: RelayCaptionEntity[], actual: unknown, outcome: "preserved" | "changed" | "rejected" | "uncertain") {
+  const custom = expected.filter(entity => entity.type === "custom_emoji");
+  if (!custom.length) return;
+  if (outcome === "preserved") {
+    if (successfulEmojiAuditBudget <= 0) return;
+    successfulEmojiAuditBudget--;
+  }
+  const returned = Array.isArray(actual) ? actual.filter(entity => entity && typeof entity === "object" && entity.type === "custom_emoji") : [];
+  console.info("Telegram relay emoji delivery check.", JSON.stringify({
+    outcome, expectedCustomEmoji: custom.length, expectedNegativeCustomEmoji: custom.filter(entity => entity.custom_emoji_id?.startsWith("-")).length,
+    returnedCustomEmoji: returned.length, returnedNegativeCustomEmoji: returned.filter(entity => typeof entity.custom_emoji_id === "string" && entity.custom_emoji_id.startsWith("-")).length,
+  }));
 }
 export async function deliverTelegramRelayOnce(decryptToken: DecryptToken, clock = Date.now) {
   const db = getSqlite();
@@ -489,10 +508,12 @@ export async function deliverTelegramRelayOnce(decryptToken: DecryptToken, clock
       if (reply?.ok && typeof reply.result.message_id === "number" && Number.isSafeInteger(reply.result.message_id) && reply.result.message_id > 0) {
         const warning = typeof reply.result.caption === "string" && reply.result.caption !== claim.job.caption ? CAPTION_CHANGED_ERROR
           : preservedCustomEmoji(captionEntities, reply.result.caption_entities) ? "" : CUSTOM_EMOJI_CHANGED_ERROR;
+        auditEmojiDelivery(captionEntities, reply.result.caption_entities, warning ? "changed" : "preserved");
         db.prepare("UPDATE telegram_relay_outbox SET status='sent',sent_at=?,message_id=?,last_error=?,lease_id='',lease_until=0 WHERE id=? AND lease_id=?")
           .run(now, reply.result.message_id, warning, claim.job.id, claim.job.lease_id);
       } else {
         const code = reply && !reply.ok ? reply.code : 0;
+        auditEmojiDelivery(captionEntities, undefined, code === 400 || code === 401 || code === 403 ? "rejected" : "uncertain");
         const retry = (code === 429 || code === 403) && claim.job.attempts < MAX_ATTEMPTS;
         if (code === 429 || code === 403) {
           const seconds = reply && !reply.ok ? reply.retryAfter : 0;
@@ -523,6 +544,22 @@ const workers = globalThis as typeof globalThis & { telegramRelayWorkerStarted?:
 export function startTelegramRelayWorker(decryptToken: DecryptToken) {
   if (workers.telegramRelayWorkerStarted) return;
   workers.telegramRelayWorkerStarted = true;
+  void (async () => {
+    try {
+      const { relayFormattingDiagnostics } = await import("./telegram-relay-diagnostics");
+      console.info("Telegram relay formatting audit.", JSON.stringify(relayFormattingDiagnostics(getSqlite(), Date.now(), Date.parse("2026-11-13T11:48:35Z"))));
+      if (settings(getSqlite())?.relay_enabled !== 1) return;
+      const { sampleSelectedSourceEmoji } = await import("./telegram-account");
+      for (let attempt = 0; attempt < 6; attempt++) {
+        const sample = await sampleSelectedSourceEmoji();
+        if (sample.state !== "busy" || attempt === 5) {
+          console.info("Telegram relay source emoji audit.", JSON.stringify(sample));
+          break;
+        }
+        await new Promise(resolve => setTimeout(resolve, 5_000));
+      }
+    } catch { console.warn("Telegram relay formatting audit is unavailable."); }
+  })();
   let polling = false;
   let sending = false;
   let pollError = false;

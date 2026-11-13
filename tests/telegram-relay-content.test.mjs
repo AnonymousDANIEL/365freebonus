@@ -16,7 +16,7 @@ for (const name of ['telegram-relay-content', 'telegram-bot']) {
   ).outputText);
 }
 const require = createRequire(import.meta.url);
-const { prepareRelayMessage, normalizeRelayCaptionEntities, relayKeyboard, RELAY_WEBSITE, RELAY_DEFAULT_TARGET } = require(path.join(fixture, 'telegram-relay-content.js'));
+const { prepareRelayMessage, normalizeRelayCaptionEntities, isRelayCustomEmojiId, relayKeyboard, RELAY_WEBSITE, RELAY_DEFAULT_TARGET } = require(path.join(fixture, 'telegram-relay-content.js'));
 const transport = require(path.join(fixture, 'telegram-bot.js'));
 const https = require('node:https');
 const now = 1_800_000_000_123;
@@ -299,6 +299,45 @@ test('custom emoji artwork and original caption whitespace survive without alter
   assert.equal(result.caption, caption, 'no trim, emoji conversion or whitespace normalization is allowed');
   assert.deepEqual(result.captionEntities, original.toSorted((a,b)=>a.offset-b.offset||b.length-a.length));
   assert.equal(result.captionTruncated, false);
+  assert.equal(result.customEmojiLost, false);
+});
+
+test('custom emoji IDs accept every canonical nonzero signed int64 boundary without Number conversion', () => {
+  for (const id of ['1','-1','9007199254740993123','-9007199254740993123','9223372036854775807','-9223372036854775808']) {
+    assert.equal(isRelayCustomEmojiId(id),true,id);
+  }
+  for (const id of ['0','-0','+1','01','-01','1.0','1e3',' 1','1 ','1\n','-1\r\n','9223372036854775808','-9223372036854775809','99999999999999999999',1,null,undefined]) {
+    assert.equal(isRelayCustomEmojiId(id),false,String(id));
+  }
+});
+
+test('negative custom emoji artwork IDs survive exact text and saved-entity normalization', () => {
+  const caption='  🆎🆎50%!\n🟦🟦\n';
+  const original=[
+    {type:'custom_emoji',offset:2,length:2,custom_emoji_id:'-9223372036854775808'},
+    {type:'custom_emoji',offset:4,length:2,custom_emoji_id:'-9007199254740993123'},
+    {type:'custom_emoji',offset:caption.indexOf('🟦'),length:2,custom_emoji_id:'-1234567890123456789'},
+    {type:'custom_emoji',offset:caption.lastIndexOf('🟦'),length:2,custom_emoji_id:'9223372036854775807'},
+  ];
+  const result=prepare(message({caption,caption_entities:original}));
+  assert.equal(result.caption,caption);
+  assert.deepEqual(result.captionEntities,original);
+  assert.equal(result.customEmojiLost,false);
+  assert.deepEqual(normalizeRelayCaptionEntities(caption,result.captionEntities),original);
+});
+
+test('invalid or discarded original custom emoji is explicitly marked as lost', () => {
+  const caption='🆎🟦';
+  for (const invalid of [
+    {type:'custom_emoji',offset:0,length:2,custom_emoji_id:'0'},
+    {type:'custom_emoji',offset:0,length:2,custom_emoji_id:'9223372036854775808'},
+    {type:'custom_emoji',offset:1,length:1,custom_emoji_id:'-12'},
+  ]) {
+    const result=prepare(message({caption,caption_entities:[invalid]}));
+    assert.equal(result.caption,caption);
+    assert.equal(result.customEmojiLost,true);
+    assert.deepEqual(result.captionEntities,[]);
+  }
 });
 
 test('rewritten links shift later custom emoji and formatting in UTF-16 coordinates', () => {

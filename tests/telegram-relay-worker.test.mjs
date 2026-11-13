@@ -479,6 +479,52 @@ test('bot custom emoji and formatting survive queued storage and reopening with 
   assert.deepEqual(call.parameters.reply_markup,{inline_keyboard:relayKeyboard()});
 });
 
+test('signed negative Bot custom emoji IDs remain exact strings through persistence and delivery',async()=>{
+  configure();const entities=[{type:'custom_emoji',offset:0,length:1,custom_emoji_id:'-9223372036854775808'}];
+  await poll(now,[photo(1,{caption:'⭐ Original logo',caption_entities:entities})]);
+  assert.equal(jobs().length,1);assert.equal(jobs()[0].status,'pending');
+  assert.deepEqual(JSON.parse(jobs()[0].caption_entities),entities);
+  closeDatabase();await deliver(now);
+  assert.equal(sends().length,1);assert.equal(sends()[0].parameters.caption,'⭐ Original logo');
+  assert.deepEqual(sends()[0].parameters.caption_entities,entities);
+  assert.equal(jobs()[0].status,'sent');assert.equal(jobs()[0].last_error,'');
+});
+
+test('signed negative personal custom emoji IDs survive conversion expectations and multipart sending',async t=>{
+  await configureAccount(t);
+  const entities=[{type:'custom_emoji',offset:0,length:2,custom_emoji_id:'-100000000000000001'}];
+  assert.equal(await relay.enqueuePersonalRelayMedia(accountPhoto({caption:'😹 Original character',captionEntities:entities,
+    expectedCustomEmojiCount:1})),true);
+  assert.deepEqual(JSON.parse(jobs()[0].caption_entities),entities);
+  await deliver(now);
+  assert.equal(sends().length,1);assert.equal(sends()[0].upload.field,'photo');
+  assert.equal(sends()[0].parameters.caption,'😹 Original character');
+  assert.deepEqual(sends()[0].parameters.caption_entities,entities);
+  assert.equal(jobs()[0].status,'sent');assert.equal(jobs()[0].last_error,'');
+});
+
+for(const invalid of ['0','9223372036854775808','-9223372036854775809'])test(`invalid source custom emoji ID ${invalid} fails instead of sending its fallback`,async()=>{
+  configure();
+  await poll(now,[photo(1,{caption:'⭐ Original custom logo',caption_entities:[
+    {type:'custom_emoji',offset:0,length:1,custom_emoji_id:invalid},
+  ]})]);
+  assert.equal(jobs().length,1);assert.equal(jobs()[0].status,'failed');
+  assert.match(jobs()[0].last_error,/自定义|Emoji|表情/i);
+  await deliver(now);assert.equal(sends().length,0);
+  assert.equal(telegram.calls.some(call=>call.method==='sendMessage'),false);
+});
+
+test('personal source reports lost custom emoji metadata before conversion and cannot send a plain fallback',async t=>{
+  await configureAccount(t);
+  assert.equal(await relay.enqueuePersonalRelayMedia(accountPhoto({caption:'⭐ Original custom logo',captionEntities:[],
+    expectedCustomEmojiCount:1})),true);
+  assert.equal(jobs().length,1);assert.equal(jobs()[0].status,'failed');
+  assert.match(jobs()[0].last_error,/自定义|Emoji|表情/i);
+  assert.equal(jobs()[0].media_bytes,null);
+  await deliver(now);assert.equal(sends().length,0);
+  assert.equal(telegram.calls.some(call=>call.method==='sendMessage'),false);
+});
+
 test('all personal photo, GIF, MP4 and original-video file uploads retain custom emoji IDs and formatting',async t=>{
   await configureAccount(t);const original=originalEmojiCaption();
   const variants=[

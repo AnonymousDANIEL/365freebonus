@@ -4,6 +4,7 @@ import { Api, Logger, TelegramClient, utils } from "teleproto";
 import { StringSession } from "teleproto/sessions";
 import bigInt from "big-integer";
 import { getSqlite } from "./sqlite";
+import { isRelayCustomEmojiId } from "./telegram-relay-content";
 
 type Stage = "disconnected" | "code" | "password" | "connected";
 type AccountRow = {
@@ -445,7 +446,7 @@ function captionEntities(entities: Api.TypeMessageEntity[] | undefined) {
       // fallback glyph while Telegram renders the corresponding custom emoji.
       let id = "";
       try { id = entity.documentId?.toString() || ""; } catch { return []; }
-      if (!/^[1-9]\d{0,19}$/.test(id)) return [];
+      if (!isRelayCustomEmojiId(id)) return [];
       converted.custom_emoji_id = id;
     } else if (entity.className === "MessageEntityPre") {
       if (typeof entity.language === "string" && entity.language.length <= 100) converted.language = entity.language;
@@ -482,6 +483,78 @@ function eligibleMedia(message: Api.Message, protectedChannel: boolean, botId: n
     return { mediaKind: "video" as const, mediaId: `video-${document.id}`, max: MAX_VIDEO, mimeType: document.mimeType.toLowerCase() };
   }
   return null;
+}
+
+type SourceEmojiSample = {
+  state: "ok" | "disconnected" | "busy" | "backoff" | "unavailable";
+  sourcesSampled: number; messagesSampled: number; customEmojiEntities: number;
+  negativeCustomEmojiEntities: number; unrepresentableCustomEmojiEntities: number;
+};
+
+/** Bounded read-only source audit. No message content, identifiers or credentials leave this function. */
+export async function sampleSelectedSourceEmoji(): Promise<SourceEmojiSample> {
+  const result: SourceEmojiSample = { state: "ok", sourcesSampled: 0, messagesSampled: 0, customEmojiEntities: 0,
+    negativeCustomEmojiEntities: 0, unrepresentableCustomEmojiEntities: 0 };
+  const db = getSqlite();
+  const current = row(db);
+  if (current.stage !== "connected" || !current.session_ciphertext) return { ...result, state: "disconnected" };
+  if (current.lease_until > Date.now()) return { ...result, state: "busy" };
+  if (current.next_attempt_at > Date.now()) return { ...result, state: "backoff" };
+  const target = (db.prepare("SELECT target_chat_id FROM telegram_relay_state WHERE id='primary'").get() as { target_chat_id: number } | undefined)?.target_chat_id || 0;
+  const sources = db.prepare(`SELECT * FROM telegram_personal_sources WHERE selected=1 AND joined=1 AND blocked=0
+    AND chat_id<>? ORDER BY chat_id LIMIT 3`).all(target) as SourceRow[];
+  if (!sources.length) return result;
+  let claim: Claim;
+  try { claim = claimAccount(db, Date.now(), { connected: true, respectBackoff: true }); }
+  catch (error) {
+    const state = error instanceof TelegramAccountError && error.status === 429 ? "backoff"
+      : error instanceof TelegramAccountError && error.message === BUSY_ERROR ? "busy"
+      : error instanceof TelegramAccountError && error.message === REAUTH_ERROR ? "disconnected" : "unavailable";
+    return { ...result, state };
+  }
+  let client: TelegramClient | undefined;
+  const deadline = Date.now() + 40_000;
+  const remaining = () => Math.max(1, Math.min(REQUEST_MS, deadline - Date.now()));
+  try {
+    client = makeClient(unseal<Credentials>(claim.row.config_ciphertext), unseal<string>(claim.row.session_ciphertext));
+    await bounded(client, client.connect(), remaining());
+    for (const source of sources) {
+      if (Date.now() >= deadline) return { ...result, state: "unavailable" };
+      renew(db, claim);
+      const peer = inputPeer(source);
+      if (peer.protected) continue;
+      const iterator = client.iterMessages(peer.input, { limit: 5 })[Symbol.asyncIterator]();
+      let sourceCounted = false;
+      for (let index = 0; index < 5; index++) {
+        if (Date.now() >= deadline) return { ...result, state: "unavailable" };
+        renew(db, claim);
+        const next = await bounded(client, iterator.next(), remaining());
+        renew(db, claim);
+        if (!sourceCounted) { result.sourcesSampled++; sourceCounted = true; }
+        if (next.done) break;
+        const message = next.value;
+        if (!(message instanceof Api.Message)) continue;
+        result.messagesSampled++;
+        for (const entity of message.entities || []) {
+          if (entity.className !== "MessageEntityCustomEmoji") continue;
+          result.customEmojiEntities++;
+          let id = "";
+          try { id = entity.documentId?.toString() || ""; } catch { /* Only the invalid count is retained. */ }
+          if (!isRelayCustomEmojiId(id)) result.unrepresentableCustomEmojiEntities++;
+          else if (id.startsWith("-")) result.negativeCustomEmojiEntities++;
+        }
+      }
+    }
+    return result;
+  } catch (error) {
+    // A diagnostic read must not edit source cursors, queue rows or account
+    // authorization. Persist only Telegram's rate-limit delay when requested.
+    if (safeError(error).status === 429) {
+      recordFailure(db, claim, error, "emoji-source-audit");
+      return { ...result, state: "backoff" };
+    }
+    return { ...result, state: "unavailable" };
+  } finally { release(db, claim); await closeClient(client); }
 }
 
 /** Catch up from per-channel durable cursors; new selections start at the latest message. */
@@ -549,6 +622,7 @@ export async function pollTelegramAccountOnce() {
             const consumed = await enqueuePersonalRelayMedia({ sourceChatId: selected.chat_id, sourceMessageId: message.id,
               sourceDate: message.date, relayRevision: relay.relay_revision,
               mediaGroupId: message.groupedId?.toString() || "", caption: message.message, captionEntities: captionEntities(message.entities),
+              expectedCustomEmojiCount: (message.entities || []).filter(entity => entity.className === "MessageEntityCustomEmoji").length,
               mediaKind: media.mediaKind, bytes, hasSpoiler: (message.media instanceof Api.MessageMediaPhoto || message.media instanceof Api.MessageMediaDocument) && message.media.spoiler === true,
               sourceMediaId: media.mediaId, accountGeneration: claim.row.generation,
               ...(media.mediaKind === "video" ? { mimeType: media.mimeType } : {}) });

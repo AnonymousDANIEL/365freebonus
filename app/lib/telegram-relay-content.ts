@@ -28,6 +28,7 @@ export type RelayMessage = {
   caption: string;
   captionEntities: RelayCaptionEntity[];
   captionTruncated: boolean;
+  customEmojiLost: boolean;
   fingerprint: string;
   hasSpoiler: boolean;
 };
@@ -38,6 +39,13 @@ export function relayKeyboard() {
     [{ text: "🎁 365 Free Bonus Official", url: OFFICIAL_CHANNEL }],
     [{ text: "💬 NEED HELP?", url: HELP_BOT }],
   ];
+}
+
+/** Telegram custom-emoji document IDs are nonzero signed int64 values. */
+export function isRelayCustomEmojiId(value: unknown): value is string {
+  if (typeof value !== "string" || !/^-?[1-9]\d{0,18}$/.test(value)) return false;
+  const id = BigInt(value);
+  return id.toString() === value && id >= BigInt("-9223372036854775808") && id <= BigInt("9223372036854775807");
 }
 
 function record(value: unknown): Record<string, unknown> | null {
@@ -81,7 +89,7 @@ function preservedEntity(caption: string, value: Record<string, unknown>): Relay
   if (!span || typeof value.type !== "string" || !preservedTypes.has(value.type)) return null;
   const entity: RelayCaptionEntity = { type: value.type, offset: span.start, length: span.end - span.start };
   if (value.type === "custom_emoji") {
-    if (typeof value.custom_emoji_id !== "string" || !/^[1-9]\d{0,19}$/.test(value.custom_emoji_id)) return null;
+    if (!isRelayCustomEmojiId(value.custom_emoji_id)) return null;
     entity.custom_emoji_id = value.custom_emoji_id;
   }
   if (value.type === "pre" && value.language !== undefined) {
@@ -285,10 +293,15 @@ export function prepareRelayMessage(
   const rewritten = rewriteCaption(message.caption, message.caption_entities);
   const caption = rewritten.caption;
   if (!caption.trim()) return null;
+  const originalCustomEmojiCount = Array.isArray(message.caption_entities)
+    ? message.caption_entities.filter(value => record(value)?.type === "custom_emoji").length : 0;
+  const preservedCustomEmojiCount = rewritten.entities.filter(entity => entity.type === "custom_emoji").length;
   return {
     sourceChatId: chat.id, sourceMessageId: message.message_id, mediaGroupId,
     mediaKind, fileId: media.file_id, fileUniqueId: media.file_unique_id,
-    caption, captionEntities: rewritten.entities, captionTruncated: rewritten.truncated, fingerprint: createHash("sha256").update(JSON.stringify([mediaKind, media.file_unique_id, caption])).digest("hex"),
+    caption, captionEntities: rewritten.entities, captionTruncated: rewritten.truncated,
+    customEmojiLost: originalCustomEmojiCount !== preservedCustomEmojiCount,
+    fingerprint: createHash("sha256").update(JSON.stringify([mediaKind, media.file_unique_id, caption])).digest("hex"),
     hasSpoiler: message.has_media_spoiler === true,
   };
 }

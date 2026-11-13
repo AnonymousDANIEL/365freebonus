@@ -16,7 +16,7 @@ import { RPCMessageToError } from 'teleproto/errors';
 const fixture = mkdtempSync(path.join(tmpdir(), 'telegram-account-real-sdk-'));
 writeFileSync(path.join(fixture, 'package.json'), '{"type":"commonjs"}');
 symlinkSync(fileURLToPath(new URL('../node_modules', import.meta.url)), path.join(fixture, 'node_modules'), 'dir');
-for (const name of ['sqlite', 'telegram-account']) {
+for (const name of ['sqlite', 'telegram-relay-content', 'telegram-account']) {
   writeFileSync(path.join(fixture, `${name}.js`), ts.transpileModule(
     readFileSync(new URL(`../app/lib/${name}.ts`, import.meta.url), 'utf8'),
     { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, esModuleInterop: true } },

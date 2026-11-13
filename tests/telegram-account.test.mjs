@@ -10,7 +10,7 @@ import ts from 'typescript';
 // Telegram is entirely replaced: no credentials or network traffic are used.
 const fixture = mkdtempSync(path.join(tmpdir(), 'telegram-personal-account-'));
 writeFileSync(path.join(fixture, 'package.json'), '{"type":"commonjs"}');
-for (const name of ['sqlite', 'telegram-account']) writeFileSync(path.join(fixture, `${name}.js`), ts.transpileModule(
+for (const name of ['sqlite', 'telegram-relay-content', 'telegram-account']) writeFileSync(path.join(fixture, `${name}.js`), ts.transpileModule(
   readFileSync(new URL(`../app/lib/${name}.ts`, import.meta.url), 'utf8'),
   { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, esModuleInterop: true } },
 ).outputText);
@@ -56,7 +56,9 @@ exports.TelegramClient=class {
   iterDialogs(){fail('dialogs');return (async function*(){for(const dialog of exports.state.dialogs)yield dialog;})();}
   async getEntity(peer){fail('entity');return exports.state.dialogs.find(d=>String(d.entity.id)===peer.channelId.toString())?.entity;}
   iterMessages(peer,params){exports.state.calls.push({method:'history',peer:peer.channelId.toString(),params});fail('history');
-    return {async *[Symbol.asyncIterator](){for(const m of exports.state.messages)if(m.id>params.minId)yield m;}};}
+    return {async *[Symbol.asyncIterator](){let messages=exports.state.messages.filter(m=>m.id>(params.minId||0));
+      if(!params.reverse)messages=messages.toSorted((a,b)=>b.id-a.id);
+      for(const m of messages.slice(0,params.limit||messages.length))yield m;}};}
   async downloadMedia(message,params){exports.state.calls.push({method:'download',id:message.id});fail('download');if(exports.state.onDownload)await exports.state.onDownload(message,params);return exports.state.media;}
 };
 `);
@@ -290,6 +292,99 @@ test('custom emoji document IDs and UTF-16 positions survive personal caption co
     type:entity.className==='MessageEntityCustomEmoji'?'custom_emoji':'bold',offset:entity.offset,length:entity.length,
     ...(entity.documentId?{custom_emoji_id:entity.documentId.toString()}:{}),
   })));
+  assert.equal(telegram.state.queue[0].expectedCustomEmojiCount,4);
+});
+
+test('negative signed custom emoji IDs for original letter and logo artwork survive personal conversion',async()=>{
+  await login();await select();ready();
+  const caption='  🆎50%!\n🟦🟦\n';
+  const ids=['-9223372036854775808','-9007199254740993123','9223372036854775807'];
+  const offsets=[caption.indexOf('🆎'),caption.indexOf('🟦'),caption.lastIndexOf('🟦')];
+  const entities=offsets.map((offset,index)=>new Api.MessageEntityCustomEmoji({offset,length:2,documentId:{toString:()=>ids[index]}}));
+  telegram.state.messages=[photo(41,{message:caption,entities})];
+  await account.pollTelegramAccountOnce();
+  const queued=telegram.state.queue[0];
+  assert.equal(queued.caption,caption);
+  assert.equal(queued.expectedCustomEmojiCount,3);
+  assert.deepEqual(queued.captionEntities,offsets.map((offset,index)=>({type:'custom_emoji',offset,length:2,custom_emoji_id:ids[index]})));
+});
+
+test('personal conversion retains source custom emoji count even when an invalid ID cannot be converted',async()=>{
+  await login();await select();ready();
+  const caption='🆎🟦';
+  const ids=['-1','0','9223372036854775808','-9223372036854775809'];
+  const entities=ids.map(id=>new Api.MessageEntityCustomEmoji({offset:0,length:2,documentId:{toString:()=>id}}));
+  telegram.state.messages=[photo(41,{message:caption,entities})];
+  await account.pollTelegramAccountOnce();
+  const queued=telegram.state.queue[0];
+  assert.equal(queued.caption,caption);
+  assert.equal(queued.expectedCustomEmojiCount,4);
+  assert.deepEqual(queued.captionEntities,[{type:'custom_emoji',offset:0,length:2,custom_emoji_id:'-1'}]);
+});
+
+test('source emoji audit reads at most three selected channels and five recent messages without sending or changing cursors',async()=>{
+  await login();
+  telegram.state.dialogs=[channel(1001),channel(1002),channel(1003),channel(1004)];
+  await account.handleAccountAction({action:'refresh'});
+  await select(telegram.state.dialogs.map(d=>'-100'+d.entity.id));
+  telegram.state.messages=Array.from({length:8},(_,index)=>photo(index+1,{message:'private-source-caption',entities:[
+    new Api.MessageEntityCustomEmoji({offset:0,length:1,documentId:{toString:()=>'-9007199254740993123'}}),
+    new Api.MessageEntityCustomEmoji({offset:1,length:1,documentId:{toString:()=>'9223372036854775807'}}),
+    new Api.MessageEntityCustomEmoji({offset:2,length:1,documentId:{toString:()=>'0'}}),
+  ]}));
+  const beforeCursors=db().prepare('SELECT chat_id,last_message_id FROM telegram_personal_sources ORDER BY chat_id').all();
+  const beforeState={...stored()};
+  const callsAt=telegram.state.calls.length;
+  const result=await account.sampleSelectedSourceEmoji();
+  assert.deepEqual(result,{state:'ok',sourcesSampled:3,messagesSampled:15,customEmojiEntities:45,negativeCustomEmojiEntities:15,unrepresentableCustomEmojiEntities:15});
+  assert.deepEqual(db().prepare('SELECT chat_id,last_message_id FROM telegram_personal_sources ORDER BY chat_id').all(),beforeCursors);
+  assert.deepEqual({...stored()},beforeState);
+  assert.equal(db().prepare('SELECT COUNT(*) AS n FROM telegram_relay_outbox').get().n,0);
+  assert.equal(telegram.state.queue.length,0);
+  const auditCalls=telegram.state.calls.slice(callsAt);
+  assert.equal(auditCalls.filter(call=>call.method==='history').length,3);
+  assert.ok(auditCalls.filter(call=>call.method==='history').every(call=>call.params.limit===5&&call.params.minId===undefined));
+  assert.ok(auditCalls.every(call=>!['sendCode','SignIn','password','download'].includes(call.method)));
+  assert.doesNotMatch(JSON.stringify(result),/private-source-caption|9007199254740993123|9223372036854775807|session|secret|channel/i);
+});
+
+test('source emoji audit observes disconnected, busy and backoff states before any Telegram call',async()=>{
+  assert.equal((await account.sampleSelectedSourceEmoji()).state,'disconnected');
+  assert.equal(telegram.state.calls.length,0);
+  await login();await select();
+  const calls=telegram.state.calls.length;
+  db().prepare('UPDATE telegram_personal_account SET lease_until=?').run(Date.now()+60000);
+  assert.equal((await account.sampleSelectedSourceEmoji()).state,'busy');
+  db().prepare('UPDATE telegram_personal_account SET lease_until=0,next_attempt_at=?').run(Date.now()+60000);
+  assert.equal((await account.sampleSelectedSourceEmoji()).state,'backoff');
+  assert.equal(telegram.state.calls.length,calls);
+});
+
+test('source emoji audit retains Telegram flood wait but never consumes source messages',async()=>{
+  await login();await select();
+  telegram.state.error={method:'history',errorMessage:'FLOOD_WAIT_120',seconds:120};
+  const beforeCursor=cursor();
+  const before=Date.now();
+  const result=await account.sampleSelectedSourceEmoji();
+  assert.equal(result.state,'backoff');
+  assert.ok(stored().next_attempt_at>=before+120000);
+  assert.equal(cursor(),beforeCursor);
+  assert.equal(telegram.state.queue.length,0);
+});
+
+test('source emoji audit failures do not clear saved authorization or modify queued media',async()=>{
+  await login();await select();
+  db().prepare(`INSERT INTO telegram_relay_outbox(source_chat_id,source_message_id,fingerprint,queued_at,revision,media_kind,file_id,file_unique_id,caption)
+    VALUES(?,1,'fixture-audit',1,'fixture-revision','photo','fixture-file','fixture-unique','fixture-caption')`).run(source);
+  const beforeJob={...db().prepare('SELECT * FROM telegram_relay_outbox').get()};
+  const before={...stored()};
+  telegram.state.error={method:'history',errorMessage:'SESSION_REVOKED'};
+  const result=await account.sampleSelectedSourceEmoji();
+  assert.equal(result.state,'unavailable');
+  assert.deepEqual({...stored()},before);
+  assert.deepEqual({...db().prepare('SELECT * FROM telegram_relay_outbox').get()},beforeJob);
+  assert.equal(cursor(),40);
+  assert.equal(telegram.state.queue.length,0);
 });
 
 test('personal captions preserve formatting, quote expansion, code language and explicit date format',async()=>{
@@ -327,7 +422,7 @@ test('unknown and malformed custom emoji entities do not discard the original ca
   await login();await select();ready();
   telegram.state.messages=[photo(41,{message:'⭐ Keep',entities:[
     new Api.MessageEntityCustomEmoji({offset:0,length:1,documentId:{toString:()=>{throw new Error('unusable ID');}}}),
-    new Api.MessageEntityCustomEmoji({offset:0,length:1,documentId:{toString:()=>'-12'}}),
+    new Api.MessageEntityCustomEmoji({offset:0,length:1,documentId:{toString:()=>'0'}}),
     new Api.MessageEntityUnknown({offset:0,length:1}),new Api.MessageEntityBold({offset:-1,length:3}),
     new Api.MessageEntityItalic({offset:2,length:4}),
   ]})];
