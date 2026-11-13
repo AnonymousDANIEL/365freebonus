@@ -15,10 +15,10 @@ type RelayState = {
 type PollClaim = { settings: RelaySettings; botId: number; leaseId: string; offset: number; state: RelayState };
 type RelayJob = {
   id: number; source_chat_id: number; source_message_id: number; media_group_id: string; fingerprint: string;
-  revision: string; media_kind: "photo" | "animation"; file_id: string; file_unique_id: string; caption: string;
+  revision: string; media_kind: "photo" | "animation" | "video"; file_id: string; file_unique_id: string; caption: string;
   has_spoiler: number; attempts: number; lease_id: string; lease_until: number;
   origin: string; account_generation: string; queued_at: number; media_bytes: Uint8Array | null;
-  content_hash: string; visual_hash: string; media_prepared: number;
+  content_hash: string; visual_hash: string; media_prepared: number; mime_type: string;
 };
 type SendClaim = { settings: RelaySettings; targetChatId: number; job: RelayJob };
 const LEASE_MS = 60_000;
@@ -29,7 +29,7 @@ const MAX_ATTEMPTS = 5;
 const QUEUE_MAX_BYTES = 64 * 1024 * 1024;
 const UNCERTAIN = "Telegram 未确认图片转发的发送结果，已停止自动重试以避免重复。";
 const TOKEN_ERROR = "无法使用品牌机器人凭据，请重新填写 @FreeBonus365Bot 的 Token。";
-const TARGET_ERROR = "请将 @FreeBonus365Bot 加入目标群或频道，并允许它发送照片；目标频道需要发布消息权限。";
+const TARGET_ERROR = "请将 @FreeBonus365Bot 加入目标群或频道，并允许它发送照片、视频和 GIF；目标频道需要发布消息权限。";
 const TARGET_CHANGED_ERROR = "目标群或频道身份已改变，请在后台核对目标并重新关闭／开启转发。";
 const WEBHOOK_ERROR = "品牌机器人已连接其他 Webhook，请先解除该接收连接后再启用图片转发。";
 const CONFLICT_ERROR = "品牌机器人正由另一项轮询或 Webhook 使用，请检查其他接收程序。";
@@ -100,7 +100,7 @@ function accountAllowed(db: DatabaseSync, sourceChatId: number, generation: stri
 /** User-account media is uploaded as bytes, never as a Bot API file_id. */
 export async function enqueuePersonalRelayMedia(input: {
   sourceChatId: number; sourceMessageId: number; sourceDate: number; mediaGroupId: string; caption: string; captionEntities: unknown;
-  mediaKind: "photo" | "animation"; bytes: Buffer; hasSpoiler: boolean; sourceMediaId: string;
+  mediaKind: "photo" | "animation" | "video"; bytes: Buffer; hasSpoiler: boolean; sourceMediaId: string; mimeType?: string;
   accountGeneration: string; relayRevision: string;
 }): Promise<boolean> {
   const db = getSqlite();
@@ -115,11 +115,13 @@ export async function enqueuePersonalRelayMedia(input: {
   const content = prepareRelayMessage({ chat: { id: input.sourceChatId, type: "channel" },
     message_id: input.sourceMessageId, date: input.sourceDate, media_group_id: input.mediaGroupId || undefined,
     caption: input.caption, caption_entities: input.captionEntities, has_media_spoiler: input.hasSpoiler,
-    [input.mediaKind === "photo" ? "photo" : "animation"]: input.mediaKind === "photo"
+    [input.mediaKind]: input.mediaKind === "photo"
       ? [{ file_id: sourceId, file_unique_id: sourceId, width: 1, height: 1 }]
       : { file_id: sourceId, file_unique_id: sourceId },
   }, { botId: runtime.bot_id, targetChatId: runtime.target_chat_id, startedAt: current.relay_started_at });
   if (!content) return true;
+  const mimeType = input.mediaKind === "video" && input.mimeType && /^video\/[a-z0-9.+-]{1,80}$/i.test(input.mimeType)
+    ? input.mimeType.toLowerCase() : input.mediaKind === "video" ? "video/mp4" : "";
   const hashes = await relayMediaIdentity(input.bytes, input.mediaKind);
   return transaction(db, () => {
     const latest = settings(db);
@@ -138,11 +140,11 @@ export async function enqueuePersonalRelayMedia(input: {
     const now = Date.now();
     const inserted = db.prepare(`INSERT OR IGNORE INTO telegram_relay_outbox
       (source_chat_id,source_message_id,media_group_id,fingerprint,queued_at,revision,media_kind,file_id,file_unique_id,caption,has_spoiler,
-       next_attempt_at,origin,account_generation,media_bytes,content_hash,visual_hash,media_prepared)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)`)
+       next_attempt_at,origin,account_generation,media_bytes,content_hash,visual_hash,media_prepared,mime_type)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?)`)
       .run(content.sourceChatId, content.sourceMessageId, content.mediaGroupId, content.fingerprint, now, current.relay_revision,
         content.mediaKind, "", sourceId, content.caption, Number(content.hasSpoiler), now, "account", input.accountGeneration,
-        input.bytes, hashes.contentHash, hashes.visualHash);
+        input.bytes, hashes.contentHash, hashes.visualHash, mimeType);
     if (inserted.changes) registerMedia(db, Number(inserted.lastInsertRowid), keys);
     return true;
   });
@@ -392,7 +394,7 @@ export async function deliverTelegramRelayOnce(decryptToken: DecryptToken, clock
   // duplicate checks; Bot API still sends its own file_id. Account files must
   // be uploaded because the two Telegram transports have different media IDs.
   let uploadBytes = claim.job.media_bytes ? Buffer.from(claim.job.media_bytes) : null;
-  if (!claim.job.media_prepared) {
+  if (!claim.job.media_prepared && claim.job.media_kind !== "video") {
     const bytes = await downloadBotRelayMedia(token, claim.job.file_id, claim.job.media_kind).catch(() => null);
     if (!bytes) {
       transaction(db, () => {
@@ -429,13 +431,18 @@ export async function deliverTelegramRelayOnce(decryptToken: DecryptToken, clock
     });
     return;
   }
+  const videoMime = claim.job.mime_type && /^video\/[a-z0-9.+-]{1,80}$/i.test(claim.job.mime_type) ? claim.job.mime_type.toLowerCase() : "video/mp4";
+  const videoAsFile = claim.job.origin === "account" && claim.job.media_kind === "video" && videoMime !== "video/mp4";
+  const method = videoAsFile ? "sendDocument" : claim.job.media_kind === "photo" ? "sendPhoto" : claim.job.media_kind === "video" ? "sendVideo" : "sendAnimation";
   const parameters = { chat_id: claim.targetChatId, ...(claim.job.origin !== "account" ? { [claim.job.media_kind]: claim.job.file_id } : {}), caption: claim.job.caption,
-    reply_markup: { inline_keyboard: relayKeyboard() }, ...(claim.job.has_spoiler ? { has_spoiler: true } : {}) };
+    reply_markup: { inline_keyboard: relayKeyboard() }, ...(claim.job.has_spoiler && !videoAsFile ? { has_spoiler: true } : {}),
+    ...(method === "sendVideo" ? { supports_streaming: true } : {}) };
   const isGif = uploadBytes && /^GIF8[79]a$/.test(uploadBytes.subarray(0, 6).toString("ascii"));
-  const upload = claim.job.origin === "account" && uploadBytes ? { field: claim.job.media_kind,
-    fileName: claim.job.media_kind === "photo" ? "photo.jpg" : isGif ? "animation.gif" : "animation.mp4",
-    mime: claim.job.media_kind === "photo" ? "image/jpeg" : isGif ? "image/gif" : "video/mp4", bytes: uploadBytes } : undefined;
-  const reply = await telegramRequest(token, claim.job.media_kind === "photo" ? "sendPhoto" : "sendAnimation", parameters, upload).catch(() => null);
+  const extension = ({ "video/webm": "webm", "video/quicktime": "mov", "video/x-matroska": "mkv" } as Record<string,string>)[videoMime] || "bin";
+  const upload = claim.job.origin === "account" && uploadBytes ? { field: videoAsFile ? "document" as const : claim.job.media_kind,
+    fileName: claim.job.media_kind === "photo" ? "photo.jpg" : claim.job.media_kind === "video" ? videoAsFile ? `video.${extension}` : "video.mp4" : isGif ? "animation.gif" : "animation.mp4",
+    mime: claim.job.media_kind === "photo" ? "image/jpeg" : claim.job.media_kind === "video" ? videoMime : isGif ? "image/gif" : "video/mp4", bytes: uploadBytes } : undefined;
+  const reply = await telegramRequest(token, method, parameters, upload).catch(() => null);
   uploadBytes = null;
   transaction(db, () => {
     const now = clock();

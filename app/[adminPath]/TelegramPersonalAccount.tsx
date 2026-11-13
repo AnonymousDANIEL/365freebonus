@@ -140,7 +140,7 @@ export default function TelegramPersonalAccount({ request, signInPath }: Props) 
     onKeyDown={event => { if (event.key === "Enter" && event.target instanceof HTMLInputElement) event.preventDefault(); }}>
     <div>
       <h2 id="telegram-personal-account-title">个人账号来源频道</h2>
-      <p>连接你的 Telegram 个人账号，勾选已加入的频道。系统读取勾选频道的新图文，再由 @FreeBonus365Bot 发送。</p>
+      <p>连接你的 Telegram 个人账号，勾选已加入的频道。系统读取勾选频道的新图片、视频或 GIF 及其文案，再由 @FreeBonus365Bot 发送。</p>
       <span className={`cms-telegram-status${status?.connected ? " cms-telegram-enabled" : ""}`}>
         {status?.connected ? "个人账号已连接" : stage === "code" ? "等待验证码" : stage === "password" ? "等待两步验证" : "尚未连接"}
       </span>

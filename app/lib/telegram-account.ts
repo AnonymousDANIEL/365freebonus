@@ -35,6 +35,7 @@ const POLL_MS = 10_000;
 const RETRY_MS = 60_000;
 const MAX_PHOTO = 10 * 1024 * 1024;
 const MAX_ANIMATION = 20 * 1024 * 1024;
+const MAX_VIDEO = 50 * 1024 * 1024;
 const TEMP_ERROR = "暂时无法连接 Telegram 个人账号，请稍后再试。";
 const REAUTH_ERROR = "Telegram 个人账号连接已失效，请在后台重新连接。";
 const BUSY_ERROR = "正在处理 Telegram 账号连接，请稍后再试。";
@@ -436,13 +437,18 @@ function eligibleMedia(message: Api.Message, protectedChannel: boolean, botId: n
   if (protectedChannel || message.noforwards || !message.message?.trim() || message.message.length > 16_384 || ownButtons(message)) return null;
   if (message.viaBotId?.toString() === String(botId) || message.senderId?.toString() === String(botId)) return null;
   // Getter message.photo/document also exposes web-page preview media. Only
-  // actual attached photo/GIF posts qualify for this relay.
+  // actual attached photo/video/GIF posts qualify for this relay.
   const photo = message.media instanceof Api.MessageMediaPhoto ? message.media.photo : undefined;
   if (photo instanceof Api.Photo) return { mediaKind: "photo" as const, mediaId: `photo-${photo.id}`, max: MAX_PHOTO };
   const document = message.media instanceof Api.MessageMediaDocument ? message.media.document : undefined;
   if (document instanceof Api.Document && (document.mimeType === "image/gif" || document.attributes.some(attribute => attribute instanceof Api.DocumentAttributeAnimated))) {
     if (Number(document.size.toString()) > MAX_ANIMATION) return null;
     return { mediaKind: "animation" as const, mediaId: `animation-${document.id}`, max: MAX_ANIMATION };
+  }
+  if (document instanceof Api.Document && document.mimeType.length <= 100 && /^video\/[a-z0-9.+-]+$/i.test(document.mimeType)
+    && document.attributes.some(attribute => attribute instanceof Api.DocumentAttributeVideo && !attribute.roundMessage)) {
+    if (Number(document.size.toString()) > MAX_VIDEO) return null;
+    return { mediaKind: "video" as const, mediaId: `video-${document.id}`, max: MAX_VIDEO, mimeType: document.mimeType.toLowerCase() };
   }
   return null;
 }
@@ -513,7 +519,8 @@ export async function pollTelegramAccountOnce() {
               sourceDate: message.date, relayRevision: relay.relay_revision,
               mediaGroupId: message.groupedId?.toString() || "", caption: message.message, captionEntities: captionEntities(message.entities),
               mediaKind: media.mediaKind, bytes, hasSpoiler: (message.media instanceof Api.MessageMediaPhoto || message.media instanceof Api.MessageMediaDocument) && message.media.spoiler === true,
-              sourceMediaId: media.mediaId, accountGeneration: claim.row.generation });
+              sourceMediaId: media.mediaId, accountGeneration: claim.row.generation,
+              ...(media.mediaKind === "video" ? { mimeType: media.mimeType } : {}) });
             renew(db, claim);
             if (!consumed) break;
             last = message.id;

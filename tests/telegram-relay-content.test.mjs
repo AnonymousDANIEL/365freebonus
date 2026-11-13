@@ -63,11 +63,31 @@ test('captioned GIF animations use their existing Telegram animation file ID', (
   assert.equal(result.caption, 'An animated promotion.');
 });
 
-test('text-only, captionless images, videos and image documents are never turned into text forwards', () => {
+test('captioned videos keep media identity while replacing caption links and discarding source buttons', () => {
+  const result = prepare(message({ photo: undefined, video: { file_id: 'video_file', file_unique_id: 'video_unique', mime_type: 'video/mp4' },
+    caption: '🎬 Watch this https://old.example/offer', reply_markup: { inline_keyboard: [[{text:'Original link',url:'https://old.example/join'}]] } }));
+  assert.equal(result.mediaKind, 'video');
+  assert.equal(result.fileId, 'video_file');
+  assert.equal(result.fileUniqueId, 'video_unique');
+  assert.equal(result.caption, `🎬 Watch this ${RELAY_WEBSITE}`);
+  assert.equal('reply_markup' in result, false);
+  assert.equal(JSON.stringify(result).includes('old.example'), false);
+});
+
+test('GIF animation takes priority if Telegram also supplies a video representation', () => {
+  const result = prepare(message({ photo: undefined, animation: {file_id:'animation_file',file_unique_id:'animation_unique'},
+    video: {file_id:'video_file',file_unique_id:'video_unique'} }));
+  assert.equal(result.mediaKind, 'animation');
+  assert.equal(result.fileId, 'animation_file');
+});
+
+test('text-only, captionless media and image documents are never turned into text forwards', () => {
   for (const input of [
     message({ photo: undefined, text: 'A text announcement' }),
     message({ caption: undefined }), message({ caption: ' \n\t ' }),
-    message({ photo: undefined, video: { file_id: 'video', file_unique_id: 'video_unique' } }),
+    message({ photo: undefined, video: { file_id: 'video', file_unique_id: 'video_unique' }, caption: undefined }),
+    message({ photo: undefined, video: { file_id: 'video', file_unique_id: 'video_unique' }, caption: ' \n ' }),
+    message({ photo: undefined, animation: { file_id: 'gif', file_unique_id: 'gif_unique' }, caption: undefined }),
     message({ photo: undefined, document: { file_id: 'image_doc', file_unique_id: 'doc_unique', mime_type: 'image/png' } }),
     message({ paid_media: { star_count: 1 } }),
   ]) assert.equal(prepare(input), null);
@@ -207,4 +227,29 @@ test('relay long polling uses a separate allowed-update stream and keeps the Cha
   assert.deepEqual(calls[1].parameters, { offset: 23, timeout: 10, limit: 10, allowed_updates: ['chat_member', 'message', 'callback_query'] });
   assert.ok(calls[0].path.startsWith('/botfixture-promotion-token/'));
   assert.ok(calls[1].path.startsWith('/botfixture-chat-token/'));
+});
+
+test('video multipart transport keeps caption and fixed owner buttons on the uploaded video', async t => {
+  const calls = [];
+  t.mock.method(https, 'request', (options, callback) => {
+    const response = new EventEmitter(); response.setEncoding = () => response;
+    const outgoing = new EventEmitter();
+    outgoing.end = body => {
+      calls.push({ options, body: body.toString('utf8') });
+      callback(response);
+      queueMicrotask(() => { response.emit('data', JSON.stringify({ ok: true, result: { message_id: 25 } })); response.emit('end'); });
+    };
+    return outgoing;
+  });
+  const reply = await transport.telegramRequest('fixture-promotion-token', 'sendVideo', {
+    chat_id: context.targetChatId, caption: `Visit ${RELAY_WEBSITE}`, reply_markup: { inline_keyboard: relayKeyboard() },
+  }, { field: 'video', fileName: 'video.mp4', mime: 'video/mp4', bytes: Buffer.from('sample-video') });
+  assert.equal(reply.ok, true);
+  assert.equal(calls.length, 1);
+  assert.ok(calls[0].options.path.endsWith('/sendVideo'));
+  assert.match(calls[0].body, /name="video"; filename="video.mp4"/);
+  assert.match(calls[0].body, /Content-Type: video\/mp4/);
+  assert.ok(calls[0].body.includes('sample-video'));
+  assert.ok(calls[0].body.includes(JSON.stringify({ inline_keyboard: relayKeyboard() })));
+  assert.ok(calls[0].body.includes(`Visit ${RELAY_WEBSITE}`));
 });

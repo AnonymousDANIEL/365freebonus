@@ -27,7 +27,7 @@ exports.telegramRequest = async (token, method, parameters = {}, upload) => {
   if (method === 'getWebhookInfo') return {ok:true,result:{url:exports.webhook}};
   if (method === 'getChat') return exports.targetExists ? {ok:true,result:{id:-1001239999,type:exports.targetType,username:'join365freebonusgroup'}} : {ok:false,code:400,retryAfter:0};
   if (method === 'getChatMember') return {ok:true,result:exports.targetAllowed ? {status:'administrator',can_post_messages:true,can_send_messages:true,can_send_photos:true,can_send_other_messages:true} : {status:'left'}};
-  if (method === 'sendPhoto' || method === 'sendAnimation') {
+  if (method === 'sendPhoto' || method === 'sendAnimation' || method === 'sendVideo' || method === 'sendDocument') {
     if (exports.sends.length) { const next=exports.sends.shift(); return typeof next === 'function' ? await next(parameters) : next; }
     return {ok:true,result:{message_id:9000+exports.calls.length,date:Math.floor(exports.now/1000)}};
   }
@@ -43,7 +43,7 @@ exports.telegramRelayUpdates = async (token, offset) => {
 writeFileSync(path.join(fixture, 'telegram-relay-media.js'), `
 const {createHash}=require('node:crypto');
 exports.files = new Map(); exports.onDownload=null; exports.onIdentity=null;
-exports.relayMediaMaxBytes = kind => kind==='photo'?10*1024*1024:20*1024*1024;
+exports.relayMediaMaxBytes = kind => (kind==='photo'?10:kind==='video'?50:20)*1024*1024;
 exports.downloadBotRelayMedia = async (token,fileId,kind) => {
   if(exports.onDownload) return await exports.onDownload(token,fileId,kind);
   return exports.files.has(fileId)?exports.files.get(fileId):Buffer.from(fileId);
@@ -103,9 +103,13 @@ function photo(id=1,extra={}) {
     ...extra,
   }};
 }
+function video(id=1,extra={}) {
+  return photo(id,{photo:undefined,video:{file_id:`video-${id}`,file_unique_id:`video-unique-${id}`,
+    width:1280,height:720,duration:30,file_size:40*1024*1024},...extra});
+}
 function state(){return getSqlite().prepare("SELECT * FROM telegram_relay_state WHERE id='primary'").get();}
 function jobs(){return getSqlite().prepare('SELECT * FROM telegram_relay_outbox ORDER BY id').all();}
-function sends(){return telegram.calls.filter(call=>call.method==='sendPhoto'||call.method==='sendAnimation');}
+function sends(){return telegram.calls.filter(call=>call.method==='sendPhoto'||call.method==='sendAnimation'||call.method==='sendVideo'||call.method==='sendDocument');}
 function decrypt(value){assert.equal(value,ciphertext,'relay must decrypt the promotion bot, never ChatBot');return token;}
 async function poll(at=now,updates=[]) {
   telegram.now=at; telegram.updates.push(Array.isArray(updates)?ok(updates):updates);
@@ -133,7 +137,7 @@ test('photo relay verifies its target and uses the promotion bot independently o
   assert.equal(getSqlite().prepare("SELECT enabled FROM telegram_promotion_settings WHERE id='primary'").get().enabled,0);
 });
 
-test('only captioned group/channel photos or animations enter the queue, including received third-party bot posts',async()=>{
+test('only captioned attached media enter the queue, including received third-party bot posts',async()=>{
   configure();
   const inputs=[
     photo(1,{photo:undefined,text:'Text alone',caption:undefined}),
@@ -143,7 +147,7 @@ test('only captioned group/channel photos or animations enter the queue, includi
     photo(5,{has_protected_content:true}),
     photo(6,{chat:{id:target,type:'supergroup'}}),
     photo(7,{from:{id:botId,is_bot:true}}),
-    photo(8,{photo:undefined,video:{file_id:'video',file_unique_id:'video-unique'}}),
+    photo(8,{caption:undefined,photo:undefined,video:{file_id:'video',file_unique_id:'video-unique'}}),
     photo(9,{photo:undefined,animation:{file_id:'gif-9',file_unique_id:'gif-unique-9'},from:{id:77,is_bot:true}}),
     photo(10,{reply_markup:{inline_keyboard:relayKeyboard()}}),
   ];
@@ -403,7 +407,7 @@ test('v17 migration preserves notes, credentials and existing queues while activ
     ALTER TABLE telegram_promotion_settings DROP COLUMN relay_revision;
     PRAGMA user_version=17;`);
   closeDatabase();const migrated=getSqlite();
-  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,19);
+  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,20);
   const current=migrated.prepare("SELECT * FROM telegram_promotion_settings WHERE id='primary'").get();
   assert.equal(current.relay_enabled,1);assert.equal(current.relay_started_at,now);assert.ok(current.relay_revision);
   assert.equal(current.relay_chat_id,'@join365freebonusgroup');
@@ -445,6 +449,50 @@ test('captioned source channel_post updates use the same fixed links and destina
   assert.equal(sends().length,1);assert.equal(sends()[0].parameters.chat_id,target);
   assert.deepEqual(sends()[0].parameters.reply_markup,{inline_keyboard:relayKeyboard()});
   assert.equal(sends()[0].parameters.caption.includes('source.example'),false);
+});
+
+test('captioned bot videos use sendVideo with the existing file ID without requiring a download',async()=>{
+  configure();
+  media.onDownload=async()=>{throw new Error('Bot video forwarding must not require getFile or a media download');};
+  const input=video(1,{caption:'Video offer https://original.example/register',
+    caption_entities:[{type:'url',offset:12,length:33}]});
+  await poll(now,[input]);
+  assert.equal(jobs().length,1);assert.equal(jobs()[0].media_kind,'video');
+  await deliver(now);
+  assert.equal(sends().length,1);const call=sends()[0];
+  assert.equal(call.method,'sendVideo');assert.equal(call.parameters.video,'video-1');
+  assert.equal(call.parameters.supports_streaming,true);
+  assert.equal(call.upload,undefined);assert.equal(call.parameters.caption,'Video offer https://365freebonus.com/');
+  assert.deepEqual(call.parameters.reply_markup,{inline_keyboard:relayKeyboard()});
+  assert.equal(call.parameters.parse_mode,undefined);assert.equal(jobs()[0].status,'sent');
+});
+
+test('captioned videos in source channel posts retain the same owner destinations',async()=>{
+  configure();telegram.targetType='channel';
+  const input=video(3,{chat:{id:source,type:'channel'},caption:'Watch https://other.example/offer'});
+  await poll(now,[{update_id:3,channel_post:input.message}]);await deliver(now);
+  assert.equal(sends().length,1);assert.equal(sends()[0].method,'sendVideo');
+  assert.equal(sends()[0].parameters.chat_id,target);
+  assert.equal(sends()[0].parameters.caption,'Watch https://365freebonus.com/');
+  assert.deepEqual(sends()[0].parameters.reply_markup,{inline_keyboard:relayKeyboard()});
+});
+
+test('text-only and captionless photo, video and animation posts are not forwarded',async()=>{
+  configure();
+  await poll(now,[photo(1,{caption:undefined}),video(2,{caption:undefined}),
+    photo(3,{photo:undefined,animation:{file_id:'gif-3',file_unique_id:'gif-unique-3'},caption:'  '}),
+    photo(4,{photo:undefined,caption:undefined,text:'Only words https://other.example/signup'})]);
+  await deliver(now);
+  assert.equal(jobs().length,0);assert.equal(sends().length,0);
+  assert.equal(telegram.calls.some(call=>call.method==='sendMessage'),false);
+});
+
+test('same bot video identity is not resent with another caption',async()=>{
+  configure();const first=video(1);
+  await poll(now,[first]);await deliver(now);
+  await poll(now+4000,[video(2,{caption:'A changed caption',video:first.message.video})]);
+  await deliver(now+4000);
+  assert.equal(jobs().length,1);assert.equal(sends().length,1);
 });
 
 test('identical file identity is not resent after caption changes, a new day, or settings generation change',async()=>{
@@ -494,6 +542,56 @@ test('personal-account animations are uploaded as animation bytes instead of per
   assert.equal(sends()[0].method,'sendAnimation');assert.equal(sends()[0].parameters.animation,undefined);
   assert.equal(sends()[0].upload.field,'animation');assert.deepEqual(sends()[0].upload.bytes,input.bytes);
   assert.equal(jobs()[0].media_bytes,null);
+});
+
+test('personal-account videos upload MP4 bytes with rewritten links and the fixed owner buttons',async t=>{
+  await configureAccount(t);
+  const input=accountPhoto({mediaKind:'video',bytes:Buffer.from('personal-mp4-video'),sourceMediaId:'personal-video-one',
+    caption:'Watch this https://original.example/register',hasSpoiler:true});
+  assert.equal(await relay.enqueuePersonalRelayMedia(input),true);
+  assert.equal(jobs()[0].media_kind,'video');assert.equal(jobs()[0].origin,'account');
+  await deliver(now);
+  assert.equal(sends().length,1);const call=sends()[0];
+  assert.equal(call.method,'sendVideo');assert.equal(call.parameters.video,undefined);
+  assert.equal(call.parameters.supports_streaming,true);
+  assert.equal(call.parameters.caption,'Watch this https://365freebonus.com/');
+  assert.deepEqual(call.parameters.reply_markup,{inline_keyboard:relayKeyboard()});
+  assert.equal(call.parameters.has_spoiler,true);assert.equal(call.upload.field,'video');
+  assert.equal(call.upload.fileName,'video.mp4');assert.equal(call.upload.mime,'video/mp4');
+  assert.deepEqual(call.upload.bytes,input.bytes);assert.equal(jobs()[0].status,'sent');
+  assert.equal(jobs()[0].media_bytes,null);
+});
+
+test('personal-account videos above the upload size limit are consumed without queueing or sending',async t=>{
+  await configureAccount(t);
+  assert.equal(await relay.enqueuePersonalRelayMedia(accountPhoto({mediaKind:'video',
+    bytes:Buffer.alloc(50*1024*1024+1),sourceMediaId:'oversized-video'})),true);
+  assert.equal(jobs().length,0);await deliver(now);assert.equal(sends().length,0);
+});
+
+test('personal non-MP4 videos retain their media through a document upload with the same caption and buttons',async t=>{
+  await configureAccount(t);
+  const input=accountPhoto({mediaKind:'video',mimeType:'video/webm',sourceMediaId:'personal-webm-one',
+    bytes:Buffer.from('personal-webm-video'),caption:'Video details https://other.example/video'});
+  assert.equal(await relay.enqueuePersonalRelayMedia(input),true);
+  assert.equal(jobs()[0].media_kind,'video');assert.equal(jobs()[0].mime_type,'video/webm');
+  await deliver(now);
+  assert.equal(sends().length,1);const call=sends()[0];
+  assert.equal(call.method,'sendDocument');assert.equal(call.upload.field,'document');
+  assert.equal(call.upload.mime,'video/webm');assert.match(call.upload.fileName,/\.webm$/);
+  assert.equal(call.parameters.caption,'Video details https://365freebonus.com/');
+  assert.deepEqual(call.parameters.reply_markup,{inline_keyboard:relayKeyboard()});
+  assert.deepEqual(call.upload.bytes,input.bytes);assert.equal(jobs()[0].status,'sent');
+  assert.equal(jobs()[0].media_bytes,null);
+  assert.equal(telegram.calls.some(call=>call.method==='sendMessage'),false);
+});
+
+test('a definitively rejected video is never replaced with a text-only forward',async()=>{
+  configure();await poll(now,[video(1)]);
+  telegram.sends.push({ok:false,code:400,retryAfter:0});await deliver(now);
+  assert.equal(sends().length,1);assert.equal(sends()[0].method,'sendVideo');
+  assert.equal(jobs()[0].status,'failed');
+  assert.equal(telegram.calls.some(call=>call.method==='sendMessage'),false);
 });
 
 test('personal-account enqueue rejects unselected, departed, stale-account and stale-relay sources',async t=>{
@@ -638,12 +736,12 @@ test('v18 upgrade preserves settings and PIN while seeding permanent image ident
   const stateBefore={...db.prepare("SELECT * FROM telegram_relay_state WHERE id='primary'").get()};
   const sentId=jobs()[0].id;
   db.exec('DROP TABLE telegram_relay_media_keys');
-  for(const column of ['origin','account_generation','media_bytes','content_hash','visual_hash','media_prepared']) {
+  for(const column of ['origin','account_generation','media_bytes','content_hash','visual_hash','media_prepared','mime_type']) {
     db.exec(`ALTER TABLE telegram_relay_outbox DROP COLUMN ${column}`);
   }
   db.exec('PRAGMA user_version=18');closeDatabase();
   const migrated=getSqlite();
-  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,19);
+  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,20);
   assert.deepEqual({...migrated.prepare("SELECT * FROM telegram_promotion_settings WHERE id='primary'").get()},settingsBefore);
   assert.deepEqual({...migrated.prepare("SELECT * FROM notes_vault_settings WHERE id='primary'").get()},vaultBefore);
   assert.deepEqual({...migrated.prepare("SELECT * FROM telegram_relay_state WHERE id='primary'").get()},stateBefore);
@@ -651,6 +749,56 @@ test('v18 upgrade preserves settings and PIN while seeding permanent image ident
   assert.deepEqual(jobs().map(job=>job.status),['sent','cancelled']);
   await poll(now+4000,[photo(3,{caption:'New caption from another group',photo:original.message.photo,chat:{id:source-2,type:'supergroup'}})]);
   await deliver(now+4000);assert.equal(sends().length,1);assert.equal(jobs().length,2);
+});
+
+test('v19 upgrade preserves queued media bytes, permanent identities, settings and PIN while permitting videos',async t=>{
+  await configureAccount(t);
+  await relay.enqueuePersonalRelayMedia(accountPhoto());await deliver(now);
+  await relay.enqueuePersonalRelayMedia(accountPhoto({sourceMessageId:2002,mediaGroupId:'pending-album',
+    sourceMediaId:'pending-personal-photo',bytes:Buffer.from('pending-personal-photo')}));
+  await poll(now+1000,[photo(1)]);
+  const db=getSqlite();
+  db.prepare("INSERT INTO notes_vault_settings(id,pin_hash,revision,created_at,updated_at) VALUES('primary','retained-pin-hash','retained-vault',21,22)").run();
+  const rowsBefore=jobs().map(row=>({...row}));
+  const keysBefore=db.prepare('SELECT * FROM telegram_relay_media_keys ORDER BY media_key').all().map(row=>({...row}));
+  const settingsBefore={...db.prepare("SELECT * FROM telegram_promotion_settings WHERE id='primary'").get()};
+  const stateBefore={...db.prepare("SELECT * FROM telegram_relay_state WHERE id='primary'").get()};
+  const vaultBefore={...db.prepare("SELECT * FROM notes_vault_settings WHERE id='primary'").get()};
+  const columns=db.prepare('PRAGMA table_info(telegram_relay_outbox)').all().map(row=>row.name).filter(name=>name!=='mime_type');
+  db.exec(`BEGIN IMMEDIATE;
+    CREATE TABLE telegram_relay_outbox_v19 (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,source_chat_id INTEGER NOT NULL,source_message_id INTEGER NOT NULL,
+      media_group_id TEXT NOT NULL DEFAULT '',fingerprint TEXT NOT NULL,queued_at INTEGER NOT NULL,revision TEXT NOT NULL,
+      media_kind TEXT NOT NULL CHECK(media_kind IN ('photo','animation')),file_id TEXT NOT NULL,file_unique_id TEXT NOT NULL,
+      caption TEXT NOT NULL,has_spoiler INTEGER NOT NULL DEFAULT 0 CHECK(has_spoiler IN (0,1)),
+      status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','sending','sent','failed','unknown','cancelled')),
+      attempts INTEGER NOT NULL DEFAULT 0,next_attempt_at INTEGER NOT NULL DEFAULT 0,lease_id TEXT NOT NULL DEFAULT '',
+      lease_until INTEGER NOT NULL DEFAULT 0,last_error TEXT NOT NULL DEFAULT '',sent_at INTEGER,message_id INTEGER,
+      origin TEXT NOT NULL DEFAULT 'bot',account_generation TEXT NOT NULL DEFAULT '',media_bytes BLOB,
+      content_hash TEXT NOT NULL DEFAULT '',visual_hash TEXT NOT NULL DEFAULT '',media_prepared INTEGER NOT NULL DEFAULT 0,
+      UNIQUE(source_chat_id,source_message_id));
+    INSERT INTO telegram_relay_outbox_v19 (${columns.join(',')}) SELECT ${columns.join(',')} FROM telegram_relay_outbox;
+    DROP TABLE telegram_relay_outbox;
+    ALTER TABLE telegram_relay_outbox_v19 RENAME TO telegram_relay_outbox;
+    CREATE UNIQUE INDEX telegram_relay_album ON telegram_relay_outbox(source_chat_id,media_group_id) WHERE media_group_id<>'';
+    CREATE INDEX telegram_relay_due ON telegram_relay_outbox(status,next_attempt_at);
+    CREATE INDEX telegram_relay_fingerprint ON telegram_relay_outbox(fingerprint,queued_at);
+    PRAGMA user_version=19;COMMIT;`);
+  assert.throws(()=>db.prepare(`INSERT INTO telegram_relay_outbox(source_chat_id,source_message_id,fingerprint,
+    queued_at,revision,media_kind,file_id,file_unique_id,caption) VALUES(? ,9999,'before-video',?,'relay-revision','video','v','vu','Video')`).run(source,now),/CHECK/);
+  closeDatabase();const migrated=getSqlite();
+  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,20);
+  assert.deepEqual(jobs().map(row=>({...row})),rowsBefore);
+  assert.deepEqual(migrated.prepare('SELECT * FROM telegram_relay_media_keys ORDER BY media_key').all().map(row=>({...row})),keysBefore);
+  assert.deepEqual({...migrated.prepare("SELECT * FROM telegram_promotion_settings WHERE id='primary'").get()},settingsBefore);
+  assert.deepEqual({...migrated.prepare("SELECT * FROM telegram_relay_state WHERE id='primary'").get()},stateBefore);
+  assert.deepEqual({...migrated.prepare("SELECT * FROM notes_vault_settings WHERE id='primary'").get()},vaultBefore);
+  const inserted=migrated.prepare(`INSERT INTO telegram_relay_outbox(source_chat_id,source_message_id,fingerprint,
+    queued_at,revision,media_kind,file_id,file_unique_id,caption) VALUES(? ,9999,'after-video',?,'relay-revision','video','v','vu','Video')`).run(source,now);
+  assert.ok(Number(inserted.lastInsertRowid)>Math.max(...rowsBefore.map(row=>row.id)));
+  assert.equal(jobs().at(-1).media_kind,'video');
+  assert.throws(()=>migrated.prepare(`INSERT INTO telegram_relay_outbox(source_chat_id,source_message_id,media_group_id,
+    fingerprint,queued_at,revision,media_kind,file_id,file_unique_id,caption) VALUES(? ,9998,'pending-album','album-copy',?,'relay-revision','photo','p','pu','Photo')`).run(source,now),/UNIQUE/);
 });
 
 test('a full bot queue retains the source update until capacity is available and then queues it exactly once',async()=>{

@@ -23,11 +23,11 @@ exports.StringSession=class {constructor(value){this.value=value||'fixture-sessi
 writeFileSync(path.join(fixture, 'node_modules/teleproto/index.js'), `
 class Box {constructor(value={}){Object.assign(this,value);this.className=this.constructor.name;}}
 class User extends Box {} class Channel extends Box {} class Photo extends Box {} class Document extends Box {}
-class MessageMediaPhoto extends Box {} class MessageMediaDocument extends Box {} class DocumentAttributeAnimated extends Box {}
+class MessageMediaPhoto extends Box {} class MessageMediaDocument extends Box {} class DocumentAttributeAnimated extends Box {} class DocumentAttributeVideo extends Box {}
 class Message extends Box {get photo(){return this.media?.photo;}get document(){return this.media?.document;}}
 class InputPeerChannel extends Box {} class ReplyInlineMarkup extends Box {} class InlineButtonTypeUrl extends Box {}
 class Authorization extends Box {} class SignIn extends Box {} class LogOut extends Box {}
-exports.Api={User,Channel,Photo,Document,MessageMediaPhoto,MessageMediaDocument,DocumentAttributeAnimated,Message,InputPeerChannel,ReplyInlineMarkup,InlineButtonTypeUrl,auth:{Authorization,SignIn,LogOut}};
+exports.Api={User,Channel,Photo,Document,MessageMediaPhoto,MessageMediaDocument,DocumentAttributeAnimated,DocumentAttributeVideo,Message,InputPeerChannel,ReplyInlineMarkup,InlineButtonTypeUrl,auth:{Authorization,SignIn,LogOut}};
 exports.utils={getPeerId:entity=>'-100'+entity.id};
 exports.Logger=class {setLevel(){};};
 exports.state={};
@@ -74,6 +74,11 @@ function channel(id=1001,{broadcast=true,protectedChannel=false,latest=40}={}) {
 function photo(id=41,extra={}) {
   return new Api.Message({id,date:Math.floor(Date.now()/1000),message:'Caption https://example.test',
     media:new Api.MessageMediaPhoto({photo:new Api.Photo({id:'media-'+id})}),...extra});
+}
+function video(id=41,{caption='Video caption https://source.example',mimeType='video/mp4',size=1024,roundMessage=false,animated=false,videoAttribute=true,...extra}={}) {
+  return new Api.Message({id,date:Math.floor(Date.now()/1000),message:caption,
+    media:new Api.MessageMediaDocument({document:new Api.Document({id:'video-'+id,mimeType,size,
+      attributes:[...(videoAttribute?[new Api.DocumentAttributeVideo({roundMessage})]:[]),...(animated?[new Api.DocumentAttributeAnimated()]:[])]})}),...extra});
 }
 async function sendCode() { return await account.handleAccountAction({action:'sendCode',apiId:123456,apiHash,phone:'+60123456789'}); }
 async function login() {
@@ -246,6 +251,60 @@ test('empty media download is retried without consuming source cursor',async()=>
   assert.equal(cursor(),40);
   assert.equal(telegram.state.queue.length,0);
   assert.ok(stored().next_attempt_at>Date.now());
+});
+
+test('captioned attached MP4 video is downloaded and enqueued as video with its caption',async()=>{
+  await login();await select();ready();
+  telegram.state.messages=[video()];telegram.state.media=Buffer.from('fixture-mp4-video');
+  await account.pollTelegramAccountOnce();
+  assert.equal(cursor(),41);
+  assert.equal(telegram.state.queue.length,1);
+  const queued=telegram.state.queue[0];
+  assert.equal(queued.mediaKind,'video');
+  assert.equal(queued.mimeType,'video/mp4');
+  assert.equal(queued.caption,'Video caption https://source.example');
+  assert.equal(queued.sourceMediaId,'video-video-41');
+  assert.deepEqual(queued.bytes,telegram.state.media);
+});
+
+test('video captions, protection and actual attachments are required; previews and round video notes are skipped',async()=>{
+  await login();await select();ready();
+  const attached=video().media.document;
+  telegram.state.messages=[video(41,{caption:' '}),video(42,{noforwards:true}),video(43,{roundMessage:true}),
+    video(44,{media:{className:'MessageMediaWebPage',document:attached}}),
+    video(45,{media:{className:'MessageMediaPaidMedia',document:attached}}),video(46,{mimeType:'image/png',videoAttribute:false}),
+    video(47,{videoAttribute:false}),video(48,{mimeType:'video/mp4;bad'}),video(49,{mimeType:'video/'+'a'.repeat(100)})];
+  await account.pollTelegramAccountOnce();
+  assert.equal(cursor(),49);
+  assert.equal(telegram.state.calls.filter(call=>call.method==='download').length,0);
+  assert.equal(telegram.state.queue.length,0);
+});
+
+test('attached MOV, WebM and MKV videos keep their MIME type for document-compatible forwarding',async()=>{
+  await login();await select();ready();
+  telegram.state.messages=[video(41,{mimeType:'video/quicktime'}),video(42,{mimeType:'video/webm'}),video(43,{mimeType:'video/x-matroska'})];
+  await account.pollTelegramAccountOnce();
+  assert.equal(cursor(),43);
+  assert.deepEqual(telegram.state.queue.map(item=>({kind:item.mediaKind,mime:item.mimeType})),[
+    {kind:'video',mime:'video/quicktime'},{kind:'video',mime:'video/webm'},{kind:'video',mime:'video/x-matroska'},
+  ]);
+});
+
+test('personal videos above 50 MiB are skipped before download while larger-than-20-MiB videos remain eligible',async()=>{
+  await login();await select();ready();
+  telegram.state.messages=[video(41,{size:50*1024*1024+1}),video(42,{size:30*1024*1024})];
+  await account.pollTelegramAccountOnce();
+  assert.equal(cursor(),42);
+  assert.deepEqual(telegram.state.calls.filter(call=>call.method==='download').map(call=>call.id),[42]);
+  assert.equal(telegram.state.queue[0].mediaKind,'video');
+});
+
+test('animated MP4 documents remain GIF animations instead of ordinary video',async()=>{
+  await login();await select();ready();
+  telegram.state.messages=[video(41,{animated:true})];
+  await account.pollTelegramAccountOnce();
+  assert.equal(telegram.state.queue.length,1);
+  assert.equal(telegram.state.queue[0].mediaKind,'animation');
 });
 
 test('protected channel or message advances cursor without downloading or queuing',async()=>{

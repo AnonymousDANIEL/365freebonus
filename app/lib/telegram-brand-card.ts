@@ -17,7 +17,7 @@ export type TelegramBrandCard = {
   imageUrl: string;
 };
 type PromotionMedia = TelegramUpload | { field: "photo" | "animation"; url: string };
-const mediaMethods = { photo: "sendPhoto", animation: "sendAnimation", document: "sendDocument" } as const;
+const mediaMethods = { photo: "sendPhoto", animation: "sendAnimation", video: "sendVideo", document: "sendDocument" } as const;
 type BrandCardOptions = {
   template?: string;
   parameters?: Record<string, unknown>;

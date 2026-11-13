@@ -85,6 +85,17 @@ test('animation identity hashes the whole file instead of only its first frame',
   await assert.rejects(media.relayMediaIdentity(Buffer.alloc(0), 'photo'), RangeError);
 });
 
+test('video identity hashes the full file and has a separate upload size cap', async () => {
+  const first = await media.relayMediaIdentity(Buffer.from('video first and second frames'), 'video');
+  const second = await media.relayMediaIdentity(Buffer.from('video first and third frames'), 'video');
+  assert.equal(first.visualHash, '');
+  assert.equal(second.visualHash, '');
+  assert.notEqual(first.contentHash, second.contentHash);
+  assert.equal(media.relayMediaMaxBytes('video'), 50 * 1024 * 1024);
+  assert.equal(media.relayMediaMaxBytes('photo'), 10 * 1024 * 1024);
+  assert.equal(media.relayMediaMaxBytes('animation'), 20 * 1024 * 1024);
+});
+
 test('Bot media download fixes the Telegram host and returns only bounded successful bytes', async t => {
   telegram.metadata = { ok: true, result: { file_path: 'photos/file_12.jpg', file_size: 6 } };
   const calls = fakeDownload(t, { body: [Buffer.from('sam'), Buffer.from('ple')], headers: { 'content-length': '6' } });
@@ -112,7 +123,17 @@ test('oversized Bot metadata is rejected before requesting file bytes', async t 
   assert.equal(await media.downloadBotRelayMedia(token, 'file-id', 'photo'), null);
   telegram.metadata = { ok: true, result: { file_path: 'animations/file.mp4', file_size: media.RELAY_ANIMATION_MAX_BYTES + 1 } };
   assert.equal(await media.downloadBotRelayMedia(token, 'file-id', 'animation'), null);
+  telegram.metadata = { ok: true, result: { file_path: 'videos/file.mp4', file_size: 20 * 1024 * 1024 + 1 } };
+  assert.equal(await media.downloadBotRelayMedia(token, 'file-id', 'video'), null, 'video uploads may be larger but public Bot downloads remain capped');
   assert.equal(calls.length, 0);
+});
+
+test('a bounded Bot video can be downloaded for content identity without using a thumbnail', async t => {
+  telegram.metadata = { ok: true, result: { file_path: 'videos/file_12.mp4', file_size: 6 } };
+  fakeDownload(t, { body: [Buffer.from('sample')] });
+  const bytes = await media.downloadBotRelayMedia(token, 'video-id', 'video');
+  assert.equal(bytes.toString(), 'sample');
+  assert.equal((await media.relayMediaIdentity(bytes, 'video')).visualHash, '');
 });
 
 test('streamed data cannot exceed the size cap when metadata omits its size', async t => {

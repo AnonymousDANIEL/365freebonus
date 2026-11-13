@@ -448,7 +448,7 @@ test('v16 migration preserves existing data and opt-outs while enabling only fut
   const beforeNote = { ...db.prepare('SELECT * FROM secure_notes').get() };
   downgradeFixtureToV16();
   const migrated = getSqlite();
-  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version, 19);
+  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version, 20);
   const settings = migrated.prepare("SELECT * FROM telegram_promotion_settings WHERE id='primary'").get();
   assert.equal(settings.private_updates_enabled, 1);
   assert.equal(settings.private_updates_started_at, now);

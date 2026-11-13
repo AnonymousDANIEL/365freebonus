@@ -1,8 +1,8 @@
 import { randomBytes } from "node:crypto";
 import { request } from "node:https";
 
-type TelegramMethod = "getMe" | "getChat" | "getChatMember" | "getWebhookInfo" | "getFile" | "sendMessage" | "sendPhoto" | "sendAnimation" | "sendDocument";
-export type TelegramUpload = { field: "photo" | "animation" | "document"; fileName: string; mime: string; bytes: Buffer };
+type TelegramMethod = "getMe" | "getChat" | "getChatMember" | "getWebhookInfo" | "getFile" | "sendMessage" | "sendPhoto" | "sendAnimation" | "sendVideo" | "sendDocument";
+export type TelegramUpload = { field: "photo" | "animation" | "video" | "document"; fileName: string; mime: string; bytes: Buffer };
 type TelegramReply<Result> =
   | { ok: true; result: Result }
   | { ok: false; code: number; retryAfter: number }
@@ -67,7 +67,7 @@ function requestTelegram<Result>(token: string, method: TelegramMethod | "getUpd
       method: "POST",
       path: `/bot${token}/${method}`,
       headers: { "Content-Type": contentType, "Content-Length": Buffer.byteLength(body) },
-      signal: AbortSignal.timeout(upload || method === "getUpdates" ? 20_000 : 8_000),
+      signal: AbortSignal.timeout(upload && (upload.field === "video" || upload.mime.startsWith("video/")) ? 40_000 : upload || method === "getUpdates" ? 20_000 : 8_000),
     }, response => {
       let content = "";
       response.setEncoding("utf8");

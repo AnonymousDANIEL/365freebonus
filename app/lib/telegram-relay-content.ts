@@ -10,7 +10,7 @@ export type RelayMessage = {
   sourceChatId: number;
   sourceMessageId: number;
   mediaGroupId: string;
-  mediaKind: "photo" | "animation";
+  mediaKind: "photo" | "animation" | "video";
   fileId: string;
   fileUniqueId: string;
   caption: string;
@@ -140,9 +140,12 @@ export function prepareRelayMessage(
     photos.sort((a, b) => score(b) - score(a) || Number(b.file_size || 0) - Number(a.file_size || 0));
     media = photos[0];
     mediaKind = "photo";
-  } else {
+  } else if (record(message.animation)) {
     media = record(message.animation) || undefined;
     mediaKind = "animation";
+  } else {
+    media = record(message.video) || undefined;
+    mediaKind = "video";
   }
   if (!media || !opaqueId(media.file_id, 2048) || !opaqueId(media.file_unique_id, 256)) return null;
   const mediaGroupId = message.media_group_id == null ? "" : message.media_group_id;

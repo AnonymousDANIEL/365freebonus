@@ -3,12 +3,14 @@ import { request } from "node:https";
 import sharp from "sharp";
 import { telegramRequest } from "./telegram-bot";
 
-export type RelayMediaKind = "photo" | "animation";
+export type RelayMediaKind = "photo" | "animation" | "video";
 export const RELAY_PHOTO_MAX_BYTES = 10 * 1024 * 1024;
 export const RELAY_ANIMATION_MAX_BYTES = 20 * 1024 * 1024;
+export const RELAY_VIDEO_MAX_BYTES = 50 * 1024 * 1024;
+const BOT_FILE_MAX_BYTES = 20 * 1024 * 1024;
 
 export function relayMediaMaxBytes(kind: RelayMediaKind): number {
-  return kind === "photo" ? RELAY_PHOTO_MAX_BYTES : RELAY_ANIMATION_MAX_BYTES;
+  return kind === "photo" ? RELAY_PHOTO_MAX_BYTES : kind === "video" ? RELAY_VIDEO_MAX_BYTES : RELAY_ANIMATION_MAX_BYTES;
 }
 
 /** Deliberately conservative: similar advertisements must not suppress one another. */
@@ -74,7 +76,8 @@ export async function downloadBotRelayMedia(token: string, fileId: string, kind:
     || !/^[A-Za-z0-9_-]{1,2048}$/.test(fileId)) return null;
   const metadata = await telegramRequest(token, "getFile", { file_id: fileId }).catch(() => null);
   if (!metadata?.ok || !safeFilePath(metadata.result.file_path)) return null;
-  const maxBytes = relayMediaMaxBytes(kind);
+  // The public Bot API download limit is lower than its video upload limit.
+  const maxBytes = Math.min(BOT_FILE_MAX_BYTES, relayMediaMaxBytes(kind));
   const declaredSize = metadata.result.file_size;
   if (declaredSize !== undefined && (typeof declaredSize !== "number" || !Number.isSafeInteger(declaredSize) || declaredSize <= 0 || declaredSize > maxBytes)) return null;
   return downloadFile(token, metadata.result.file_path, maxBytes);

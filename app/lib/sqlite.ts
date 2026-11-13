@@ -12,7 +12,7 @@ export function getDataDirectory(): string {
 function migrate(db: DatabaseSync) {
   if (migrated.has(db)) return;
   const readVersion = () => (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
-  if (readVersion() < 19) {
+  if (readVersion() < 20) {
     db.exec("BEGIN IMMEDIATE");
     try {
       // Read again inside the write lock, so concurrent process starts cannot
@@ -334,6 +334,45 @@ function migrate(db: DatabaseSync) {
                 AND k.outbox_id<>telegram_relay_outbox.id);
           PRAGMA user_version = 19;
         `);
+      }
+      if (version < 20) {
+        const oldSequence = (db.prepare("SELECT seq FROM sqlite_sequence WHERE name='telegram_relay_outbox'").get() as { seq: number } | undefined)?.seq || 0;
+        // Widen only the media-kind constraint. Preserve every job ID, lease,
+        // binary payload and permanent identity key while adding video MIME.
+        db.exec(`
+          CREATE TABLE telegram_relay_outbox_v20 (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_chat_id INTEGER NOT NULL, source_message_id INTEGER NOT NULL,
+            media_group_id TEXT NOT NULL DEFAULT '', fingerprint TEXT NOT NULL,
+            queued_at INTEGER NOT NULL, revision TEXT NOT NULL,
+            media_kind TEXT NOT NULL CHECK (media_kind IN ('photo','animation','video')),
+            file_id TEXT NOT NULL, file_unique_id TEXT NOT NULL, caption TEXT NOT NULL,
+            has_spoiler INTEGER NOT NULL DEFAULT 0 CHECK (has_spoiler IN (0,1)),
+            status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','sending','sent','failed','unknown','cancelled')),
+            attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at INTEGER NOT NULL DEFAULT 0,
+            lease_id TEXT NOT NULL DEFAULT '', lease_until INTEGER NOT NULL DEFAULT 0,
+            last_error TEXT NOT NULL DEFAULT '', sent_at INTEGER, message_id INTEGER,
+            origin TEXT NOT NULL DEFAULT 'bot', account_generation TEXT NOT NULL DEFAULT '',
+            media_bytes BLOB, content_hash TEXT NOT NULL DEFAULT '', visual_hash TEXT NOT NULL DEFAULT '',
+            media_prepared INTEGER NOT NULL DEFAULT 0, mime_type TEXT NOT NULL DEFAULT '',
+            UNIQUE(source_chat_id,source_message_id)
+          );
+          INSERT INTO telegram_relay_outbox_v20
+            (id,source_chat_id,source_message_id,media_group_id,fingerprint,queued_at,revision,media_kind,file_id,file_unique_id,
+             caption,has_spoiler,status,attempts,next_attempt_at,lease_id,lease_until,last_error,sent_at,message_id,
+             origin,account_generation,media_bytes,content_hash,visual_hash,media_prepared)
+            SELECT id,source_chat_id,source_message_id,media_group_id,fingerprint,queued_at,revision,media_kind,file_id,file_unique_id,
+             caption,has_spoiler,status,attempts,next_attempt_at,lease_id,lease_until,last_error,sent_at,message_id,
+             origin,account_generation,media_bytes,content_hash,visual_hash,media_prepared FROM telegram_relay_outbox;
+          DROP TABLE telegram_relay_outbox;
+          ALTER TABLE telegram_relay_outbox_v20 RENAME TO telegram_relay_outbox;
+          CREATE UNIQUE INDEX telegram_relay_album ON telegram_relay_outbox(source_chat_id,media_group_id) WHERE media_group_id<>'';
+          CREATE INDEX telegram_relay_due ON telegram_relay_outbox(status,next_attempt_at);
+          CREATE INDEX telegram_relay_fingerprint ON telegram_relay_outbox(fingerprint,queued_at);
+          PRAGMA user_version=20;
+        `);
+        db.prepare("UPDATE sqlite_sequence SET seq=MAX(seq,?) WHERE name='telegram_relay_outbox'").run(oldSequence);
+        db.prepare("INSERT INTO sqlite_sequence(name,seq) SELECT 'telegram_relay_outbox',? WHERE NOT EXISTS(SELECT 1 FROM sqlite_sequence WHERE name='telegram_relay_outbox')").run(oldSequence);
       }
       db.exec("COMMIT");
     } catch (error) { db.exec("ROLLBACK"); throw error; }

@@ -420,7 +420,7 @@ export default function TelegramGroupSettings({ request, signInPath }: AdminProp
         <section className="cms-settings-panel" aria-labelledby="telegram-relay-title">
           <div>
             <h2 id="telegram-relay-title">图片自动转发</h2>
-            <p>将来源群、频道的照片或 GIF＋文案整理后，由 @FreeBonus365Bot 发送到你的群或频道。个人账号来源在下方单独选择。</p>
+            <p>将来源群、频道的照片、视频或 GIF＋文案整理后，由 @FreeBonus365Bot 发送到你的群或频道。个人账号来源在下方单独选择。</p>
             <span className={`cms-telegram-status${config.relay.enabled && config.relay.ready ? " cms-telegram-enabled" : ""}`}>{config.relay.enabled ? config.relay.ready ? "目标已连接" : "等待连接" : "已停用"}</span>
           </div>
           <div className="cms-settings-fields">
@@ -432,9 +432,9 @@ export default function TelegramGroupSettings({ request, signInPath }: AdminProp
               <input type="text" autoComplete="off" spellCheck={false} maxLength={80} required={draft.relay.enabled}
                 value={draft.relay.chatId} placeholder="https://t.me/join365freebonusgroup"
                 onChange={event => setDraft({ ...draft, relay: { ...draft.relay, chatId: event.target.value } })} />
-              <small>将 @FreeBonus365Bot 加入目标群并允许发消息；频道需要管理员发布权限。此目标独立于上方品牌通知目标。</small>
+              <small>将 @FreeBonus365Bot 加入目标群并允许发送照片、视频和 GIF；频道需要管理员发布权限。此目标独立于上方品牌通知目标。</small>
             </label>
-            <small>仅处理开启后收到的照片／GIF＋文案；纯文字、没有文案的图片及禁止转发的内容会跳过。原文链接和原按钮会换成以下固定入口：</small>
+            <small>仅处理开启后收到的照片／视频／GIF＋文案；纯文字、没有文案的媒体及禁止转发的内容会跳过。原文链接和原按钮会换成以下固定入口：</small>
             <small>🌐 Visit website — https://365freebonus.com/</small>
             <small>🎁 365 Free Bonus Official — https://t.me/join365freebonus</small>
             <small>💬 NEED HELP? — https://t.me/FreeBonus365ChatBot</small>
