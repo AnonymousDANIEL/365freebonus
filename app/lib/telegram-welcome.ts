@@ -37,6 +37,7 @@ type ChatReply = {
   brandId?: string;
   followupRevision?: string;
   keyboard?: InlineButton[][];
+  privateKeyboardPage?: number;
 };
 
 const POLL_MS = 5_000;
@@ -141,14 +142,6 @@ function targetChat(value: unknown, settings: ChatSettings, allowChannel = false
   return chat.type === "group" || chat.type === "supergroup" || (allowChannel && chat.type === "channel") ? chat : null;
 }
 
-function optionsButton(text: string): InlineButton[][] {
-  return [[{ text, callback_data: "dm:page:0" }]];
-}
-
-function hasButtonRules(db: DatabaseSync): boolean {
-  return Boolean(db.prepare("SELECT 1 FROM telegram_keyword_rules WHERE show_button = 1 LIMIT 1").get());
-}
-
 function welcomeReply(db: DatabaseSync, update: Record<string, unknown>, settings: ChatSettings): ChatReply | null {
   if (settings.welcome_enabled !== 1) return null;
   const change = asRecord(update.chat_member);
@@ -163,7 +156,7 @@ function welcomeReply(db: DatabaseSync, update: Record<string, unknown>, setting
   const text = shorten(settings.welcome_message.replace(/\{(name|group)\}/g, (_, key) => key === "name" ? name : group).trim(), 4_096);
   if (!text) return null;
   if (privateEnabled && db.prepare("SELECT 1 FROM telegram_private_contacts WHERE user_id = ?").get(user.id)) {
-    return { kind: "welcome", chatId: user.id, text, keyboard: hasButtonRules(db) ? optionsButton("查看选项") : undefined };
+    return { kind: "welcome", chatId: user.id, text, privateKeyboardPage: 0 };
   }
   if (chat.type === "channel") return null;
   return {
@@ -245,19 +238,53 @@ function privateChatId(chatValue: unknown, senderValue: unknown): number | null 
   return sender.id;
 }
 
+type PrivateReplyMarkup = { remove_keyboard: true } | {
+  keyboard: { text: string }[][];
+  is_persistent: true;
+  resize_keyboard: true;
+  one_time_keyboard: false;
+};
+
+/** Preserve complete keywords; escape command prefixes so a choice cannot issue /stop. */
+function privateKeyboard(db: DatabaseSync, page: number): { page: number; hasButtons: boolean; markup: PrivateReplyMarkup } {
+  const rules = db.prepare("SELECT keyword FROM telegram_keyword_rules WHERE show_button = 1 ORDER BY id LIMIT ? OFFSET ?")
+    .all(MENU_PAGE_SIZE + 1, page * MENU_PAGE_SIZE) as { keyword: string }[];
+  if (page > 0 && !rules.length) return privateKeyboard(db, 0);
+  if (!rules.length) return { page: 0, hasButtons: false, markup: { remove_keyboard: true } };
+  const buttons = rules.slice(0, MENU_PAGE_SIZE).map(rule => ({ text: rule.keyword.startsWith("/") ? `／${rule.keyword.slice(1)}` : rule.keyword }));
+  const keyboard: { text: string }[][] = [];
+  for (let index = 0; index < buttons.length; index += 2) keyboard.push(buttons.slice(index, index + 2));
+  const navigation: { text: string }[] = [];
+  if (page > 0 || rules.length > MENU_PAGE_SIZE) {
+    const keywords = new Set((db.prepare("SELECT keyword FROM telegram_keyword_rules").all() as { keyword: string }[])
+      .map(rule => normalizeTelegramKeyword(rule.keyword)));
+    const label = (direction: string, targetPage: number) => {
+      let text = `${direction} › ${targetPage + 1}`;
+      while (keywords.has(normalizeTelegramKeyword(text))) text += " ›";
+      keywords.add(normalizeTelegramKeyword(text));
+      return { text };
+    };
+    if (page > 0) navigation.push(label("上一页", page - 1));
+    if (rules.length > MENU_PAGE_SIZE) navigation.push(label("下一页", page + 1));
+  }
+  if (navigation.length) keyboard.push(navigation);
+  return { page, hasButtons: true, markup: { keyboard, is_persistent: true, resize_keyboard: true, one_time_keyboard: false } };
+}
+
 function privateMenu(db: DatabaseSync, settings: ChatSettings, chatId: number, page: number): ChatReply {
-  const rules = db.prepare("SELECT id, keyword FROM telegram_keyword_rules WHERE show_button = 1 ORDER BY id LIMIT ? OFFSET ?")
-    .all(MENU_PAGE_SIZE + 1, page * MENU_PAGE_SIZE) as { id: number; keyword: string }[];
-  if (page > 0 && !rules.length) return privateMenu(db, settings, chatId, 0);
-  const keyboard: InlineButton[][] = rules.slice(0, MENU_PAGE_SIZE).map(rule => [
-    { text: shorten(rule.keyword, 64), callback_data: `dm:rule:${rule.id}` },
-  ]);
-  const pagination: InlineButton[] = [];
-  if (page > 0) pagination.push({ text: "上一页", callback_data: `dm:page:${page - 1}` });
-  if (rules.length > MENU_PAGE_SIZE) pagination.push({ text: "下一页", callback_data: `dm:page:${page + 1}` });
-  if (pagination.length) keyboard.push(pagination);
-  const text = shorten(settings.private_start_message.trim() || (rules.length ? DEFAULT_PRIVATE_GREETING : DEFAULT_PRIVATE_TEXT_GREETING), 4_096);
-  return { kind: "private", chatId, text, keyboard };
+  const menu = privateKeyboard(db, page);
+  const text = shorten(settings.private_start_message.trim() || (menu.hasButtons ? DEFAULT_PRIVATE_GREETING : DEFAULT_PRIVATE_TEXT_GREETING), 4_096);
+  return { kind: "private", chatId, text, privateKeyboardPage: menu.page };
+}
+
+function privateButtonReply(db: DatabaseSync, chatId: number, input: string): ChatReply | null {
+  const rule = db.prepare("SELECT id,response FROM telegram_keyword_rules WHERE show_button = 1 AND keyword_key = ?")
+    .get(normalizeTelegramKeyword(input)) as { id: number; response: string } | undefined;
+  if (!rule || typeof rule.response !== "string" || !rule.response.trim()) return null;
+  const before = db.prepare("SELECT COUNT(*) AS count FROM telegram_keyword_rules WHERE show_button = 1 AND id < ?")
+    .get(rule.id) as { count: number };
+  return { kind: "private", chatId, text: shorten(rule.response.trim(), 4_096), buttonRuleId: rule.id,
+    privateKeyboardPage: Math.floor(before.count / MENU_PAGE_SIZE) };
 }
 
 function callbackReply(db: DatabaseSync, update: Record<string, unknown>, settings: ChatSettings): ChatReply | null {
@@ -276,7 +303,7 @@ function callbackReply(db: DatabaseSync, update: Record<string, unknown>, settin
   }
   const rule = db.prepare("SELECT response FROM telegram_keyword_rules WHERE id = ? AND show_button = 1").get(id);
   const text = typeof rule?.response === "string" ? shorten(rule.response.trim(), 4_096) : "";
-  return { kind: "private", chatId, text, callbackId: callback.id, buttonRuleId: id, keyboard: text ? optionsButton("返回选项") : undefined };
+  return { kind: "private", chatId, text, callbackId: callback.id, buttonRuleId: id, privateKeyboardPage: text ? 0 : undefined };
 }
 
 function privateReply(db: DatabaseSync, update: Record<string, unknown>, settings: ChatSettings, now: number): ChatReply | null {
@@ -300,9 +327,24 @@ function privateReply(db: DatabaseSync, update: Record<string, unknown>, setting
     db.prepare("UPDATE telegram_private_contacts SET updates_enabled = 1, updates_started_at = ? WHERE user_id = ? AND updates_enabled = 0").run(now, chatId);
     return privateMenu(db, settings, chatId, 0);
   }
-  if (/^\/menu(?:@FreeBonus365ChatBot)?(?:\s|$)/i.test(input.trim())) return privateMenu(db, settings, chatId, 0);
+  const menuCommand = /^\/menu(?:@FreeBonus365ChatBot)?(?:\s+([1-9]\d{0,15}))?\s*$/i.exec(input.trim());
+  if (menuCommand) {
+    const page = menuCommand[1] ? Number(menuCommand[1]) - 1 : 0;
+    return Number.isSafeInteger(page) && page <= Math.floor(Number.MAX_SAFE_INTEGER / MENU_PAGE_SIZE)
+      ? privateMenu(db, settings, chatId, page) : null;
+  }
+  // A visible menu choice wins over broad or text-only matching rules. Reply
+  // keyboard text and manually typed text have the same Telegram semantics.
+  const button = privateButtonReply(db, chatId, input);
+  if (button) return button;
+  const navigation = /^(?:上一页|下一页) › ([1-9]\d{0,15})(?: ›)*$/.exec(input.trim());
+  if (navigation && !db.prepare("SELECT 1 FROM telegram_keyword_rules WHERE keyword_key = ?").get(normalizeTelegramKeyword(input))) {
+    const page = Number(navigation[1]) - 1;
+    return Number.isSafeInteger(page) && page <= Math.floor(Number.MAX_SAFE_INTEGER / MENU_PAGE_SIZE)
+      ? privateMenu(db, settings, chatId, page) : null;
+  }
   const matched = keywordResponse(db, input);
-  return matched ? { kind: "private", chatId, text: matched.text, keyboard: matched.showButton ? optionsButton("返回选项") : undefined }
+  return matched ? { kind: "private", chatId, text: matched.text, privateKeyboardPage: matched.showButton ? 0 : undefined }
     : brandSearchReply(db, input, { kind: "private", chatId }, now);
 }
 
@@ -406,7 +448,12 @@ export async function pollTelegramWelcomeOnce(decryptToken: DecryptToken, clock 
       if (!active) { finishPoll(db, claim); return; }
       // A rule may be hidden or deleted while Telegram acknowledges the click.
       // Do not send an old button's queued answer after that configuration change.
-      if (action.buttonRuleId !== undefined && !db.prepare("SELECT 1 FROM telegram_keyword_rules WHERE id = ? AND show_button = 1").get(action.buttonRuleId)) continue;
+    }
+    if (action.buttonRuleId !== undefined) {
+      const currentRule = db.prepare("SELECT response FROM telegram_keyword_rules WHERE id = ? AND show_button = 1")
+        .get(action.buttonRuleId) as { response: string } | undefined;
+      if (!currentRule || typeof currentRule.response !== "string" || !currentRule.response.trim()) continue;
+      action.text = shorten(currentRule.response.trim(), 4_096);
     }
     if (!action.text && !action.brandId) continue;
     if (action.chatId > 0) cancelPrivateFollowupReply(db, action.chatId, action.followupRevision);
@@ -432,7 +479,9 @@ export async function pollTelegramWelcomeOnce(decryptToken: DecryptToken, clock 
     } else {
       reply = await telegramRequest(token, "sendMessage", {
         ...parameters, chat_id: action.chatId, text: action.text, link_preview_options: { is_disabled: true },
-        ...(action.keyboard?.length ? { reply_markup: { inline_keyboard: action.keyboard } } : {}),
+        ...(action.chatId > 0 && action.privateKeyboardPage !== undefined
+          ? { reply_markup: privateKeyboard(db, action.privateKeyboardPage).markup }
+          : action.keyboard?.length ? { reply_markup: { inline_keyboard: action.keyboard } } : {}),
       }).catch(() => null);
     }
     if (reply?.ok && Number.isSafeInteger(reply.result.message_id)) {

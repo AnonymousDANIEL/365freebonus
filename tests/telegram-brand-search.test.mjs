@@ -119,7 +119,7 @@ function harness(t) {
   } };
 }
 
-function buttons(call) { return call.parameters.reply_markup?.inline_keyboard.flat(); }
+function buttons(call) { return call.parameters.reply_markup?.inline_keyboard?.flat(); }
 function assertCard(call, { name = 'Bintang44', slug = 'bintang' } = {}) {
   assert.match(call.parameters.text ?? call.parameters.caption, new RegExp(`Introduction for ${name}\\.`));
   assert.deepEqual(buttons(call), [
@@ -272,6 +272,7 @@ test('unmatched, one-character and command input does not accidentally expose br
   assert.equal(getSqlite().prepare('SELECT status FROM telegram_private_followups WHERE chat_id=?').get(privateId).status, 'pending');
   await h.run([input(4, { text: '/start' }), input(5, { text: '/stop' })]);
   assert.equal(h.calls.length, 2);
+  assert.deepEqual(h.calls[0].parameters.reply_markup, { remove_keyboard: true }, 'no configured choices clears a previous private keyboard');
   assert.ok(h.calls.every(call => !buttons(call)?.some(button => button.text === '🚀 Join Now')));
 });
 

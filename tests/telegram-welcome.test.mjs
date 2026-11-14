@@ -370,14 +370,14 @@ test('private-only polling answers start, menu navigation, and keywords with gro
 
   await tick();
   const [menu, nextPage, selectedRule, keywordReply, menuAgain] = requests.parameters();
-  const buttonData = payload => payload.reply_markup.inline_keyboard.flat().map(button => button.callback_data);
+  const buttonData = payload => payload.reply_markup.keyboard.flat().map(button => button.text);
   assert.match(menu.text, /Choose a topic/);
-  assert.deepEqual(buttonData(menu), [...Array.from({ length: 8 }, (_, index) => `dm:rule:${index + 1}`), 'dm:page:1']);
-  assert.deepEqual(buttonData(nextPage), ['dm:rule:9', 'dm:rule:10', 'dm:page:0']);
+  assert.deepEqual(buttonData(menu), [...Array.from({ length: 8 }, (_, index) => `topic ${index + 1}`), '下一页 › 2']);
+  assert.deepEqual(buttonData(nextPage), ['topic 9', 'topic 10', '上一页 › 1']);
   assert.equal(selectedRule.text, 'Answer 9');
   assert.equal(keywordReply.text, 'Answer 1');
-  assert.deepEqual(buttonData(selectedRule), ['dm:page:0']);
-  assert.deepEqual(buttonData(keywordReply), ['dm:page:0']);
+  assert.deepEqual(buttonData(selectedRule), buttonData(menu));
+  assert.deepEqual(buttonData(keywordReply), buttonData(menu));
   assert.deepEqual(buttonData(menuAgain), buttonData(menu));
   assert.deepEqual(callback.mock.calls.map(call => call.arguments[1]), ['callback-401', 'callback-402', 'callback-403']);
   assert.deepEqual(privateContacts(), [privateChatId]);
@@ -484,7 +484,7 @@ test('known group joiners receive a DM and a rejected DM clears the contact for 
   await tick();
   const sent = requests.parameters();
   assert.deepEqual(sent.map(reply => Number(reply.chat_id)), [privateChatId, chatId, privateChatId, chatId]);
-  assert.ok(sent[0].reply_markup.inline_keyboard.flat().some(button => button.callback_data === 'dm:page:0'));
+  assert.deepEqual(sent[0].reply_markup.keyboard, [[{ text: 'bonus' }]]);
   for (const reply of [sent[1], sent[3]]) {
     assert.ok(reply.reply_markup.inline_keyboard.flat().some(button => button.url === 'https://t.me/FreeBonus365ChatBot?start=welcome'));
   }
@@ -511,7 +511,7 @@ test('channel joins send only to known private contacts with both features enabl
 
   await tick();
   assert.deepEqual(requests.parameters().map(reply => Number(reply.chat_id)), [privateChatId]);
-  assert.ok(requests.parameters()[0].reply_markup.inline_keyboard.flat().some(button => button.callback_data === 'dm:page:0'));
+  assert.deepEqual(requests.parameters()[0].reply_markup.keyboard, [[{ text: 'bonus' }]]);
   assert.equal(state().sent, 1);
   assert.deepEqual(privateContacts(), [privateChatId]);
   configurePrivate({ enabled: false });
@@ -534,16 +534,16 @@ test('private menus paginate only button rules while both modes still reply to t
   const acknowledged = t.mock.method(transport, 'answerTelegramCallback', async () => true);
   await tick();
   const [menu, secondPage, buttonAnswer, hiddenAnswer, groupAnswer, typedButtonAnswer] = requests.parameters();
-  const buttons = payload => payload.reply_markup.inline_keyboard.flat().map(button => button.callback_data);
-  assert.deepEqual(buttons(menu), [...Array.from({ length: 8 }, (_, index) => `dm:rule:${(index + 1) * 2}`), 'dm:page:1']);
-  assert.deepEqual(buttons(secondPage), ['dm:rule:18', 'dm:rule:20', 'dm:page:0']);
+  const buttons = payload => payload.reply_markup.keyboard.flat().map(button => button.text);
+  assert.deepEqual(buttons(menu), [...Array.from({ length: 8 }, (_, index) => `topic ${(index + 1) * 2}`), '下一页 › 2']);
+  assert.deepEqual(buttons(secondPage), ['topic 18', 'topic 20', '上一页 › 1']);
   assert.equal(buttonAnswer.text, 'Answer 18');
   assert.equal(hiddenAnswer.text, 'Answer 1');
   assert.equal(hiddenAnswer.reply_markup, undefined, 'text-only replies do not attach a return button');
   assert.equal(groupAnswer.text, 'Answer 1');
   assert.equal(groupAnswer.reply_markup, undefined);
   assert.equal(typedButtonAnswer.text, 'Answer 2');
-  assert.deepEqual(buttons(typedButtonAnswer), ['dm:page:0']);
+  assert.deepEqual(buttons(typedButtonAnswer), buttons(menu));
   assert.equal(acknowledged.mock.calls.length, 3, 'hidden stale callback is still acknowledged');
   assert.equal(state().private_replies, 5);
   assert.equal(state().keyword_replies, 1);
@@ -570,7 +570,8 @@ test('text-only private rules keep exact matching priority and never create an e
   assert.match(replies[2].text, /^Welcome/);
   assert.equal(replies[3].text, 'Private exact reply');
   assert.equal(replies[4].text, 'Private exact reply');
-  assert.ok(replies.every(reply => reply.reply_markup === undefined));
+  assert.deepEqual(replies.slice(0, 3).map(reply => reply.reply_markup), [{ remove_keyboard: true }, { remove_keyboard: true }, { remove_keyboard: true }]);
+  assert.ok(replies.slice(3).every(reply => reply.reply_markup === undefined));
   assert.equal(acknowledged.mock.calls.length, 1);
   assert.equal(state().sent, 1);
   assert.equal(state().private_replies, 3);
@@ -588,4 +589,141 @@ test('a rule hidden while its old button callback is being acknowledged does not
   await tick();
   assert.deepEqual(requests.messages(), []);
   assert.equal(state().private_replies, 0);
+});
+
+
+test('private start installs a persistent keyboard and tapping a choice replies without a menu command', async t => {
+  configureWelcome({ enabled: false, groupChatId: '' });
+  configurePrivate();
+  configureKeywords([['website link', 'contains', 'Visit our website'], ['silent', 'exact', 'Text only', false]], cutoff, false);
+  const requests = mockTransport(t, [ok([privateMessage(1300), privateMessage(1301, { text: 'website link' })])],
+    Array(2).fill(successfulSend), { chatIds: [privateChatId] });
+  await tick();
+  const [menu, answer] = requests.parameters();
+  assert.deepEqual(menu.reply_markup, { keyboard: [[{ text: 'website link' }]], is_persistent: true, resize_keyboard: true, one_time_keyboard: false });
+  assert.equal(answer.text, 'Visit our website');
+  assert.deepEqual(answer.reply_markup, menu.reply_markup);
+  assert.equal(menu.reply_markup.inline_keyboard, undefined);
+});
+
+test('reply keyboard pagination changes pages using tapped text and preserves the selected page after a choice', async t => {
+  configureWelcome({ enabled: false });configurePrivate();
+  configureKeywords(Array.from({ length: 10 }, (_, index) => [`choice ${index + 1}`, 'contains', `Reply ${index + 1}`]));
+  const requests = mockTransport(t, [ok([
+    privateMessage(1400), privateMessage(1401, { text: '下一页 › 2' }),
+    privateMessage(1402, { text: 'choice 10' }), privateMessage(1403, { text: '上一页 › 1' }),
+  ])], Array(4).fill(successfulSend), { chatIds: [privateChatId] });
+  await tick();
+  const [first, second, answer, back] = requests.parameters();
+  assert.equal(answer.text, 'Reply 10');
+  assert.deepEqual(second.reply_markup.keyboard, [[{ text: 'choice 9' }, { text: 'choice 10' }], [{ text: '上一页 › 1' }]]);
+  assert.deepEqual(answer.reply_markup, second.reply_markup);
+  assert.deepEqual(back.reply_markup, first.reply_markup);
+});
+
+test('reply choices retain complete long keywords and exact choice routing wins over a broad hidden rule', async t => {
+  configureWelcome({ enabled: false });configurePrivate();
+  const first='x'.repeat(100)+' first',second='x'.repeat(100)+' second';
+  configureKeywords([[first,'contains','First choice'],[second,'contains','Second choice'],['x','contains','Hidden broad reply',false]]);
+  const requests = mockTransport(t, [ok([privateMessage(1500),privateMessage(1501,{text:second}),privateMessage(1502,{text:first})])],
+    Array(3).fill(successfulSend),{chatIds:[privateChatId]});
+  await tick();
+  const [menu, secondReply, firstReply]=requests.parameters();
+  assert.deepEqual(menu.reply_markup.keyboard,[[{text:first},{text:second}]]);
+  assert.equal(secondReply.text,'Second choice');assert.equal(firstReply.text,'First choice');
+});
+
+test('a real visible keyword matching a navigation label remains a choice while navigation uses a distinct label', async t => {
+  configureWelcome({ enabled: false });configurePrivate();
+  configureKeywords([['下一页 › 2','contains','Literal navigation keyword'],...Array.from({length:8},(_,index)=>[`choice ${index+1}`,'exact',`Reply ${index+1}`])]);
+  const requests=mockTransport(t,[ok([privateMessage(1600),privateMessage(1601,{text:'下一页 › 2'}),privateMessage(1602,{text:'下一页 › 2 ›'})])],
+    Array(3).fill(successfulSend),{chatIds:[privateChatId]});
+  await tick();
+  const [menu,literal,next]=requests.parameters();
+  assert.equal(menu.reply_markup.keyboard.at(-1)[0].text,'下一页 › 2 ›');
+  assert.equal(literal.text,'Literal navigation keyword');
+  assert.deepEqual(next.reply_markup.keyboard,[[{text:'choice 8'}],[{text:'上一页 › 1'}]]);
+});
+
+test('menu refresh removes a previously offered keyboard after every visible rule is hidden', async t => {
+  configureWelcome({ enabled: false });configurePrivate();configureKeywords([['website','exact','Website reply']]);
+  const requests=mockTransport(t,[ok([privateMessage(1700)]),ok([privateMessage(1701,{text:'/menu'})])],Array(2).fill(successfulSend),{chatIds:[privateChatId]});
+  await tick();getSqlite().prepare('UPDATE telegram_keyword_rules SET show_button=0').run();
+  await tick(now+minute);
+  assert.deepEqual(requests.parameters()[0].reply_markup.keyboard,[[{text:'website'}]]);
+  assert.deepEqual(requests.parameters()[1].reply_markup,{remove_keyboard:true});
+});
+
+test('legacy callback answers use the latest rule response and rebuild the current keyboard after acknowledgement', async t => {
+  configureWelcome({ enabled: false });configurePrivate();configureKeywords([['website','exact','Original reply']]);
+  const requests=mockTransport(t,[ok([privateCallback(1800,'dm:rule:1')])],[successfulSend],{chatIds:[privateChatId]});
+  t.mock.method(transport,'answerTelegramCallback',async()=>{
+    getSqlite().prepare("UPDATE telegram_keyword_rules SET response='Updated reply',keyword='latest website',keyword_key='latest website' WHERE id=1").run();
+    return true;
+  });
+  await tick();
+  assert.equal(requests.messages()[0],'Updated reply');
+  assert.deepEqual(requests.parameters()[0].reply_markup.keyboard,[[{text:'latest website'}]]);
+});
+
+test('deleting a previously offered reply choice never reuses its old response and leaves unmatched input unanswered', async t => {
+  configureWelcome({ enabled: false });configurePrivate();configureKeywords([['website','exact','Original reply']]);
+  const requests=mockTransport(t,[ok([privateMessage(1900)]),ok([privateMessage(1901,{text:'website'})])],[successfulSend],{chatIds:[privateChatId]});
+  await tick();getSqlite().prepare('DELETE FROM telegram_keyword_rules').run();
+  await tick(now+minute);
+  assert.equal(requests.parameters().length,1);
+});
+
+
+test('a hidden text keyword matching navigation keeps its typed response and is never exposed as a menu choice', async t => {
+  configureWelcome({ enabled: false });configurePrivate();
+  configureKeywords([['下一页 › 2','exact','Hidden typed answer',false],...Array.from({length:9},(_,index)=>[`choice ${index+1}`,'exact',`Reply ${index+1}`])]);
+  const requests=mockTransport(t,[ok([privateMessage(2000),privateMessage(2001,{text:'下一页 › 2'}),privateMessage(2002,{text:'下一页 › 2 ›'})])],
+    Array(3).fill(successfulSend),{chatIds:[privateChatId]});
+  await tick();
+  const [menu,hidden,next]=requests.parameters();
+  assert.deepEqual(menu.reply_markup.keyboard.flat().map(button=>button.text),[...Array.from({length:8},(_,index)=>`choice ${index+1}`),'下一页 › 2 ›']);
+  assert.equal(hidden.text,'Hidden typed answer');assert.equal(hidden.reply_markup,undefined);
+  assert.deepEqual(next.reply_markup.keyboard,[[{text:'choice 9'}],[{text:'上一页 › 1'}]]);
+});
+
+
+test('command-named reply choices cannot accidentally stop notifications while typed ASCII commands retain control', async t => {
+  configureWelcome({ enabled: false });configurePrivate();
+  configureKeywords([['/stop','exact','Business stop option'],['/start','contains','Business start option'],['/menu','exact','Business menu option']]);
+  const requests=mockTransport(t,[
+    ok([privateMessage(2100)]),
+    ok([privateMessage(2101,{text:'／stop'}),privateMessage(2102,{text:'／start'}),privateMessage(2103,{text:'／menu'})]),
+    ok([privateMessage(2104,{text:'/stop'})]),ok([privateMessage(2105,{text:'/start'})]),
+  ],Array(6).fill(successfulSend),{chatIds:[privateChatId]});
+  const enabled=()=>getSqlite().prepare('SELECT updates_enabled FROM telegram_private_contacts WHERE user_id=?').get(privateChatId).updates_enabled;
+  await tick();
+  assert.deepEqual(requests.parameters()[0].reply_markup.keyboard,[[{text:'／stop'},{text:'／start'}],[{text:'／menu'}]]);
+  assert.equal(enabled(),1);
+  await tick(now+minute);
+  assert.deepEqual(requests.messages().slice(1),['Business stop option','Business start option','Business menu option']);
+  assert.equal(enabled(),1,'choosing a business option must never opt the customer out');
+  await tick(now+2*minute);
+  assert.equal(enabled(),0,'an explicitly typed ASCII /stop still opts out');
+  assert.match(requests.messages()[4],/已暂停自动跟进和品牌更新通知/);
+  await tick(now+3*minute);
+  assert.equal(enabled(),1,'an explicitly typed ASCII /start still resumes future notifications');
+  assert.deepEqual(requests.parameters()[5].reply_markup,requests.parameters()[0].reply_markup);
+});
+
+
+test('persistent choices use two columns with odd final choices alone and navigation on its own row', async t => {
+  configureWelcome({enabled:false});configurePrivate();
+  configureKeywords(Array.from({length:17},(_,index)=>[`choice ${index+1}`,'exact',`Reply ${index+1}`]));
+  const requests=mockTransport(t,[ok([
+    privateMessage(2200),privateMessage(2201,{text:'下一页 › 2'}),privateMessage(2202,{text:'下一页 › 3'}),
+  ])],Array(3).fill(successfulSend),{chatIds:[privateChatId]});
+  await tick();
+  const [first,middle,last]=requests.parameters().map(reply=>reply.reply_markup.keyboard);
+  assert.deepEqual(first.map(row=>row.length),[2,2,2,2,1]);
+  assert.deepEqual(first[0],[{text:'choice 1'},{text:'choice 2'}]);
+  assert.deepEqual(first.at(-1),[{text:'下一页 › 2'}]);
+  assert.deepEqual(middle.map(row=>row.length),[2,2,2,2,2]);
+  assert.deepEqual(middle.at(-1),[{text:'上一页 › 1'},{text:'下一页 › 3'}]);
+  assert.deepEqual(last,[[{text:'choice 17'}],[{text:'上一页 › 2'}]]);
 });

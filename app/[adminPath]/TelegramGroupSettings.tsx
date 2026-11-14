@@ -51,8 +51,8 @@ const initialDraft: TelegramDraft = {
 };
 const initialKeyword: KeywordDraft = { keyword: "", matchMode: "exact", response: "", showButton: true };
 const keywordModes = [
-  { showButton: true, title: "按键关键字", description: "显示在 1 对 1 私聊菜单，顾客点击按键或输入关键字都能获得回复。", add: "添加按键关键字", empty: "尚未添加按键关键字。" },
-  { showButton: false, title: "文字关键字（不显示按键）", description: "只根据顾客输入的关键字回复，不显示为菜单按键，回复也不附带按键。", add: "添加文字关键字", empty: "尚未添加文字关键字。" },
+  { showButton: true, title: "按键关键字", description: "显示在 Telegram 私聊底部菜单，顾客直接点击即可获得回复，无需先输入关键字。", add: "添加按键关键字", empty: "尚未添加按键关键字。" },
+  { showButton: false, title: "文字关键字（不显示按键）", description: "根据顾客输入的关键字回复，不加入底部菜单，也不会收起已有菜单。", add: "添加文字关键字", empty: "尚未添加文字关键字。" },
 ] as const;
 const matchLabels = { exact: "完全匹配", contains: "包含关键词" } as const;
 const deliveryLabels = { pending: "待发送", sending: "发送中", sent: "已发送", failed: "发送失败", unknown: "待确认", skipped: "已跳过" } as const;
@@ -143,7 +143,7 @@ function TelegramKeywordRules({ request, signInPath }: AdminProps) {
         return id === undefined ? [...list, result.rule] : list.map(rule => rule.id === id ? result.rule : rule);
       });
       setEditing(null);
-      setNotice({ message: showButton ? "按键关键字已保存。在 Telegram 发送 /menu 可查看最新按键。" : "文字关键字已保存，顾客输入匹配内容后会自动回复。" });
+      setNotice({ message: showButton ? "按键关键字已保存。已有 Telegram 私聊发送 /menu，即可刷新底部菜单。" : "文字关键字已保存，顾客输入匹配内容后会自动回复。" });
     } catch (error) {
       setNotice(requestFailure(error));
     } finally {
@@ -158,7 +158,7 @@ function TelegramKeywordRules({ request, signInPath }: AdminProps) {
     try {
       const { id } = await request<{ id: number }>(keywordsEndpoint, "DELETE", { id: rule.id });
       setRules(current => current?.filter(item => item.id !== id) ?? []);
-      setNotice({ message: "关键词规则已删除。" });
+      setNotice({ message: "关键词规则已删除。已有 Telegram 私聊发送 /menu 可刷新底部菜单。" });
     } catch (error) {
       setNotice(requestFailure(error));
     } finally {
@@ -175,7 +175,7 @@ function TelegramKeywordRules({ request, signInPath }: AdminProps) {
     <div className="cms-settings-panel">
       <div>
         <h2 id="telegram-keywords-title">关键词回复规则</h2>
-        <p>按键与文字规则分开管理。两类规则都支持群组和私聊文字匹配，显示按键的设置仅用于 1 对 1 私聊菜单。</p>
+        <p>按键与文字规则分开管理，可随时添加、编辑或删除。两类规则都支持群组和私聊文字匹配；按键仅显示在 1 对 1 私聊底部菜单。</p>
       </div>
       <div className="cms-settings-fields">
         <TelegramNotice notice={notice} signInPath={signInPath} />
@@ -501,7 +501,7 @@ export default function TelegramGroupSettings({ request, signInPath }: AdminProp
         <section className="cms-settings-panel" aria-labelledby="telegram-private-title">
           <div>
             <h2 id="telegram-private-title">1 对 1 私聊</h2>
-            <p>用户可以点击 Start 后选择关键词，或直接输入关键词。私聊沿用下方规则，也支持输入部分品牌名称搜索网页 All 的已上架品牌，可独立于群组关键词回复开启。</p>
+            <p>新顾客点击 Start 后，按键会显示在聊天底部，直接点击即可获得回复。已有聊天发送 /start 或 /menu 刷新一次即可。私聊沿用下方规则，也支持输入部分品牌名称搜索网页 All 的已上架品牌，可独立于群组关键词回复开启。</p>
           </div>
           <div className="cms-settings-fields">
             <label className="cms-telegram-switch">
