@@ -12,7 +12,7 @@ export function getDataDirectory(): string {
 function migrate(db: DatabaseSync) {
   if (migrated.has(db)) return;
   const readVersion = () => (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
-  if (readVersion() < 24) {
+  if (readVersion() < 25) {
     db.exec("BEGIN IMMEDIATE");
     try {
       // Read again inside the write lock, so concurrent process starts cannot
@@ -425,6 +425,15 @@ function migrate(db: DatabaseSync) {
           ALTER TABLE telegram_relay_media_keys_v24 RENAME TO telegram_relay_media_keys;
           CREATE INDEX telegram_relay_media_key_job ON telegram_relay_media_keys(outbox_id);
           PRAGMA user_version=24;
+        `);
+      }
+      if (version < 25) {
+        // One independently verified preflight recovery is allowed per post.
+        // Counting it before any read keeps restarts from reopening the same
+        // invalid record indefinitely; actual edit attempts remain terminal.
+        db.exec(`
+          ALTER TABLE telegram_relay_outbox ADD COLUMN caption_edit_recheck_count INTEGER NOT NULL DEFAULT 0;
+          PRAGMA user_version=25;
         `);
       }
       db.exec("COMMIT");

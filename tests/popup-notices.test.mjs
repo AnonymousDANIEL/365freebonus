@@ -168,7 +168,7 @@ test('upgrading a v9 database adds an empty notices table while preserving exist
 
   assert.deepEqual(await readPublicPopupNotices(), []);
   const after = getSqlite();
-  assert.equal(after.prepare('PRAGMA user_version').get().user_version, 24);
+  assert.equal(after.prepare('PRAGMA user_version').get().user_version, 25);
   assert.equal(after.prepare("SELECT announcement FROM site_settings WHERE id = 'primary'").get().announcement, 'Existing notice');
   assert.equal(after.prepare("SELECT token_ciphertext FROM telegram_promotion_settings WHERE id = 'primary'").get().token_ciphertext, 'fixture-ciphertext');
   const created = await responseBody(await route.POST(request('POST', example)), 201);

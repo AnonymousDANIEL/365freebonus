@@ -77,6 +77,7 @@ const relayContent = require(path.join(fixture, 'telegram-relay-content.js'));
 const { getSqlite } = require(path.join(fixture, 'sqlite.js'));
 const previousData = process.env.DATA_DIR;
 const previousSecret = process.env.SESSION_SECRET;
+const nativeSetTimeout = globalThis.setTimeout;
 const apiHash = 'a'.repeat(32);
 const source = -1001001;
 const target = -1009999;
@@ -146,7 +147,10 @@ function closeDb() {
   globalThis.__directorySqlite?.get(filename)?.close();
   globalThis.__directorySqlite?.delete(filename);
 }
-test.beforeEach(()=>{
+test.beforeEach(t=>{
+  // Only Telegram fixtures run here. Keep bounded retry ordering while avoiding
+  // real one/two-second waits for each deliberately persistent unsafe fixture.
+  t.mock.method(globalThis,'setTimeout',(callback,delay,...args)=>nativeSetTimeout(callback,delay===1000||delay===2000?0:delay,...args));
   process.env.DATA_DIR=mkdtempSync(path.join(fixture,'case-'));
   process.env.SESSION_SECRET='fixture-encryption-secret-'.repeat(3);
   telegram.reset();
@@ -701,7 +705,8 @@ test('personal caption edit exposes the actual Telegram wait deadline when read-
   assert.equal(telegram.state.calls.filter(call=>call.method==='EditMessage').length,0);
 });
 
-for(const outcome of ['changed','account_waiting_1','account_waiting_2','account_waiting_3','account_unavailable','rejected'])
+for(const outcome of ['changed','account_waiting_1','account_waiting_2','account_waiting_3','account_unavailable','rejected',
+  'account_revalidated','account_invalid','account_recheck_waiting_1','account_recheck_waiting_2','account_recheck_waiting_3'])
 test('personal receive yields its lease to a due current-revision caption repair '+outcome,async()=>{
   await readyDelivery();
   db().prepare('UPDATE telegram_relay_outbox SET caption_edit_attempted_at=?,caption_edit_outcome=?,last_error=?,next_attempt_at=?')
@@ -709,6 +714,7 @@ test('personal receive yields its lease to a due current-revision caption repair
       ?'个人账号备用补正当前不可用，请检查本人账号连接和编辑权限；原媒体不会重复发送。'
       :outcome==='rejected'?'Telegram 拒绝补正文案或按钮，请检查机器人权限及原消息格式；不会重复发送媒体。'
       :'Telegram 未保留部分原始自定义 Emoji，请检查机器人的自定义 Emoji 使用权限。该消息不会自动重发。',Date.now()-1);
+  if(outcome.startsWith('account_recheck_waiting_'))db().prepare('UPDATE telegram_relay_outbox SET caption_edit_recheck_count=1').run();
   telegram.state.messages=[photo()];
   const at=telegram.state.calls.length,before={...stored()},beforeCursor=cursor();
   await account.pollTelegramAccountOnce();
@@ -716,7 +722,8 @@ test('personal receive yields its lease to a due current-revision caption repair
 });
 
 for(const reason of ['future-due','terminal','preserved','old-revision','old-post','not-ready','no-custom-error',
-  'bot-rejected-without-custom','bot-rejected-future-due','account-rejected','account-changed','account-uncertain'])
+  'bot-rejected-without-custom','bot-rejected-future-due','account-rejected','account-changed','account-uncertain',
+  'recheck-future-due','recheck-without-custom','invalid-final','invalid-recheck-exhausted','waiting-without-recheck'])
 test('personal receive remains available when caption repair is '+reason,async()=>{
   await readyDelivery();
   db().prepare("UPDATE telegram_relay_outbox SET caption_edit_attempted_at=?,caption_edit_outcome='changed',last_error=?,next_attempt_at=?")
@@ -738,6 +745,14 @@ test('personal receive remains available when caption repair is '+reason,async()
     db().prepare('UPDATE telegram_relay_outbox SET caption_edit_outcome=?,last_error=?')
       .run(reason.replace('-','_'),'Telegram 拒绝补正文案或按钮，请检查机器人权限及原消息格式；不会重复发送媒体。');
   }
+  if(reason.startsWith('recheck-')) {
+    db().prepare("UPDATE telegram_relay_outbox SET caption_edit_outcome='account_recheck_waiting_1',caption_edit_recheck_count=1").run();
+    if(reason==='recheck-future-due')db().prepare('UPDATE telegram_relay_outbox SET next_attempt_at=?').run(Date.now()+60000);
+    if(reason==='recheck-without-custom')db().prepare("UPDATE telegram_relay_outbox SET caption_entities='[]'").run();
+  }
+  if(reason==='invalid-final')db().prepare("UPDATE telegram_relay_outbox SET caption_edit_outcome='account_invalid_final'").run();
+  if(reason==='invalid-recheck-exhausted')db().prepare("UPDATE telegram_relay_outbox SET caption_edit_outcome='account_invalid',caption_edit_recheck_count=1").run();
+  if(reason==='waiting-without-recheck')db().prepare("UPDATE telegram_relay_outbox SET caption_edit_outcome='account_recheck_waiting_1',caption_edit_recheck_count=0").run();
   telegram.state.messages=[photo()];
   if(reason==='not-ready')db().prepare('UPDATE telegram_personal_account SET synced_at=0').run();
   const at=telegram.state.calls.length;
@@ -769,6 +784,68 @@ test('personal caption edit shares one absolute deadline across preflight RPCs',
   telegram.state.onGetMessages=()=>{clock=realNow+40001;};
   assert.deepEqual(await account.editVerifiedRelayCaptionWithAccount(input),{state:'unavailable',attempted:false,outcome:'unavailable'});
   assert.equal(telegram.state.calls.filter(call=>call.method==='EditMessage').length,0);
+});
+
+for(const mode of ['edit','recheck'])test('strict '+mode+' preflight can reread a transient mismatch but never retry an actual edit',async()=>{
+  const input=await readyAccountEdit(),original=input.caption;
+  if(mode==='recheck')db().prepare("UPDATE telegram_relay_outbox SET caption_edit_outcome='account_rechecking'").run();
+  const before={...stored()},rows=db().prepare('SELECT * FROM telegram_relay_outbox').all();
+  let reads=0;
+  telegram.state.onGetMessages=()=>{reads++;telegram.state.messages[0].message=reads===1?original+' temporary':original;};
+  const result=await account[mode==='edit'?'editVerifiedRelayCaptionWithAccount':'recheckVerifiedRelayCaptionWithAccount'](input);
+  assert.equal(result.state,'ok');assert.equal(result.outcome,mode==='edit'?'preserved':'ready');assert.equal(result.attempted,mode==='edit');
+  if(mode==='recheck')assert.equal(result.reason,'ready_to_edit');
+  assert.equal(reads,mode==='edit'?3:2);
+  assert.equal(telegram.state.calls.filter(call=>call.method==='EditMessage').length,mode==='edit'?1:0);
+  assert.deepEqual({...stored()},before);assert.deepEqual(db().prepare('SELECT * FROM telegram_relay_outbox').all(),rows);
+});
+
+test('strict caption preflight performs at most three reads before a persistent mismatch becomes invalid',async()=>{
+  const input=await readyAccountEdit();telegram.state.messages[0].message+=' persistent';
+  const result=await account.editVerifiedRelayCaptionWithAccount(input);
+  assert.deepEqual(result,{state:'ok',attempted:false,outcome:'invalid',reason:'caption_mismatch'});
+  assert.equal(telegram.state.calls.filter(call=>call.method==='getMessages').length,3);
+  assert.equal(telegram.state.calls.filter(call=>call.method==='EditMessage').length,0);
+});
+
+for(const authority of ['premium','channel-admin','source'])test('strict caption rereads stop when '+authority+' evidence changes',async()=>{
+  const input=await readyAccountEdit();telegram.state.messages[0].message+=' temporary';
+  if(authority==='source')db().prepare("UPDATE telegram_relay_outbox SET origin='account',account_generation=?,queued_at=?").run(stored().generation,Date.now());
+  let checks=0;
+  telegram.state.onEntity=()=>{
+    checks++;
+    if(checks===2) {
+      if(authority==='premium')telegram.state.me.premium=false;
+      if(authority==='channel-admin')telegram.state.resolvedTarget.creator=false;
+      if(authority==='source')db().prepare('UPDATE telegram_personal_sources SET selected=0 WHERE chat_id=?').run(source);
+    }
+  };
+  const result=await account.editVerifiedRelayCaptionWithAccount(input);
+  assert.equal(result.attempted,false);assert.equal(result.outcome,authority==='source'?'unavailable':'rejected');
+  assert.equal(telegram.state.calls.filter(call=>call.method==='getMessages').length,1);
+  assert.equal(telegram.state.calls.filter(call=>call.method==='EditMessage').length,0);
+});
+
+test('ordinary editor and read-only recheck cannot accept each other\'s leased phase',async()=>{
+  const input=await readyAccountEdit(),at=telegram.state.calls.length;
+  assert.deepEqual(await account.recheckVerifiedRelayCaptionWithAccount(input),{state:'unavailable',attempted:false,outcome:'unavailable'});
+  assert.equal(telegram.state.calls.length,at);
+  db().prepare("UPDATE telegram_relay_outbox SET caption_edit_outcome='account_rechecking'").run();
+  assert.deepEqual(await account.editVerifiedRelayCaptionWithAccount(input),{state:'unavailable',attempted:false,outcome:'unavailable'});
+  assert.equal(telegram.state.calls.length,at);
+  db().prepare("UPDATE telegram_relay_state SET send_lease_id='different-worker'").run();
+  assert.deepEqual(await account.recheckVerifiedRelayCaptionWithAccount(input),{state:'unavailable',attempted:false,outcome:'unavailable'});
+  assert.equal(telegram.state.calls.length,at);
+});
+
+test('read-only leased recheck reports already preserved artwork without invoking the editor',async()=>{
+  const input=await readyAccountEdit();
+  db().prepare("UPDATE telegram_relay_outbox SET caption_edit_outcome='account_rechecking'").run();
+  telegram.state.messages[0].entities=delivery().message.entities;
+  const before={...stored()},rows=db().prepare('SELECT * FROM telegram_relay_outbox').all(),beforeCursor=cursor();
+  assert.deepEqual(await account.recheckVerifiedRelayCaptionWithAccount(input),{state:'ok',attempted:false,outcome:'preserved'});
+  assert.equal(telegram.state.calls.filter(call=>call.method==='EditMessage').length,0);
+  assert.deepEqual({...stored()},before);assert.deepEqual(db().prepare('SELECT * FROM telegram_relay_outbox').all(),rows);assert.equal(cursor(),beforeCursor);
 });
 
 async function readyBlockedCaption(value=delivery()) {

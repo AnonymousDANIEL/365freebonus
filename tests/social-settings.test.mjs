@@ -85,7 +85,7 @@ test('new installations have exact multiline hero copy and disabled social chann
   assert.deepEqual(socials(settings), emptySocial);
   assert.equal(Object.getPrototypeOf(settings), Object.prototype);
   assert.deepEqual(JSON.parse(JSON.stringify(settings)), settings);
-  assert.equal(sqlite.getSqlite().prepare('PRAGMA user_version').get().user_version, 24);
+  assert.equal(sqlite.getSqlite().prepare('PRAGMA user_version').get().user_version, 25);
 });
 
 test('v4 migration replaces only exact legacy hero fields and retains site assets, brands and auth data', async () => {
@@ -103,7 +103,7 @@ test('v4 migration replaces only exact legacy hero fields and retains site asset
       process.env.DATA_DIR = dataDir;
       const data = await repository.readDirectory(true);
       const db = sqlite.getSqlite();
-      assert.equal(db.prepare('PRAGMA user_version').get().user_version, 24);
+      assert.equal(db.prepare('PRAGMA user_version').get().user_version, 25);
       assert.equal(data.settings.headline, oldHeadline === legacyHeadline ? headline : oldHeadline);
       assert.equal(data.settings.description, oldDescription === legacyDescription ? description : oldDescription);
       assert.deepEqual(socials(data.settings), emptySocial);

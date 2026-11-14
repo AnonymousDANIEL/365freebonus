@@ -62,7 +62,13 @@ exports.relayMediaIdentity = async (bytes,kind) => {
 };
 `);
 writeFileSync(path.join(fixture, 'telegram-account.js'), `
-exports.calls=[];exports.results=[];exports.blockedCalls=0;exports.blockedResults=[];exports.auditOrder=[];
+exports.calls=[];exports.results=[];exports.recheckCalls=[];exports.recheckResults=[];exports.blockedCalls=0;exports.blockedResults=[];exports.auditOrder=[];
+exports.recheckVerifiedRelayCaptionWithAccount=async input=>{
+  exports.recheckCalls.push(input);
+  const result=exports.recheckResults.length?exports.recheckResults.shift():{state:'unavailable',attempted:false,outcome:'unavailable'};
+  if(result instanceof Error)throw result;
+  return typeof result==='function'?await result(input):result;
+};
 exports.inspectBlockedRelayCaptionPreflights=async()=>{
   exports.blockedCalls++;exports.auditOrder.push('blocked');
   return exports.blockedResults.length?exports.blockedResults.shift():{state:'ok',personalEditQualification:'unknown',posts:[]};
@@ -81,7 +87,7 @@ exports.editVerifiedRelayCaptionWithAccount=async input=>{
 `);
 
 writeFileSync(path.join(fixture, 'telegram-relay-diagnostics.js'), `
-exports.relayFormattingDiagnostics=()=>({schemaVersion:24,sampledJobs:0});
+exports.relayFormattingDiagnostics=()=>({schemaVersion:25,sampledJobs:0});
 `);
 
 const require = createRequire(import.meta.url);
@@ -101,6 +107,7 @@ const ciphertext = 'fixture-promotion-ciphertext';
 const ok = result => ({ok:true,result});
 
 function restoreLegacyMediaKeys(db) {
+  db.exec('ALTER TABLE telegram_relay_outbox DROP COLUMN caption_edit_recheck_count');
   db.exec(`CREATE TABLE telegram_relay_media_keys_legacy(media_key TEXT PRIMARY KEY,outbox_id INTEGER NOT NULL);
     INSERT OR IGNORE INTO telegram_relay_media_keys_legacy(media_key,outbox_id)
       SELECT media_key,outbox_id FROM telegram_relay_media_keys ORDER BY day_key DESC;
@@ -117,7 +124,7 @@ function closeDatabase() {
 test.beforeEach(t => {
   process.env.DATA_DIR = mkdtempSync(path.join(fixture, 'case-'));
   media.files.clear(); media.onDownload=null; media.onIdentity=null;
-  personalEdit.calls.length=0;personalEdit.results.length=0;personalEdit.blockedCalls=0;personalEdit.blockedResults.length=0;personalEdit.auditOrder.length=0;
+  personalEdit.calls.length=0;personalEdit.results.length=0;personalEdit.recheckCalls.length=0;personalEdit.recheckResults.length=0;personalEdit.blockedCalls=0;personalEdit.blockedResults.length=0;personalEdit.auditOrder.length=0;
   telegram.calls.length=0; telegram.polls.length=0; telegram.updates.length=0; telegram.sends.length=0; telegram.editReplies.length=0;
   telegram.webhook=''; telegram.targetAllowed=true; telegram.targetExists=true; telegram.targetType='supergroup'; telegram.onRequest=null; telegram.onPoll=null; telegram.now=now;
   t.mock.method(console,'info',()=>{});
@@ -467,7 +474,7 @@ test('v17 migration preserves notes, credentials and existing queues while activ
     ALTER TABLE telegram_promotion_settings DROP COLUMN relay_revision;
     PRAGMA user_version=17;`);
   closeDatabase();const migrated=getSqlite();
-  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,24);
+  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,25);
   const current=migrated.prepare("SELECT * FROM telegram_promotion_settings WHERE id='primary'").get();
   assert.equal(current.relay_enabled,1);assert.equal(current.relay_started_at,now);assert.ok(current.relay_revision);
   assert.equal(current.relay_chat_id,'@join365freebonusgroup');
@@ -775,7 +782,8 @@ test('an edit rate limit delays other sends but never repeats the same caption e
   assert.equal(personalEdit.calls.length,0);
   await poll(now+124000,[]);await deliver(now+124000);
   assert.equal(personalEdit.calls.length,1);assert.equal(sends().length,1);
-  await deliver(now+127000);assert.equal(sends().length,2);assert.equal(edits().length,1);
+  await deliver(now+127000);assert.equal(personalEdit.recheckCalls.length,1);assert.equal(sends().length,1);
+  await deliver(now+130000);assert.equal(sends().length,2);assert.equal(edits().length,1);
 });
 
 for(const code of [401,403])test(`caption edit permission failure ${code} invalidates readiness without retrying its edit`,async()=>{
@@ -897,6 +905,158 @@ async function botEditRejected(options) {
   return original;
 }
 
+async function legacyBlockedCaption(options) {
+  const original=await botEditRejected(options);
+  getSqlite().prepare("UPDATE telegram_relay_outbox SET caption_edit_outcome='account_invalid',last_error=?").run(
+    '原消息身份、设置或来源已改变，已停止自动补正文案；不会重复发送媒体。');
+  return original;
+}
+
+test('a legacy blocked caption requires a leased read-only recheck before one strict personal edit',async()=>{
+  const original=await legacyBlockedCaption();
+  personalEdit.recheckResults.push(async input=>{
+    assert.deepEqual(input,{targetChatId:target,relayRevision:'relay-revision',messageId:88770,
+      caption:original.rewritten,captionEntities:original.expectedEntities});
+    const job=jobs()[0];assert.equal(job.caption_edit_outcome,'account_rechecking');
+    assert.ok(job.lease_until>now+8000);assert.equal(state().send_lease_id,job.lease_id);assert.equal(job.caption_edit_recheck_count,1);
+    await relay.deliverTelegramRelayOnce(decrypt,()=>now+8001);
+    assert.equal(personalEdit.calls.length,0);
+    return {state:'ok',attempted:false,outcome:'ready',reason:'ready_to_edit'};
+  });
+  personalEdit.results.push({state:'ok',attempted:true,outcome:'preserved'});
+  await deliver(now+8000);
+  assert.equal(jobs()[0].caption_edit_outcome,'account_revalidated');assert.equal(personalEdit.calls.length,0);
+  assert.equal(personalEdit.recheckCalls.length,1);assert.equal(sends().length,1);assert.equal(edits().length,1);
+  await deliver(now+11000);assert.equal(jobs()[0].caption_edit_outcome,'account_preserved');assert.equal(personalEdit.calls.length,1);
+  closeDatabase();await deliver(now+15000);await deliver(now+19000);
+  assert.equal(personalEdit.recheckCalls.length,1);assert.equal(personalEdit.calls.length,1);assert.equal(sends().length,1);assert.equal(edits().length,1);
+  assert.equal(jobs()[0].caption_edit_recheck_count,1);
+});
+
+test('a read-only recheck finding the original artwork already preserved needs no personal edit',async()=>{
+  await legacyBlockedCaption();personalEdit.recheckResults.push({state:'ok',attempted:false,outcome:'preserved',reason:'already_preserved'});
+  await deliver(now+8000);assert.equal(jobs()[0].caption_edit_outcome,'account_preserved');assert.equal(jobs()[0].last_error,'');
+  closeDatabase();await deliver(now+12000);
+  assert.equal(personalEdit.recheckCalls.length,1);assert.equal(personalEdit.calls.length,0);assert.equal(sends().length,1);
+});
+
+for(const outcome of ['invalid','rejected','unavailable'])test(`a legacy read-only recheck ending ${outcome} is final and cannot rearm another recheck or edit`,async()=>{
+  await legacyBlockedCaption();personalEdit.recheckResults.push({state:outcome==='unavailable'?'unavailable':'ok',attempted:false,outcome,reason:'caption_mismatch'});
+  await deliver(now+8000);
+  assert.equal(jobs()[0].caption_edit_outcome,outcome==='unavailable'?'account_unavailable_final':'account_invalid_final');
+  closeDatabase();await deliver(now+12000);await deliver(now+16000);
+  assert.equal(personalEdit.recheckCalls.length,1);assert.equal(personalEdit.calls.length,0);assert.equal(sends().length,1);assert.equal(edits().length,1);
+});
+
+test('legacy recheck busy waits follow the account deadline and leave unrelated media free to send',async()=>{
+  await legacyBlockedCaption();personalEdit.recheckResults.push(
+    {state:'busy',attempted:false,outcome:'unavailable',retryAt:now+68000},
+    {state:'ok',attempted:false,outcome:'ready',reason:'ready_to_edit'});
+  personalEdit.results.push({state:'ok',attempted:true,outcome:'preserved'});
+  await deliver(now+8000);assert.equal(jobs()[0].caption_edit_outcome,'account_recheck_waiting_1');
+  assert.equal(jobs()[0].next_attempt_at,now+68000);assert.equal(state().next_send_at,now+11000);assert.equal(jobs()[0].caption_edit_recheck_count,1);
+  await poll(now+9000,[photo(2)]);await deliver(now+11000);assert.equal(sends().length,2);
+  closeDatabase();for(let at=now+16000;at<now+68000;at+=5000)await deliver(at);
+  assert.equal(personalEdit.recheckCalls.length,1);assert.equal(personalEdit.calls.length,0);assert.equal(jobs()[0].caption_edit_recheck_count,1);
+  await poll(now+68000,[]);await deliver(now+68000);assert.equal(jobs()[0].caption_edit_outcome,'account_revalidated');
+  await deliver(now+71000);assert.equal(jobs()[0].caption_edit_outcome,'account_preserved');
+  assert.equal(personalEdit.recheckCalls.length,2);assert.equal(personalEdit.calls.length,1);assert.equal(sends().length,2);
+});
+
+test('a continually busy legacy recheck stops after three independent bounded waits',async()=>{
+  await legacyBlockedCaption();personalEdit.recheckResults.push(...Array.from({length:4},()=>({state:'backoff',attempted:false,outcome:'unavailable'})));
+  for(let index=0;index<3;index++){
+    await deliver(now+8000+index*5000);assert.equal(jobs()[0].caption_edit_outcome,`account_recheck_waiting_${index+1}`);
+  }
+  await deliver(now+23000);assert.equal(jobs()[0].caption_edit_outcome,'account_unavailable_final');
+  closeDatabase();await deliver(now+28000);
+  assert.equal(personalEdit.recheckCalls.length,4);assert.equal(personalEdit.calls.length,0);assert.equal(sends().length,1);
+});
+
+test('a lease-expired read-only recheck cannot promote the blocked post to an editor candidate',async()=>{
+  await legacyBlockedCaption();let clock=now+8000;
+  personalEdit.recheckResults.push(async()=>{clock+=61000;return {state:'ok',attempted:false,outcome:'ready',reason:'ready_to_edit'};});
+  await relay.deliverTelegramRelayOnce(decrypt,()=>clock);closeDatabase();await relay.deliverTelegramRelayOnce(decrypt,()=>clock);
+  assert.equal(jobs()[0].caption_edit_outcome,'account_invalid_final');assert.equal(personalEdit.recheckCalls.length,1);
+  assert.equal(personalEdit.calls.length,0);assert.equal(sends().length,1);assert.equal(edits().length,1);
+});
+
+for(const when of ['before-recheck','during-recheck','after-recheck'])test(`source cancellation ${when} prevents legacy caption recovery from editing`,async t=>{
+  await legacyBlockedCaption({personal:true,t});
+  if(when==='before-recheck')getSqlite().prepare('UPDATE telegram_personal_sources SET selected=0 WHERE chat_id=?').run(source);
+  personalEdit.recheckResults.push(async()=>{
+    if(when==='during-recheck')getSqlite().prepare('UPDATE telegram_personal_sources SET selected=0 WHERE chat_id=?').run(source);
+    return {state:'ok',attempted:false,outcome:'ready',reason:'ready_to_edit'};
+  });
+  await deliver(now+8000);
+  if(when==='after-recheck')getSqlite().prepare('UPDATE telegram_personal_sources SET selected=0 WHERE chat_id=?').run(source);
+  await deliver(now+12000);
+  assert.equal(jobs()[0].caption_edit_outcome,'account_invalid_final');assert.equal(personalEdit.calls.length,0);
+  assert.equal(personalEdit.recheckCalls.length,when==='before-recheck'?0:1);assert.equal(sends().length,1);
+});
+
+test('configuration changed during a legacy recheck cannot promote its old destination message',async()=>{
+  await legacyBlockedCaption();personalEdit.recheckResults.push(async()=>{
+    getSqlite().prepare("UPDATE telegram_promotion_settings SET relay_revision='changed-during-recheck'").run();
+    return {state:'ok',attempted:false,outcome:'ready',reason:'ready_to_edit'};
+  });
+  await deliver(now+8000);assert.equal(jobs()[0].caption_edit_outcome,'account_invalid_final');
+  await deliver(now+12000);assert.equal(personalEdit.recheckCalls.length,1);assert.equal(personalEdit.calls.length,0);
+});
+
+test('old-revision, old-date and uncertain media never become legacy recheck candidates',async()=>{
+  await legacyBlockedCaption();const job=jobs()[0];
+  for(const patch of ["revision='old-revision'",`sent_at=${now-86400001}`,"status='unknown'","caption_edit_outcome='account_uncertain'"]){
+    getSqlite().prepare("UPDATE telegram_relay_outbox SET revision='relay-revision',sent_at=?,status='sent',caption_edit_outcome='account_invalid'").run(now);
+    getSqlite().exec('UPDATE telegram_relay_outbox SET '+patch);
+    await deliver(now+8000);
+    assert.equal(personalEdit.recheckCalls.length,0);assert.equal(personalEdit.calls.length,0);
+  }
+  assert.equal(sends().length,1);assert.equal(edits().length,1);assert.equal(jobs()[0].id,job.id);
+});
+
+test('legacy recovery diagnostics are fixed aggregates and never expose unexpected helper text',async t=>{
+  const output=[];t.mock.method(console,'info',(...values)=>output.push(values));const original=await legacyBlockedCaption();
+  personalEdit.recheckResults.push({state:'ok',attempted:false,outcome:'invalid',reason:token+' '+original.caption});
+  await deliver(now+8000);
+  const entry=output.find(values=>values[0]==='Telegram relay blocked caption recovery.');const details=JSON.parse(entry[1]);
+  assert.deepEqual(Object.keys(details).sort(),['attempted','expectedCustomEmoji','outcome','persisted','reason','verified','waitingCount']);
+  assert.equal(details.outcome,'account_invalid_final');assert.equal(details.attempted,false);assert.equal(details.persisted,true);assert.equal(details.reason,'helper_preflight');
+  const encoded=JSON.stringify(entry);for(const secret of [token,ciphertext,original.caption,String(source),'88770'])assert.equal(encoded.includes(secret),false);
+});
+
+test('a future first preflight invalid may revalidate once, and a second invalid stays final across restart',async()=>{
+  await botEditRejected();personalEdit.results.push(
+    {state:'ok',attempted:false,outcome:'invalid',reason:'caption_mismatch'},
+    {state:'ok',attempted:false,outcome:'invalid',reason:'caption_mismatch'});
+  personalEdit.recheckResults.push({state:'ok',attempted:false,outcome:'ready',reason:'ready_to_edit'});
+  await deliver(now+8000);assert.equal(jobs()[0].caption_edit_outcome,'account_invalid');assert.equal(jobs()[0].caption_edit_recheck_count,0);
+  closeDatabase();await deliver(now+12000);
+  assert.equal(jobs()[0].caption_edit_outcome,'account_revalidated');assert.equal(jobs()[0].caption_edit_recheck_count,1);
+  await deliver(now+15000);assert.equal(jobs()[0].caption_edit_outcome,'account_invalid_final');
+  closeDatabase();await deliver(now+19000);await deliver(now+23000);
+  assert.equal(jobs()[0].caption_edit_recheck_count,1);assert.equal(personalEdit.recheckCalls.length,1);assert.equal(personalEdit.calls.length,2);
+  assert.equal(sends().length,1);assert.equal(edits().length,1);
+});
+
+test('a temporary preflight network failure can recover through one read-only validation without repeating an actual edit',async()=>{
+  await botEditRejected();personalEdit.results.push(
+    {state:'unavailable',attempted:false,outcome:'unavailable'},
+    {state:'ok',attempted:true,outcome:'preserved'});
+  personalEdit.recheckResults.push({state:'ok',attempted:false,outcome:'ready',reason:'ready_to_edit'});
+  await deliver(now+8000);assert.equal(jobs()[0].caption_edit_outcome,'account_invalid');
+  await deliver(now+12000);await deliver(now+15000);
+  assert.equal(jobs()[0].caption_edit_outcome,'account_preserved');assert.equal(jobs()[0].caption_edit_recheck_count,1);
+  closeDatabase();await deliver(now+19000);
+  assert.equal(personalEdit.calls.length,2);assert.equal(personalEdit.recheckCalls.length,1);assert.equal(sends().length,1);assert.equal(edits().length,1);
+});
+
+test('an exhausted legacy-invalid counter cannot start another read-only recovery sequence',async()=>{
+  await legacyBlockedCaption();getSqlite().prepare('UPDATE telegram_relay_outbox SET caption_edit_recheck_count=1').run();
+  await deliver(now+8000);closeDatabase();await deliver(now+12000);
+  assert.equal(personalEdit.recheckCalls.length,0);assert.equal(personalEdit.calls.length,0);assert.equal(jobs()[0].caption_edit_recheck_count,1);
+});
+
 test('a qualified personal account may repair custom emoji once after the Bot edit is confirmed changed',async()=>{
   const original=await botEditStillChanged();
   personalEdit.results.push({state:'ok',attempted:true,outcome:'preserved'});
@@ -913,7 +1073,7 @@ test('a qualified personal account may repair custom emoji once after the Bot ed
 for(const outcome of ['changed','rejected','uncertain','invalid'])test(`an attempted personal caption edit with ${outcome} is terminal across restart`,async()=>{
   await botEditStillChanged();personalEdit.results.push({state:'ok',attempted:true,outcome});
   await deliver(now+8000);
-  assert.equal(jobs()[0].caption_edit_outcome,`account_${outcome}`);assert.equal(jobs()[0].status,'sent');assert.ok(jobs()[0].last_error);
+  assert.equal(jobs()[0].caption_edit_outcome,outcome==='invalid'?'account_uncertain':`account_${outcome}`);assert.equal(jobs()[0].status,'sent');assert.ok(jobs()[0].last_error);
   closeDatabase();await deliver(now+12000);await deliver(now+16000);
   assert.equal(personalEdit.calls.length,1);assert.equal(sends().length,1);assert.equal(edits().length,1);
 });
@@ -983,9 +1143,10 @@ test('a known legacy unattempted unavailable repair reopens once and its new fin
   assert.equal(jobs()[0].next_attempt_at,now+18000);
   closeDatabase();await deliver(now+13000);assert.equal(personalEdit.calls.length,1);
   await deliver(now+18000);
-  assert.equal(personalEdit.calls.length,2);assert.equal(jobs()[0].caption_edit_outcome,'account_unavailable_final');
+  assert.equal(personalEdit.calls.length,2);assert.equal(jobs()[0].caption_edit_outcome,'account_invalid');
   assert.equal(jobs()[0].last_error,unavailable);
   closeDatabase();await deliver(now+23000);await deliver(now+28000);
+  assert.equal(jobs()[0].caption_edit_outcome,'account_unavailable_final');assert.equal(personalEdit.recheckCalls.length,1);
   assert.equal(personalEdit.calls.length,2);assert.equal(sends().length,1);assert.equal(edits().length,1);
 });
 
@@ -999,13 +1160,15 @@ test('a continually busy personal preflight stops after three bounded waits and 
   assert.equal(personalEdit.calls.length,4);assert.equal(sends().length,1);assert.equal(edits().length,1);
 });
 
-for(const state of ['disconnected','unavailable'])test(`an unavailable personal account (${state}) is terminal without waiting or actual edit retries`,async()=>{
+for(const state of ['disconnected','unavailable'])test(`an unavailable personal account (${state}) never retries actual editing and only a transient preflight permits one recheck`,async()=>{
   await botEditStillChanged();personalEdit.results.push({state,attempted:false,outcome:'unavailable'});
-  await deliver(now+8000);assert.equal(jobs()[0].caption_edit_outcome,'account_unavailable_final');
+  await deliver(now+8000);assert.equal(jobs()[0].caption_edit_outcome,state==='unavailable'?'account_invalid':'account_unavailable_final');
   await deliver(now+12000);assert.equal(personalEdit.calls.length,1);assert.equal(sends().length,1);
+  assert.equal(personalEdit.recheckCalls.length,state==='unavailable'?1:0);
+  assert.equal(jobs()[0].caption_edit_outcome,'account_unavailable_final');
 });
 
-test('a personal preflight invalid result is terminal rather than a reason to bypass editing checks',async()=>{
+test('a personal preflight invalid result allows only its strict read-only recheck and never bypasses editing checks',async()=>{
   await botEditStillChanged();personalEdit.results.push({state:'unavailable',attempted:false,outcome:'invalid'});
   await deliver(now+8000);assert.equal(jobs()[0].caption_edit_outcome,'account_invalid');
   await deliver(now+12000);assert.equal(personalEdit.calls.length,1);assert.equal(sends().length,1);
@@ -1033,10 +1196,10 @@ test('a Bot edit rejection without expected custom emoji never invokes personal 
 
 test('personal terminal outcomes never reopen even when their stored error matches a Bot rejection',async()=>{
   await botEditRejected();
-  for(const [index,outcome] of ['account_preserved','account_rejected','account_uncertain','account_changed','account_invalid','account_unavailable_final'].entries()){
+  for(const [index,outcome] of ['account_preserved','account_rejected','account_uncertain','account_changed','account_invalid_final','account_unavailable_final'].entries()){
     getSqlite().prepare('UPDATE telegram_relay_outbox SET caption_edit_outcome=?').run(outcome);
     await deliver(now+8000+index*4000);
-    assert.equal(jobs()[0].caption_edit_outcome,outcome);assert.equal(personalEdit.calls.length,0);
+    assert.equal(jobs()[0].caption_edit_outcome,outcome);assert.equal(personalEdit.calls.length,0);assert.equal(personalEdit.recheckCalls.length,0);
   }
   assert.equal(sends().length,1);assert.equal(edits().length,1);
 });
@@ -1138,7 +1301,7 @@ test('local invalid relay metadata logs a fixed worker reason and a confirmed pe
 for(const afterImport of [false,true])test(`worker guard invalidation ${afterImport?'after':'before'} module import is distinct from helper preflight refusal`,async t=>{
   const output=[];t.mock.method(console,'info',(...values)=>output.push(values));
   await botEditStillChanged();getSqlite().prepare('UPDATE telegram_relay_state SET ready_until=?').run(now+8500);
-  let reads=0;await relay.deliverTelegramRelayOnce(decrypt,()=>now+(++reads<(afterImport?4:3)?8000:9000));
+  let reads=0;await relay.deliverTelegramRelayOnce(decrypt,()=>now+(jobs()[0].caption_edit_outcome==='account_attempting'&&++reads>=(afterImport?2:1)?9000:8000));
   const entry=output.find(values=>values[0]==='Telegram relay account caption edit check.');
   const details=JSON.parse(entry[1]);
   assert.equal(details.reason,'worker_guard_changed');assert.equal(details.persisted,true);assert.equal(details.attempted,false);
@@ -1147,8 +1310,8 @@ for(const afterImport of [false,true])test(`worker guard invalidation ${afterImp
 
 test('a lost worker lease logs no persisted invalid transition and never invokes personal editing',async t=>{
   const output=[];t.mock.method(console,'info',(...values)=>output.push(values));
-  await botEditStillChanged();let reads=0;
-  await relay.deliverTelegramRelayOnce(decrypt,()=>now+(++reads<3?8000:69000));
+  await botEditStillChanged();
+  await relay.deliverTelegramRelayOnce(decrypt,()=>now+(jobs()[0].caption_edit_outcome==='account_attempting'?69000:8000));
   const entry=output.find(values=>values[0]==='Telegram relay account caption edit check.');
   const details=JSON.parse(entry[1]);
   assert.equal(details.reason,'worker_lease_lost');assert.equal(details.persisted,false);assert.equal(details.attempted,false);
@@ -1670,12 +1833,12 @@ test('v18 upgrade preserves settings and PIN while seeding permanent image ident
   const stateBefore={...db.prepare("SELECT * FROM telegram_relay_state WHERE id='primary'").get()};
   const sentId=jobs()[0].id;
   db.exec('DROP INDEX telegram_relay_caption_edits; DROP TABLE telegram_relay_media_keys');
-  for(const column of ['origin','account_generation','media_bytes','content_hash','visual_hash','media_prepared','mime_type','caption_entities','caption_edit_attempted_at','caption_edit_outcome']) {
+  for(const column of ['origin','account_generation','media_bytes','content_hash','visual_hash','media_prepared','mime_type','caption_entities','caption_edit_attempted_at','caption_edit_outcome','caption_edit_recheck_count']) {
     db.exec(`ALTER TABLE telegram_relay_outbox DROP COLUMN ${column}`);
   }
   db.exec('PRAGMA user_version=18');closeDatabase();
   const migrated=getSqlite();
-  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,24);
+  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,25);
   assert.deepEqual({...migrated.prepare("SELECT * FROM telegram_promotion_settings WHERE id='primary'").get()},settingsBefore);
   assert.deepEqual({...migrated.prepare("SELECT * FROM notes_vault_settings WHERE id='primary'").get()},vaultBefore);
   assert.deepEqual({...migrated.prepare("SELECT * FROM telegram_relay_state WHERE id='primary'").get()},stateBefore);
@@ -1698,7 +1861,7 @@ test('v19 upgrade preserves queued media bytes, permanent identities, settings a
   const settingsBefore={...db.prepare("SELECT * FROM telegram_promotion_settings WHERE id='primary'").get()};
   const stateBefore={...db.prepare("SELECT * FROM telegram_relay_state WHERE id='primary'").get()};
   const vaultBefore={...db.prepare("SELECT * FROM notes_vault_settings WHERE id='primary'").get()};
-  const columns=db.prepare('PRAGMA table_info(telegram_relay_outbox)').all().map(row=>row.name).filter(name=>!['mime_type','caption_entities','caption_edit_attempted_at','caption_edit_outcome'].includes(name));
+  const columns=db.prepare('PRAGMA table_info(telegram_relay_outbox)').all().map(row=>row.name).filter(name=>!['mime_type','caption_entities','caption_edit_attempted_at','caption_edit_outcome','caption_edit_recheck_count'].includes(name));
   restoreLegacyMediaKeys(db);
   db.exec(`BEGIN IMMEDIATE;
     CREATE TABLE telegram_relay_outbox_v19 (
@@ -1722,7 +1885,7 @@ test('v19 upgrade preserves queued media bytes, permanent identities, settings a
   assert.throws(()=>db.prepare(`INSERT INTO telegram_relay_outbox(source_chat_id,source_message_id,fingerprint,
     queued_at,revision,media_kind,file_id,file_unique_id,caption) VALUES(? ,9999,'before-video',?,'relay-revision','video','v','vu','Video')`).run(source,now),/CHECK/);
   closeDatabase();const migrated=getSqlite();
-  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,24);
+  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,25);
   assert.deepEqual(jobs().map(({caption_entities,...row})=>({...row})),rowsBefore);
   assert.ok(jobs().every(row=>row.caption_entities===''));
   assert.deepEqual(migrated.prepare('SELECT * FROM telegram_relay_media_keys ORDER BY media_key').all().map(row=>({...row})),keysBefore);
@@ -1754,7 +1917,7 @@ test('v20 upgrade marks unavailable legacy caption entities without changing job
   restoreLegacyMediaKeys(db);
   db.exec('DROP INDEX telegram_relay_caption_edits; ALTER TABLE telegram_relay_outbox DROP COLUMN caption_edit_attempted_at; ALTER TABLE telegram_relay_outbox DROP COLUMN caption_edit_outcome; ALTER TABLE telegram_relay_outbox DROP COLUMN caption_entities; PRAGMA user_version=20');
   closeDatabase();const migrated=getSqlite();
-  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,24);
+  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,25);
   assert.deepEqual(jobs().map(({caption_entities,...row})=>({...row})),beforeJobs);
   assert.ok(jobs().every(row=>row.caption_entities===''),'old queues mark unavailable original custom emoji metadata instead of fabricating an empty entity list');
   assert.deepEqual(migrated.prepare('SELECT * FROM telegram_relay_media_keys ORDER BY media_key').all().map(row=>({...row})),beforeKeys);
@@ -1783,7 +1946,7 @@ test('v21 upgrade preserves sent messages, pending media, identities, settings a
   restoreLegacyMediaKeys(db);
   db.exec('DROP INDEX telegram_relay_caption_edits; ALTER TABLE telegram_relay_outbox DROP COLUMN caption_edit_attempted_at; ALTER TABLE telegram_relay_outbox DROP COLUMN caption_edit_outcome; PRAGMA user_version=21');
   closeDatabase();const migrated=getSqlite();
-  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,24);
+  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,25);
   assert.deepEqual(jobs().map(({caption_edit_attempted_at,caption_edit_outcome,...row})=>({...row})),beforeJobs);
   assert.ok(jobs().every(row=>row.caption_edit_attempted_at===0&&row.caption_edit_outcome===''));
   assert.deepEqual(migrated.prepare('SELECT * FROM telegram_relay_media_keys ORDER BY media_key').all().map(row=>({...row})),beforeKeys);
@@ -1810,7 +1973,7 @@ test('v22 upgrade removes only album uniqueness and preserves messages, media ke
   restoreLegacyMediaKeys(db);
   db.exec("DROP INDEX telegram_relay_album; CREATE UNIQUE INDEX telegram_relay_album ON telegram_relay_outbox(source_chat_id,media_group_id) WHERE media_group_id<>''; PRAGMA user_version=22");
   closeDatabase();const migrated=getSqlite();
-  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,24);
+  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,25);
   assert.deepEqual(jobs().map(row=>({...row})),beforeJobs);
   assert.deepEqual(migrated.prepare('SELECT * FROM telegram_relay_media_keys ORDER BY media_key').all().map(row=>({...row})),beforeKeys);
   assert.deepEqual({...migrated.prepare("SELECT * FROM telegram_promotion_settings WHERE id='primary'").get()},beforeSettings);
@@ -1847,7 +2010,7 @@ test('v23 upgrade dates every legacy key without changing outbox data, cursors, 
   const legacy=[['legacy-sent-key',101],['legacy-pending-key',102],['legacy-unknown-key',103],['legacy-sending-key',104],['orphan-legacy-key',99999]];
   for(const [key,id] of legacy)db.prepare('INSERT INTO telegram_relay_media_keys(media_key,outbox_id) VALUES(?,?)').run(key,id);
   db.exec('PRAGMA user_version=23');closeDatabase();const migrated=getSqlite();
-  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,24);
+  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,25);
   assert.deepEqual(jobs().map(row=>({...row})),beforeJobs);
   assert.deepEqual({...migrated.prepare("SELECT * FROM telegram_promotion_settings WHERE id='primary'").get()},beforeSettings);
   assert.deepEqual({...migrated.prepare("SELECT * FROM telegram_relay_state WHERE id='primary'").get()},beforeState);
@@ -1873,6 +2036,18 @@ test('v23 upgrade dates every legacy key without changing outbox data, cursors, 
     revision,media_kind,file_id,file_unique_id,caption) VALUES(?,2101,'replayed-source',?,'relay-revision','photo','new-file','new-unique','Caption')`)
     .run(source,after),/UNIQUE/);
   assert.equal(sends().length,0);
+});
+
+test('v24 upgrade adds a zero recovery counter without changing existing media, statuses or daily keys',async t=>{
+  await configureAccount(t);await relay.enqueuePersonalRelayMedia(accountPhoto());await deliver(now);
+  await relay.enqueuePersonalRelayMedia(accountPhoto({sourceMessageId:2002,sourceMediaId:'v24-pending',bytes:Buffer.from('v24-pending')}));
+  const db=getSqlite(),before=jobs().map(({caption_edit_recheck_count,...row})=>({...row}));
+  const keys=db.prepare('SELECT * FROM telegram_relay_media_keys ORDER BY day_key,media_key').all().map(row=>({...row}));
+  const runtime={...state()};db.exec('ALTER TABLE telegram_relay_outbox DROP COLUMN caption_edit_recheck_count; PRAGMA user_version=24');
+  closeDatabase();const migrated=getSqlite();assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,25);
+  assert.deepEqual(jobs().map(({caption_edit_recheck_count,...row})=>({...row})),before);
+  assert.ok(jobs().every(job=>job.caption_edit_recheck_count===0));assert.deepEqual({...state()},runtime);
+  assert.deepEqual(migrated.prepare('SELECT * FROM telegram_relay_media_keys ORDER BY day_key,media_key').all().map(row=>({...row})),keys);
 });
 
 test('a full bot queue retains the source update until capacity is available and then queues it exactly once',async()=>{
