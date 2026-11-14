@@ -12,7 +12,7 @@ export function getDataDirectory(): string {
 function migrate(db: DatabaseSync) {
   if (migrated.has(db)) return;
   const readVersion = () => (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
-  if (readVersion() < 25) {
+  if (readVersion() < 26) {
     db.exec("BEGIN IMMEDIATE");
     try {
       // Read again inside the write lock, so concurrent process starts cannot
@@ -436,6 +436,41 @@ function migrate(db: DatabaseSync) {
           PRAGMA user_version=25;
         `);
       }
+      if (version < 26) db.exec(`
+        CREATE TABLE IF NOT EXISTS telegram_join_gate_settings (
+          id TEXT PRIMARY KEY,enabled INTEGER NOT NULL DEFAULT 0,target_chat_id INTEGER NOT NULL DEFAULT 0,
+          target_title TEXT NOT NULL DEFAULT '',requirements TEXT NOT NULL DEFAULT '[]',revision TEXT NOT NULL DEFAULT '',
+          token_hash TEXT NOT NULL DEFAULT '',bot_id INTEGER NOT NULL DEFAULT 0,invite_link TEXT NOT NULL DEFAULT '',started_at INTEGER NOT NULL DEFAULT 0,
+          last_checked_at INTEGER NOT NULL DEFAULT 0,last_error TEXT NOT NULL DEFAULT '',
+          lease_id TEXT NOT NULL DEFAULT '',lease_until INTEGER NOT NULL DEFAULT 0,next_run_at INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS telegram_join_gate_members (
+          target_chat_id INTEGER NOT NULL,user_id INTEGER NOT NULL,revision TEXT NOT NULL,
+          state TEXT NOT NULL DEFAULT 'pending',blocked_by_gate INTEGER NOT NULL DEFAULT 0,ban_until INTEGER NOT NULL DEFAULT 0,
+          checked_at INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(target_chat_id,user_id)
+        );
+        CREATE TABLE IF NOT EXISTS telegram_join_gate_jobs (
+          user_id INTEGER PRIMARY KEY,revision TEXT NOT NULL,request_pending INTEGER NOT NULL DEFAULT 0,
+          notify_pending INTEGER NOT NULL DEFAULT 0,notification_attempted INTEGER NOT NULL DEFAULT 0,
+          callback_id TEXT NOT NULL DEFAULT '',sequence INTEGER NOT NULL DEFAULT 1,status TEXT NOT NULL DEFAULT 'pending',
+          attempts INTEGER NOT NULL DEFAULT 0,next_attempt_at INTEGER NOT NULL DEFAULT 0,last_error TEXT NOT NULL DEFAULT '',
+          lease_id TEXT NOT NULL DEFAULT '',lease_until INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS telegram_join_gate_candidates (
+          chat_id INTEGER PRIMARY KEY,title TEXT NOT NULL,token_hash TEXT NOT NULL,verified_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS telegram_join_gate_discovery (
+          chat_id INTEGER PRIMARY KEY,requested_by INTEGER NOT NULL DEFAULT 0,token_hash TEXT NOT NULL,
+          queued_at INTEGER NOT NULL,next_attempt_at INTEGER NOT NULL DEFAULT 0,attempts INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS telegram_join_gate_events (
+          token_hash TEXT NOT NULL,update_id INTEGER NOT NULL,created_at INTEGER NOT NULL,
+          PRIMARY KEY(token_hash,update_id)
+        );
+        CREATE INDEX IF NOT EXISTS telegram_join_gate_member_check ON telegram_join_gate_members(revision,state,checked_at);
+        CREATE INDEX IF NOT EXISTS telegram_join_gate_job_due ON telegram_join_gate_jobs(status,next_attempt_at);
+        PRAGMA user_version=26;
+      `);
       db.exec("COMMIT");
     } catch (error) { db.exec("ROLLBACK"); throw error; }
   }

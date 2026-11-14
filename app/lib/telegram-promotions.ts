@@ -6,6 +6,7 @@ import { sendTelegramBrandCard, telegramPublicOrigin } from "./telegram-brand-ca
 import { startTelegramWelcomeWorker } from "./telegram-welcome";
 import { cancelPrivateBrandUpdates, privateBrandUpdateStatus, startTelegramPrivateUpdatesWorker } from "./telegram-private-updates";
 import { cancelRelayPending, relayStatus, startTelegramRelayWorker } from "./telegram-relay";
+import { joinGateStatus, saveJoinGateSettings, type JoinGateInput } from "./telegram-join-gate";
 import { RELAY_DEFAULT_TARGET } from "./telegram-relay-content";
 
 type StoredSettings = {
@@ -101,6 +102,14 @@ function decryptToken(stored: string) {
     const token = Buffer.concat([decipher.update(Buffer.from(ciphertext, "base64url")), decipher.final()]).toString("utf8");
     return TOKEN_FORMAT.test(token) ? token : "";
   } catch { return ""; }
+}
+
+export function telegramJoinGateStatus() {
+  return joinGateStatus(getSqlite());
+}
+
+export async function saveTelegramJoinGateSettings(input: JoinGateInput) {
+  return saveJoinGateSettings(getSqlite(), input, decryptToken);
 }
 
 function storedSettings(db: DatabaseSync): StoredSettings {

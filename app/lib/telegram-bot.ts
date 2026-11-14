@@ -1,7 +1,8 @@
 import { randomBytes } from "node:crypto";
 import { request } from "node:https";
 
-type TelegramMethod = "getMe" | "getChat" | "getChatMember" | "getWebhookInfo" | "getFile" | "sendMessage" | "sendPhoto" | "sendAnimation" | "sendVideo" | "sendDocument" | "editMessageCaption";
+type TelegramMethod = "getMe" | "getChat" | "getChatMember" | "getWebhookInfo" | "getFile" | "sendMessage" | "sendPhoto" | "sendAnimation" | "sendVideo" | "sendDocument" | "editMessageCaption" | "createChatInviteLink";
+type TelegramBooleanMethod = "approveChatJoinRequest" | "declineChatJoinRequest" | "banChatMember" | "unbanChatMember";
 export type TelegramUpload = { field: "photo" | "animation" | "video" | "document"; fileName: string; mime: string; bytes: Buffer };
 type TelegramReply<Result> =
   | { ok: true; result: Result }
@@ -54,7 +55,7 @@ function multipartPayload(parameters: Record<string, unknown>, upload: TelegramU
   return { body: Buffer.concat(parts), contentType: `multipart/form-data; boundary=${boundary}` };
 }
 
-function requestTelegram<Result>(token: string, method: TelegramMethod | "getUpdates" | "answerCallbackQuery", parameters: Record<string, unknown>, parseResult: (value: unknown) => Result | null, upload?: TelegramUpload): Promise<TelegramReply<Result>> {
+function requestTelegram<Result>(token: string, method: TelegramMethod | TelegramBooleanMethod | "getUpdates" | "answerCallbackQuery", parameters: Record<string, unknown>, parseResult: (value: unknown) => Result | null, upload?: TelegramUpload): Promise<TelegramReply<Result>> {
   // Telegram requires the token in the request path. Use Node HTTPS directly so
   // Next's fetch tracing never sees that URL, and keep raw replies private.
   return new Promise(resolve => {
@@ -91,8 +92,13 @@ export function telegramRequest(token: string, method: TelegramMethod, parameter
   return requestTelegram(token, method, parameters, asRecord, upload);
 }
 
+/** Moderation methods return true, rather than a Message or Chat object. */
+export function telegramBooleanRequest(token: string, method: TelegramBooleanMethod, parameters: Record<string, unknown>) {
+  return requestTelegram(token, method, parameters, value => value === true ? true : null);
+}
+
 export function telegramUpdates(token: string, offset: number) {
-  return requestTelegram(token, "getUpdates", { offset, timeout: 10, limit: 10, allowed_updates: ["chat_member", "message", "callback_query"] }, asUpdates);
+  return requestTelegram(token, "getUpdates", { offset, timeout: 10, limit: 10, allowed_updates: ["chat_member", "message", "callback_query", "chat_join_request", "my_chat_member", "channel_post"] }, asUpdates);
 }
 
 /** The promotion bot owns a separate update stream from the private ChatBot. */

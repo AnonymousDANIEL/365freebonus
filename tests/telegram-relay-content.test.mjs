@@ -338,7 +338,7 @@ test('album identifiers and media file IDs remain validated opaque values', () =
   assert.equal(prepare(message({ photo: [] })), null);
 });
 
-test('relay long polling uses a separate allowed-update stream and keeps the ChatBot stream unchanged', async t => {
+test('relay long polling stays separate while ChatBot also receives gate membership and discovery updates', async t => {
   const calls = [];
   t.mock.method(https, 'request', (options, callback) => {
     const response = new EventEmitter(); response.setEncoding = () => response;
@@ -354,9 +354,35 @@ test('relay long polling uses a separate allowed-update stream and keeps the Cha
   const chat = await transport.telegramUpdates('fixture-chat-token', 23);
   assert.equal(relay.ok, true); assert.equal(chat.ok, true);
   assert.deepEqual(calls[0].parameters, { offset: 17, timeout: 10, limit: 20, allowed_updates: ['message', 'channel_post', 'my_chat_member'] });
-  assert.deepEqual(calls[1].parameters, { offset: 23, timeout: 10, limit: 10, allowed_updates: ['chat_member', 'message', 'callback_query'] });
+  assert.deepEqual(calls[1].parameters, { offset: 23, timeout: 10, limit: 10, allowed_updates: ['chat_member', 'message', 'callback_query', 'chat_join_request', 'my_chat_member', 'channel_post'] });
   assert.ok(calls[0].path.startsWith('/botfixture-promotion-token/'));
   assert.ok(calls[1].path.startsWith('/botfixture-chat-token/'));
+});
+
+test('gate moderation transport accepts only a confirmed true and preserves Telegram retry deadlines', async t => {
+  let responseBody;
+  const calls=[];
+  t.mock.method(https,'request',(options,callback)=>{
+    const response=new EventEmitter();response.setEncoding=()=>response;
+    const outgoing=new EventEmitter();
+    outgoing.end=body=>{
+      calls.push({path:options.path,parameters:JSON.parse(body)});callback(response);
+      queueMicrotask(()=>{response.emit('data',JSON.stringify(responseBody));response.emit('end');});
+    };
+    return outgoing;
+  });
+  for(const method of ['approveChatJoinRequest','declineChatJoinRequest','banChatMember','unbanChatMember']){
+    responseBody={ok:true,result:true};
+    assert.deepEqual(await transport.telegramBooleanRequest('fixture-chat-token',method,{chat_id:-100123,user_id:701}),{ok:true,result:true});
+    assert.ok(calls.at(-1).path.endsWith('/'+method));
+  }
+  for(const result of [false,{},null,'true']){
+    responseBody={ok:true,result};
+    assert.equal(await transport.telegramBooleanRequest('fixture-chat-token','approveChatJoinRequest',{chat_id:-100123,user_id:701}),null);
+  }
+  responseBody={ok:false,error_code:429,parameters:{retry_after:120}};
+  assert.deepEqual(await transport.telegramBooleanRequest('fixture-chat-token','banChatMember',{chat_id:-100123,user_id:701}),{ok:false,code:429,retryAfter:120});
+  assert.equal(calls.length,9,'each moderation request is submitted once without a transport retry');
 });
 
 test('video multipart transport keeps caption and fixed owner buttons on the uploaded video', async t => {

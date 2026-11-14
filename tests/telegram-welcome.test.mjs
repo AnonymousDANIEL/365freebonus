@@ -8,7 +8,7 @@ import ts from 'typescript';
 
 const fixture = mkdtempSync(path.join(tmpdir(), 'directory-telegram-welcome-'));
 writeFileSync(path.join(fixture, 'package.json'), '{"type":"commonjs"}');
-for (const name of ['auth-core', 'brand-links', 'directory', 'image-url', 'image-media', 'telegram-background', 'telegram-brand-card', 'telegram-brand-search', 'sqlite', 'telegram-bot', 'telegram-keywords', 'telegram-followups', 'telegram-welcome']) {
+for (const name of ['auth-core', 'brand-links', 'directory', 'image-url', 'image-media', 'telegram-background', 'telegram-brand-card', 'telegram-brand-search', 'sqlite', 'telegram-bot', 'telegram-keywords', 'telegram-followups', 'telegram-join-gate', 'telegram-welcome']) {
   const source = readFileSync(new URL(`../app/lib/${name}.ts`, import.meta.url), 'utf8');
   const { outputText } = ts.transpileModule(source, {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, esModuleInterop: true },
@@ -726,4 +726,35 @@ test('persistent choices use two columns with odd final choices alone and naviga
   assert.deepEqual(middle.map(row=>row.length),[2,2,2,2,2]);
   assert.deepEqual(middle.at(-1),[{text:'上一页 › 1'},{text:'下一页 › 3'}]);
   assert.deepEqual(last,[[{text:'choice 17'}],[{text:'上一页 › 2'}]]);
+});
+
+function configureHotGate() {
+  const tokenHash=require('node:crypto').createHash('sha256').update(ciphertext).digest('hex');
+  getSqlite().prepare(`INSERT INTO telegram_join_gate_settings
+    (id,enabled,target_chat_id,requirements,revision,token_hash,invite_link,started_at,last_checked_at)
+    VALUES('primary',1,-1009998888,?,'gate-fixture',?,'https://t.me/+fixture_approval',?,?)`)
+    .run(JSON.stringify([{chatId:String(chatId),label:'Official',url:'https://t.me/fixtureofficial'}]),tokenHash,now-1000,now);
+}
+
+test('an enabled Hot gate exposes its private entry without replacing ordinary keyword choices', async t => {
+  configureWelcome({enabled:false});configurePrivate();configureKeywords([['website','exact','Website reply']]);configureHotGate();
+  const requests=mockTransport(t,[ok([privateMessage(2300)])],[successfulSend],{chatIds:[privateChatId]});
+  await tick();
+  assert.deepEqual(requests.parameters()[0].reply_markup.keyboard,[[{text:'website'}],[{text:'🔒 Hot 频道'}]]);
+  assert.equal(requests.parameters()[0].reply_markup.is_persistent,true);
+});
+
+test('Hot choices use the existing durable update cursor and do not trigger keyword or followup replies', async t => {
+  configureWelcome({enabled:false});configurePrivate();configureKeywords([['🔒 Hot 频道','exact','Wrong keyword route']]);configureHotGate();
+  const db=getSqlite();
+  db.prepare("INSERT INTO telegram_private_followups(chat_id,revision,status,opted_out) VALUES(?,'pending-followup','pending',1)").run(privateChatId);
+  const input=privateMessage(2400,{text:'🔒 Hot 频道'});
+  const requests=mockTransport(t,[ok([input,input])],[],{chatIds:[privateChatId]});
+  await tick();
+  assert.equal(requests.messages().length,0,'the leased gate worker, rather than the keyword sender, owns its response');
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM telegram_join_gate_jobs').get().n,1);
+  assert.equal(db.prepare('SELECT notify_pending FROM telegram_join_gate_jobs').get().notify_pending,1);
+  assert.equal(state().next_offset,2401);
+  const followup=db.prepare('SELECT status,opted_out FROM telegram_private_followups WHERE chat_id=?').get(privateChatId);
+  assert.equal(followup.status,'cancelled');assert.equal(followup.opted_out,1,'a Hot check does not re-subscribe notifications');
 });

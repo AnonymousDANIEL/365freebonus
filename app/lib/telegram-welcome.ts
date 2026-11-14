@@ -7,6 +7,7 @@ import { answerTelegramCallback, telegramRequest, telegramUpdates } from "./tele
 import { sendTelegramBrandCard, telegramPublicOrigin } from "./telegram-brand-card";
 import { readPublicTelegramBrand, searchPublicTelegramBrands } from "./telegram-brand-search";
 import { normalizeTelegramKeyword } from "./telegram-keywords";
+import { joinGateMenuEnabled, observeJoinGateUpdate, startJoinGateWorker } from "./telegram-join-gate";
 import { cancelPrivateFollowupReply, observePrivateFollowupInput, privateFollowupSnapshot, recordPrivateFollowupOutbound, sendDuePrivateFollowups, type FollowupSettings } from "./telegram-followups";
 
 type DecryptToken = (ciphertext: string) => string;
@@ -250,7 +251,8 @@ function privateKeyboard(db: DatabaseSync, page: number): { page: number; hasBut
   const rules = db.prepare("SELECT keyword FROM telegram_keyword_rules WHERE show_button = 1 ORDER BY id LIMIT ? OFFSET ?")
     .all(MENU_PAGE_SIZE + 1, page * MENU_PAGE_SIZE) as { keyword: string }[];
   if (page > 0 && !rules.length) return privateKeyboard(db, 0);
-  if (!rules.length) return { page: 0, hasButtons: false, markup: { remove_keyboard: true } };
+  const hotEntry = joinGateMenuEnabled(db);
+  if (!rules.length && !hotEntry) return { page: 0, hasButtons: false, markup: { remove_keyboard: true } };
   const buttons = rules.slice(0, MENU_PAGE_SIZE).map(rule => ({ text: rule.keyword.startsWith("/") ? `／${rule.keyword.slice(1)}` : rule.keyword }));
   const keyboard: { text: string }[][] = [];
   for (let index = 0; index < buttons.length; index += 2) keyboard.push(buttons.slice(index, index + 2));
@@ -268,6 +270,7 @@ function privateKeyboard(db: DatabaseSync, page: number): { page: number; hasBut
     if (rules.length > MENU_PAGE_SIZE) navigation.push(label("下一页", page + 1));
   }
   if (navigation.length) keyboard.push(navigation);
+  if (hotEntry) keyboard.push([{ text: "🔒 Hot 频道" }]);
   return { page, hasButtons: true, markup: { keyboard, is_persistent: true, resize_keyboard: true, one_time_keyboard: false } };
 }
 
@@ -374,6 +377,13 @@ function claimUpdate(db: DatabaseSync, claim: PollClaim, id: number, update: Rec
     const result = db.prepare(`UPDATE telegram_welcome_state SET next_offset = ?, lease_until = ?
       WHERE ${ownedState} AND next_offset <= ?`).run(id + 1, now + LEASE_MS, claim.revision, claim.leaseId, id);
     if (!result.changes) return null;
+    if (observeJoinGateUpdate(db, update, id, now)) {
+      const gateMessage = asRecord(update.message) ?? asRecord(asRecord(update.callback_query)?.message);
+      const gateChat = asRecord(gateMessage?.chat);
+      if (gateChat?.type === "private" && positiveInteger(gateChat.id))
+        cancelPrivateFollowupReply(db, gateChat.id, privateFollowupSnapshot(db, gateChat.id));
+      return { reply: null };
+    }
     const reply = welcomeReply(db, update, settings) ?? brandCallbackReply(db, update, settings, now)
       ?? keywordReply(db, update, settings, now) ?? privateReply(db, update, settings, now);
     observeFollowupEvent(db, settings, id, update, reply, now);
@@ -522,6 +532,7 @@ const workers = globalThis as typeof globalThis & { telegramWelcomeWorkerStarted
 export function startTelegramWelcomeWorker(decryptToken: DecryptToken) {
   if (workers.telegramWelcomeWorkerStarted) return;
   workers.telegramWelcomeWorkerStarted = true;
+  startJoinGateWorker(decryptToken);
   let running = false;
   let reportedError = false;
   const tick = async () => {

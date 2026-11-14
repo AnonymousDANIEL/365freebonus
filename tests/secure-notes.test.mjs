@@ -311,7 +311,7 @@ test('migration14 removes former website credentials and preserves unrelated tab
   const oldDir=process.env.DATA_DIR;
   process.env.DATA_DIR=legacyDir;
   const db=sqlite.getSqlite();
-  assert.equal(db.prepare('PRAGMA user_version').get().user_version,25);
+  assert.equal(db.prepare('PRAGMA user_version').get().user_version,26);
   assert.equal(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='website_logins'").get(),undefined);
   assert.equal(db.prepare('SELECT marker FROM brands').get().marker,'keep-brand');
   assert.equal(db.prepare('SELECT marker FROM site_settings').get().marker,'keep-settings');
@@ -403,7 +403,7 @@ test('migration14 revokes v13 ephemeral unlocks while preserving existing PIN an
   db.prepare('INSERT INTO notes_vault_unlocks VALUES(?,?,?,?)').run(createHash('sha256').update(token).digest('hex'),auth.sessionIdHash(admin.payload.jti),vaultBefore.revision,Date.now()+900000);
   closeDatabase();
   const reopened=sqlite.getSqlite();
-  assert.equal(reopened.prepare('PRAGMA user_version').get().user_version,25);
+  assert.equal(reopened.prepare('PRAGMA user_version').get().user_version,26);
   assert.deepEqual(reopened.prepare('SELECT * FROM notes_vault_settings').get(),vaultBefore);
   assert.deepEqual(reopened.prepare('SELECT * FROM secure_notes WHERE id=?').get(saved.id),noteBefore);
   assert.equal(reopened.prepare('SELECT COUNT(*) AS count FROM notes_vault_unlocks').get().count,0);

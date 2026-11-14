@@ -142,7 +142,7 @@ test('image settings migration preserves the v1 row and old updates do not clear
     process.env.DATA_DIR = legacyPath;
     const upgraded = sqlite.getSqlite();
     const row = upgraded.prepare('SELECT * FROM site_settings').get();
-    assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version, 25);
+    assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version, 26);
     assert.deepEqual({ ...row }, {
       id: 'primary', name: 'Existing site', eyebrow: 'Tagline', headline: 'Existing headline',
       description: 'Existing description', announcement: 'Existing notice', contact_url: 'https://contact.example',

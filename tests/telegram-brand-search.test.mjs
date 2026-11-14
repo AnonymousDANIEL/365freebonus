@@ -12,7 +12,7 @@ const fixture = mkdtempSync(path.join(tmpdir(), 'telegram-brand-search-'));
 writeFileSync(path.join(fixture, 'package.json'), '{"type":"commonjs"}');
 for (const name of [
   'auth-core', 'brand-links', 'directory', 'image-url', 'sqlite', 'telegram-bot',
-  'telegram-keywords', 'telegram-followups', 'telegram-brand-card', 'telegram-brand-search', 'telegram-welcome',
+  'telegram-keywords', 'telegram-followups', 'telegram-brand-card', 'telegram-brand-search', 'telegram-join-gate', 'telegram-welcome',
 ]) {
   writeFileSync(path.join(fixture, `${name}.js`), ts.transpileModule(
     readFileSync(new URL(`../app/lib/${name}.ts`, import.meta.url), 'utf8'),

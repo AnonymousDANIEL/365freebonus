@@ -35,7 +35,7 @@ writeFixture('package.json', '{"type":"commonjs"}');
 symlinkSync(fileURLToPath(new URL('../node_modules', import.meta.url)), path.join(fixture, 'node_modules'), 'dir');
 for (const relative of [
   'app/api/admin/_security', 'app/api/admin/telegram/route',
-  ...['auth-core', 'brand-links', 'directory', 'image-media', 'image-url', 'sqlite', 'telegram-background', 'telegram-brand-card', 'telegram-followups', 'telegram-private-updates', 'telegram-relay-content', 'telegram-relay-media', 'telegram-relay', 'telegram-promotions'].map(name => `app/lib/${name}`),
+  ...['auth-core', 'brand-links', 'directory', 'image-media', 'image-url', 'sqlite', 'telegram-background', 'telegram-brand-card', 'telegram-followups', 'telegram-private-updates', 'telegram-relay-content', 'telegram-relay-media', 'telegram-relay', 'telegram-join-gate', 'telegram-promotions'].map(name => `app/lib/${name}`),
 ]) {
   const source = readFileSync(new URL(`../${relative}.ts`, import.meta.url), 'utf8');
   const { outputText } = ts.transpileModule(source, {

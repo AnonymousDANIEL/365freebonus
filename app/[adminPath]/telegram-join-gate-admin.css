@@ -1,0 +1,17 @@
+.cms-telegram-gate-fieldset { border: 0; padding: 0; margin: 0; min-width: 0; display: grid; gap: 1rem; }
+.cms-telegram-gate-fieldset > label, .cms-telegram-gate-rule > label, .cms-telegram-gate-links > label { display: grid; gap: .5rem; }
+.cms-telegram-gate-fieldset > .cms-telegram-switch { display: flex; }
+.cms-telegram-gate-heading, .cms-telegram-gate-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .75rem; }
+.cms-telegram-gate-requirements, .cms-telegram-gate-runtime, .cms-telegram-gate-links { display: grid; gap: 1rem; min-width: 0; }
+.cms-telegram-gate-rule { display: grid; gap: .85rem; padding: 1rem; border: 1px solid var(--cms-border, #ded5e8); border-radius: .75rem; }
+.cms-telegram-gate-notes { font-size: .8rem; line-height: 1.7; }
+.cms-telegram-gate-notes p { margin: .5rem 0; }
+.cms-telegram-gate-links input { min-width: 0; width: 100%; }
+.cms-telegram-gate-actions .cms-primary, .cms-telegram-gate-actions .cms-secondary { display: inline-flex; align-items: center; gap: .4rem; }
+@media (max-width: 600px) { .cms-telegram-gate-actions { align-items: stretch; } .cms-telegram-gate-actions > * { justify-content: center; flex: 1 1 100%; } }
+.cms-shell .cms-telegram-gate-rule { border-color: var(--cms-line); background: var(--cms-input); }
+.cms-shell .cms-telegram-gate select { display: block; width: 100%; min-height: 41px; border: 1px solid var(--cms-line); border-radius: 6px; padding: 10px 12px; background: var(--cms-input); color: var(--cms-text); }
+.cms-shell .cms-telegram-gate select:focus { border-color: var(--cms-green); outline: 1px solid var(--cms-accent-bg); }
+.cms-shell .cms-telegram-gate .cms-icon-button { display: grid; place-items: center; width: 34px; height: 34px; border: 1px solid var(--cms-line); border-radius: 6px; background: var(--cms-inset); color: var(--cms-text); }
+.cms-shell .cms-telegram-gate .cms-icon-button:hover { color: var(--cms-error); border-color: var(--cms-error); }
+.cms-shell .cms-telegram-gate-notes p { max-width: none; color: var(--cms-muted); }
