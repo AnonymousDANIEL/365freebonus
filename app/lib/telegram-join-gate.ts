@@ -161,7 +161,7 @@ export async function saveJoinGateSettings(db: DatabaseSync, raw: JoinGateInput,
     const verified = await verifyConfiguration(db, token, candidate, valid);
     const webhook = await objectRequest(token, "getWebhookInfo", {}, valid);
     if (webhook.url) throw new JoinGateError("ChatBot 正由其他 Webhook 接收，请先处理接收冲突。");
-    const invite = await objectRequest(token, "createChatInviteLink", { chat_id: identity.id, name: "Hot 入群审批", creates_join_request: true }, valid);
+    const invite = await objectRequest(token, "createChatInviteLink", { chat_id: identity.id, name: "365 Free Bonus Hot approval", creates_join_request: true }, valid);
     if (invite.creates_join_request !== true || typeof invite.invite_link !== "string" || !/^https:\/\/t\.me\/(?:\+|joinchat\/)[A-Za-z0-9_-]+$/.test(invite.invite_link))
       throw new JoinGateError("Telegram 没有确认创建审批邀请链接，门禁未启用。", 503);
     transaction(db, () => {
@@ -218,7 +218,7 @@ export function observeJoinGateUpdate(db: DatabaseSync, update: RecordValue, upd
     && callbackSender?.is_bot === false && positive(callbackSender.id) && callbackChat?.type === "private" && callbackChat.id === callbackSender.id;
   const text = privateMessage && typeof message.text === "string" && message.via_bot == null && message.forward_origin == null ? message.text.trim() : "";
   const privateCommand = Boolean(text && positive(message?.date) && message.date >= Math.floor(value.started_at / 1000)
-    && (/^\/hot(?:@FreeBonus365ChatBot)?\s*$/i.test(text) || /^\/start(?:@FreeBonus365ChatBot)?\s+hot\s*$/i.test(text) || text === "🔒 Hot 频道"));
+    && (/^\/hot(?:@FreeBonus365ChatBot)?\s*$/i.test(text) || /^\/start(?:@FreeBonus365ChatBot)?\s+hot\s*$/i.test(text) || text === "🔞365 Free Bonus Hot" || text === "🔒 Hot 频道"));
   const request = asRecord(update.chat_join_request), requestChat = asRecord(request?.chat), requestUser = asRecord(request?.from);
   const event = asRecord(update.chat_member), eventChat = asRecord(event?.chat), changed = asRecord(event?.new_chat_member), eventUser = asRecord(changed?.user);
   const requestValid = requestChat?.id === value.target_chat_id && requestUser?.is_bot === false && positive(requestUser.id)
@@ -301,10 +301,10 @@ async function notifyCustomer(db: DatabaseSync, claim: Claim, missing: JoinGateR
   const valid = () => claimAllowed(db, claim, clock());
   if (!valid()) return;
   const parameters = missing.length
-    ? { text: `请先加入以下所有地方，再点击验证：\n${missing.map(item => item.label).join("\n")}`,
-      reply_markup: { inline_keyboard: [...missing.map(item => [{ text: item.label, url: item.url }]), [{ text: "✅ 我已加入，重新验证", callback_data: "hot:check" }]] } }
-    : { text: admitted ? "加入条件已通过，你已在 Hot 频道。" : "所有加入条件已验证通过，请点击下方按钮申请进入 Hot。",
-      reply_markup: { inline_keyboard: [[{ text: "🔥 申请进入 Hot", url: claim.value.invite_link }], [{ text: "✅ 重新验证", callback_data: "hot:check" }]] } };
+    ? { text: `Please join all the channels below, then tap Verify:\n${missing.map(item => item.label).join("\n")}`,
+      reply_markup: { inline_keyboard: [...missing.map(item => [{ text: item.label, url: item.url }]), [{ text: "✅ I've joined — Verify", callback_data: "hot:check" }]] } }
+    : { text: admitted ? "You meet all membership requirements and already have access to 365 Free Bonus Hot." : "All membership requirements are met. Tap below to request access to 365 Free Bonus Hot.",
+      reply_markup: { inline_keyboard: [[{ text: "🔞 Enter 365 Free Bonus Hot", url: claim.value.invite_link }], [{ text: "✅ Verify again", callback_data: "hot:check" }]] } };
   // Persist before the only send. A timeout never automatically duplicates a DM.
   const changed = db.prepare(`UPDATE telegram_join_gate_jobs SET notification_attempted=1 WHERE user_id=? AND revision=?
     AND sequence=? AND lease_id=? AND notification_attempted=0`).run(job.user_id, claim.value.revision, job.sequence, claim.leaseId);

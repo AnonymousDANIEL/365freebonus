@@ -49,8 +49,8 @@ const ownedState = "id = 'primary' AND revision = ? AND lease_id = ?";
 const RATE_LIMIT_ERROR = "Telegram 正在限制发送频率，稍后重试。";
 const INVALID_TOKEN_ERROR = "无法使用 Telegram 机器人 Token，请检查设置。";
 const PRIVATE_START_URL = "https://t.me/FreeBonus365ChatBot?start=welcome";
-const DEFAULT_PRIVATE_GREETING = "欢迎使用 365 Free Bonus。请选择下方菜单，或直接输入关键词。";
-const DEFAULT_PRIVATE_TEXT_GREETING = "欢迎使用 365 Free Bonus。请直接输入关键词。";
+const DEFAULT_PRIVATE_GREETING = "Welcome to 365 Free Bonus. Choose an option below, or type a keyword.";
+const DEFAULT_PRIVATE_TEXT_GREETING = "Welcome to 365 Free Bonus. Type a keyword to get started.";
 const MENU_PAGE_SIZE = 8;
 const BRAND_CARD_LEASE_MS = 60_000;
 
@@ -152,8 +152,8 @@ function welcomeReply(db: DatabaseSync, update: Record<string, unknown>, setting
   if (!chat || membership(change.old_chat_member) !== false || membership(change.new_chat_member) !== true) return null;
   const user = asRecord(asRecord(change.new_chat_member)?.user);
   if (!user || user.is_bot !== false || !positiveInteger(user.id)) return null;
-  const name = [displayText(user.first_name), displayText(user.last_name)].filter(Boolean).join(" ") || "新成员";
-  const group = displayText(chat.title) || (chat.type === "channel" ? "Telegram 频道" : "Telegram 群组");
+  const name = [displayText(user.first_name), displayText(user.last_name)].filter(Boolean).join(" ") || "New member";
+  const group = displayText(chat.title) || (chat.type === "channel" ? "Telegram channel" : "Telegram group");
   const text = shorten(settings.welcome_message.replace(/\{(name|group)\}/g, (_, key) => key === "name" ? name : group).trim(), 4_096);
   if (!text) return null;
   if (privateEnabled && db.prepare("SELECT 1 FROM telegram_private_contacts WHERE user_id = ?").get(user.id)) {
@@ -162,7 +162,7 @@ function welcomeReply(db: DatabaseSync, update: Record<string, unknown>, setting
   if (chat.type === "channel") return null;
   return {
     kind: "welcome", chatId: Number(settings.welcome_chat_id), text,
-    keyboard: privateEnabled ? [[{ text: "开启私聊", url: PRIVATE_START_URL }]] : undefined,
+    keyboard: privateEnabled ? [[{ text: "Open chat", url: PRIVATE_START_URL }]] : undefined,
   };
 }
 
@@ -266,11 +266,11 @@ function privateKeyboard(db: DatabaseSync, page: number): { page: number; hasBut
       keywords.add(normalizeTelegramKeyword(text));
       return { text };
     };
-    if (page > 0) navigation.push(label("上一页", page - 1));
-    if (rules.length > MENU_PAGE_SIZE) navigation.push(label("下一页", page + 1));
+    if (page > 0) navigation.push(label("Previous", page - 1));
+    if (rules.length > MENU_PAGE_SIZE) navigation.push(label("Next", page + 1));
   }
   if (navigation.length) keyboard.push(navigation);
-  if (hotEntry) keyboard.push([{ text: "🔒 Hot 频道" }]);
+  if (hotEntry) keyboard.push([{ text: "🔞365 Free Bonus Hot" }]);
   return { page, hasButtons: true, markup: { keyboard, is_persistent: true, resize_keyboard: true, one_time_keyboard: false } };
 }
 
@@ -324,7 +324,7 @@ function privateReply(db: DatabaseSync, update: Record<string, unknown>, setting
   if (/^\/stop(?:@FreeBonus365ChatBot)?(?:\s|$)/i.test(input.trim())) {
     db.prepare("UPDATE telegram_private_contacts SET updates_enabled = 0 WHERE user_id = ?").run(chatId);
     db.prepare("UPDATE telegram_private_brand_updates SET status = 'cancelled' WHERE user_id = ? AND status = 'pending'").run(chatId);
-    return { kind: "private", chatId, text: "已暂停自动跟进和品牌更新通知。发送 /start 可重新开启。" };
+    return { kind: "private", chatId, text: "Automatic follow-ups and brand update notifications are paused. Send /start to resume." };
   }
   if (/^\/start(?:@FreeBonus365ChatBot)?(?:\s|$)/i.test(input.trim())) {
     db.prepare("UPDATE telegram_private_contacts SET updates_enabled = 1, updates_started_at = ? WHERE user_id = ? AND updates_enabled = 0").run(now, chatId);
@@ -340,7 +340,7 @@ function privateReply(db: DatabaseSync, update: Record<string, unknown>, setting
   // keyboard text and manually typed text have the same Telegram semantics.
   const button = privateButtonReply(db, chatId, input);
   if (button) return button;
-  const navigation = /^(?:上一页|下一页) › ([1-9]\d{0,15})(?: ›)*$/.exec(input.trim());
+  const navigation = /^(?:Previous|Next|上一页|下一页) › ([1-9]\d{0,15})(?: ›)*$/.exec(input.trim());
   if (navigation && !db.prepare("SELECT 1 FROM telegram_keyword_rules WHERE keyword_key = ?").get(normalizeTelegramKeyword(input))) {
     const page = Number(navigation[1]) - 1;
     return Number.isSafeInteger(page) && page <= Math.floor(Number.MAX_SAFE_INTEGER / MENU_PAGE_SIZE)

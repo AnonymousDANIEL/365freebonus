@@ -123,6 +123,40 @@ test('the target and required chats must resolve to separate Telegram identities
 
 async function tick(at=now){transport.now=at;return gate.runJoinGateOnce(decrypt,()=>at);}
 
+for(const entry of ['🔞365 Free Bonus Hot','🔒 Hot 频道'])
+test('the renamed Hot entry and existing keyboards both reach the gate: '+entry,async()=>{
+  configure();await activate();
+  assert.equal(observe(privateMessage(1,entry)),true);
+  await tick();
+  const message=calls('sendMessage').at(-1).parameters;
+  assert.equal(message.text,'Please join all the channels below, then tap Verify:\nBONUS OFFICIAL\nBONUS GROUP');
+  assert.deepEqual(message.reply_markup.inline_keyboard,[
+    [{text:'BONUS OFFICIAL',url:'https://t.me/join365freebonus'}],
+    [{text:'BONUS GROUP',url:'https://t.me/join365freebonusgroup'}],
+    [{text:"✅ I've joined — Verify",callback_data:'hot:check'}],
+  ]);
+  assert.equal(calls('approveChatJoinRequest').length,0);
+  assert.equal(calls('banChatMember').length,0);
+});
+
+for(const alreadyInside of [false,true])
+test('verified Hot customers receive only English access instructions, already inside: '+alreadyInside,async()=>{
+  configure();await activate();joinedBoth();
+  if(alreadyInside)membership(hot);
+  observe(privateMessage(1,'🔞365 Free Bonus Hot'));await tick();
+  const message=calls('sendMessage').at(-1).parameters;
+  assert.equal(message.text,alreadyInside
+    ?'You meet all membership requirements and already have access to 365 Free Bonus Hot.'
+    :'All membership requirements are met. Tap below to request access to 365 Free Bonus Hot.');
+  assert.deepEqual(message.reply_markup.inline_keyboard,[
+    [{text:'🔞 Enter 365 Free Bonus Hot',url:'https://t.me/+fixture-approval-1'}],
+    [{text:'✅ Verify again',callback_data:'hot:check'}],
+  ]);
+  assert.equal(/\p{Script=Han}/u.test(JSON.stringify(message)),false);
+  assert.equal(calls('createChatInviteLink')[0].parameters.name,'365 Free Bonus Hot approval');
+  assert.equal(calls('approveChatJoinRequest').length,0,'reading the translated instructions does not approve a nonexistent request');
+});
+
 test('a new Hot request is approved only after fresh successful checks of both required memberships',async()=>{
   configure();await activate();joinedBoth();observe(joinRequest());await tick();
   assert.equal(calls('approveChatJoinRequest').length,1);
