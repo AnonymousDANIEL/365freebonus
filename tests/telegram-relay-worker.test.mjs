@@ -453,6 +453,49 @@ test('relay status exposes only aggregate state and canned errors, not content o
   for(const secret of [ciphertext,'fixture-chatbot-ciphertext','Offer 1','photo-1',String(source)])assert.equal(output.includes(secret),false);
 });
 
+test('a newer successful custom-emoji post cannot hide an unresolved caption failure on an older post',async()=>{
+  configure();await poll(now,[photo(),photo(2)]);
+  const db=getSqlite(),custom=JSON.stringify(originalEmojiCaption().expectedEntities);
+  const warning='个人账号备用补正结果未能确认，已停止自动重试；不会重新发送媒体。';
+  db.prepare("UPDATE telegram_relay_outbox SET status='sent',caption_entities=?,message_id=9000+id,sent_at=?,caption_edit_outcome='account_preserved'")
+    .run(custom,now);
+  db.prepare("UPDATE telegram_relay_outbox SET caption_edit_outcome='account_invalid_final',last_error=? WHERE id=?").run(warning,jobs()[0].id);
+  assert.equal(relay.relayStatus(db).lastError,warning);
+  assert.equal(relay.relayStatus(db).counts.sent,2,'media delivery counts keep their existing meaning');
+  db.prepare("UPDATE telegram_relay_state SET last_error='请检查连接权限。' WHERE id='primary'").run();
+  assert.equal(relay.relayStatus(db).lastError,'请检查连接权限。','connection errors keep priority');
+  db.prepare("UPDATE telegram_relay_state SET last_error='' WHERE id='primary'").run();
+  db.prepare("UPDATE telegram_relay_outbox SET caption_edit_outcome='account_preserved',last_error='' WHERE id=?").run(jobs()[0].id);
+  assert.equal(relay.relayStatus(db).lastError,'','resolving the affected post clears its warning');
+});
+
+test('relay status isolates previous revisions, keeps custom errors first and hides warnings when disabled',async()=>{
+  configure();await poll(now,[photo(),photo(2)]);
+  const db=getSqlite(),custom=JSON.stringify(originalEmojiCaption().expectedEntities);
+  const customError='Telegram 未保留部分原始自定义 Emoji，请检查机器人的自定义 Emoji 使用权限。该消息不会自动重发。';
+  const ordinaryError='Telegram 未确认图片转发的发送结果，已停止自动重试以避免重复。';
+  db.prepare("UPDATE telegram_relay_outbox SET status='sent',revision='previous-revision',caption_entities=?,last_error=? WHERE id=?")
+    .run(custom,customError,jobs()[0].id);
+  assert.equal(relay.relayStatus(db).lastError,'','old settings must not report an unresolved post for a different destination');
+  db.prepare("UPDATE telegram_relay_outbox SET status='unknown',last_error=? WHERE id=?").run(ordinaryError,jobs()[1].id);
+  assert.equal(relay.relayStatus(db).lastError,ordinaryError);
+  db.prepare("UPDATE telegram_relay_outbox SET revision='relay-revision' WHERE id=?").run(jobs()[0].id);
+  assert.equal(relay.relayStatus(db).lastError,customError,'current custom-formatting failures keep priority over newer ordinary failures');
+  db.prepare("UPDATE telegram_promotion_settings SET relay_enabled=0 WHERE id='primary'").run();
+  assert.equal(relay.relayStatus(db).lastError,'');
+});
+
+for(const failedStatus of ['failed','unknown'])
+test(`a newer successful post cannot hide an unresolved ${failedStatus} media result`,async()=>{
+  configure();await poll(now,[photo(),photo(2)]);
+  const db=getSqlite(),warning=failedStatus==='failed'?'Telegram 拒绝图片转发，请检查目标权限。':'Telegram 未确认图片转发的发送结果，已停止自动重试以避免重复。';
+  db.prepare("UPDATE telegram_relay_outbox SET status=?,last_error=? WHERE id=?").run(failedStatus,warning,jobs()[0].id);
+  db.prepare("UPDATE telegram_relay_outbox SET status='sent',message_id=9002,sent_at=?,last_error='' WHERE id=?").run(now,jobs()[1].id);
+  assert.equal(relay.relayStatus(db).lastError,warning);
+  db.prepare("UPDATE telegram_relay_outbox SET last_error='' WHERE id=?").run(jobs()[0].id);
+  assert.equal(relay.relayStatus(db).lastError,'');
+});
+
 test('v17 migration preserves notes, credentials and existing queues while activating only future relays',t=>{
   t.mock.method(Date,'now',()=>now);
   configure({enabled:false});const db=getSqlite();

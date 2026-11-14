@@ -932,17 +932,55 @@ async function runVerifiedRelayCaptionWithAccount(input: VerifiedCaptionInput,
     attempted = true;
     await bounded(client, client.invoke(request, undefined, { maxRetryCount: 0, floodSleepThreshold: 0, timeout: remaining() }), remaining());
     editReturned = true;
-    if (!allowed()) return unavailable();
-    renew(db, claim);
-    const after = await bounded(client, client.getMessages(entity, { ids: [input.messageId], limit: 1 }), remaining());
-    if (!allowed()) return unavailable();
-    renew(db, claim);
-    if (after.length !== 1 || !(after[0] instanceof Api.Message) || !identity(after[0])) return { state: "ok", attempted: true, outcome: "uncertain" };
-    const actual = relayDeliveryMessage(after[0]);
-    if (!actual) return { state: "ok", attempted: true, outcome: "changed" };
-    const inspected = inspectRelayDelivery(input.caption, expected, actual);
-    return { state: "ok", attempted: true, outcome: mediaIdentity(after[0]) === originalMedia && inspected.captionMatches
-      && inspected.customEmojiPreserved && inspected.linksSafe && inspected.buttonsMatch ? "preserved" : "changed" };
+    let readOutcome: "changed" | "uncertain" = "uncertain";
+    for (let inspection = 0; inspection < 3; inspection++) {
+      if (!allowed()) return unavailable();
+      if (inspection > 0) {
+        await new Promise<void>(resolve => setTimeout(resolve, Math.min(inspection * 1000, remaining())));
+        if (!allowed()) return unavailable();
+      }
+      renew(db, claim);
+      try {
+        // A timed-out bounded read disconnects the transport. Reconnect only for
+        // a subsequent read; the already submitted EditMessage is never retried.
+        if (inspection > 0) {
+          await bounded(client, client.connect(), remaining());
+          if (!allowed()) return unavailable();
+          renew(db, claim);
+        }
+        entity = await bounded(client, client.getEntity(`@${username}`), remaining());
+        if (!allowed()) return unavailable();
+        if (!(entity instanceof Api.Channel) || entity.min || entity.broadcast !== true || Number(utils.getPeerId(entity)) !== input.targetChatId
+          || !(entity.creator === true || entity.adminRights?.editMessages === true)) return { state: "ok", attempted: true, outcome: "uncertain" };
+        renew(db, claim);
+        const owner = await bounded(client, client.getMe(), remaining());
+        if (!allowed()) return unavailable();
+        if (!(owner instanceof Api.User) || owner.bot || owner.deleted || owner.min || owner.premium !== true) return { state: "ok", attempted: true, outcome: "uncertain" };
+        renew(db, claim);
+        const after = await bounded(client, client.getMessages(entity, { ids: [input.messageId], limit: 1 }), remaining());
+        if (!allowed()) return unavailable();
+        renew(db, claim);
+        if (after.length === 0) { readOutcome = "uncertain"; continue; }
+        if (after.length !== 1 || !(after[0] instanceof Api.Message) || !identity(after[0])) return { state: "ok", attempted: true, outcome: "uncertain" };
+        if (mediaIdentity(after[0]) !== originalMedia) return { state: "ok", attempted: true, outcome: "changed" };
+        const actual = relayDeliveryMessage(after[0]);
+        if (actual) {
+          const inspected = inspectRelayDelivery(input.caption, expected, actual);
+          if (inspected.captionMatches && inspected.customEmojiPreserved && inspected.linksSafe && inspected.buttonsMatch)
+            return { state: "ok", attempted: true, outcome: "preserved" };
+        }
+        readOutcome = "changed";
+      } catch (error) {
+        const category = failureCategory(error);
+        // Unknown RPC and access errors must reach the outer failure boundary;
+        // safeError's default 502 alone does not prove a transient network error.
+        if (!(category === "network" || category === "timeout"
+          || error instanceof TelegramAccountError && error.status === 502 && error.message === TEMP_ERROR)) throw error;
+        if (!allowed()) return unavailable();
+        readOutcome = "uncertain";
+      }
+    }
+    return readOutcome === "uncertain" ? unavailable() : { state: "ok", attempted: true, outcome: "changed" };
   } catch (error) {
     if (allowed() && safeError(error).status === 429 && failureCategory(error) === "telegram-rate-limit") {
       recordFailure(db, claim, error, phase === "account_rechecking" ? "relay-account-caption-recheck" : "relay-account-caption-edit");

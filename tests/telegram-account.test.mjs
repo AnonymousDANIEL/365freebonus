@@ -669,6 +669,96 @@ for(const change of ['missing-emoji','media','caption','buttons','foreign-link',
   const result=await account.editVerifiedRelayCaptionWithAccount(input);
   assert.equal(result.attempted,true);assert.equal(result.outcome,change==='read-error'?'uncertain':'changed');
   assert.equal(telegram.state.calls.filter(call=>call.method==='EditMessage').length,1);
+  assert.equal(telegram.state.calls.filter(call=>call.method==='getMessages').length,
+    ['media','read-error'].includes(change)?2:4,'only read-only confirmation may repeat');
+});
+
+for(const temporary of ['old-emoji','empty'])test('personal caption edit rereads a temporary '+temporary+' result without editing twice',async()=>{
+  const input=await readyAccountEdit(),original=telegram.state.messages[0];
+  let reads=0;
+  telegram.state.onEdit=request=>{
+    const edited=new Api.Message({...original,message:request.message,entities:request.entities});
+    telegram.state.onGetMessages=()=>{
+      reads++;
+      telegram.state.messages=reads===1?(temporary==='empty'?[]:[original]):[edited];
+    };
+  };
+  assert.deepEqual(await account.editVerifiedRelayCaptionWithAccount(input),{state:'ok',attempted:true,outcome:'preserved'});
+  assert.equal(reads,2);
+  assert.equal(telegram.state.calls.filter(call=>call.method==='EditMessage').length,1);
+  assert.equal(telegram.state.messages[0].media,original.media);
+  assert.equal(telegram.state.messages[0].replyMarkup,original.replyMarkup);
+});
+
+for(const phase of ['entity','me','messages'])test('personal caption edit reconnects and requalifies after a transient read '+phase+' error',async()=>{
+  const input=await readyAccountEdit();
+  const before=telegram.state.calls.length;
+  let reads=0;
+  telegram.state.onEdit=()=>{
+    const hook=phase==='entity'?'onEntity':phase==='me'?'onGetMe':'onGetMessages';
+    telegram.state[hook]=()=>{if(++reads===1)throw Object.assign(new Error('temporary connection failure'),{code:'ECONNRESET'});};
+  };
+  assert.deepEqual(await account.editVerifiedRelayCaptionWithAccount(input),{state:'ok',attempted:true,outcome:'preserved'});
+  assert.equal(reads,2);
+  const calls=telegram.state.calls.slice(before),editAt=calls.findIndex(call=>call.method==='EditMessage');
+  assert.equal(calls.filter(call=>call.method==='EditMessage').length,1);
+  assert.equal(calls.filter(call=>call.method==='connect').length,2,'read retry reconnects after the original edit');
+  const reconnected=calls.findIndex((call,index)=>index>editAt&&call.method==='connect');
+  assert.deepEqual(calls.slice(reconnected,reconnected+4).map(call=>call.method),['connect','entity','getMe','getMessages']);
+});
+
+for(const temporary of ['network','empty'])test('personal caption edit bounds a persistently unavailable '+temporary+' read without resubmitting',async()=>{
+  const input=await readyAccountEdit();let reads=0;
+  telegram.state.onEdit=()=>{
+    telegram.state.onGetMessages=()=>{
+      reads++;
+      if(temporary==='empty')telegram.state.messages=[];
+      else throw Object.assign(new Error('temporary connection failure'),{code:'ETIMEDOUT'});
+    };
+  };
+  assert.deepEqual(await account.editVerifiedRelayCaptionWithAccount(input),{state:'unavailable',attempted:true,outcome:'uncertain'});
+  assert.equal(reads,3);assert.equal(telegram.state.calls.filter(call=>call.method==='EditMessage').length,1);
+});
+
+for(const authority of ['premium','channel-admin','source','worker-lease','settings','target'])
+test('personal caption confirmation stops before rereading after '+authority+' changes',async()=>{
+  const input=await readyAccountEdit();
+  if(authority==='source')db().prepare("UPDATE telegram_relay_outbox SET origin='account',account_generation=?,queued_at=?").run(stored().generation,Date.now());
+  let reads=0,checks=0;
+  telegram.state.onEdit=()=>{
+    telegram.state.applyEdit=false;
+    telegram.state.onGetMessages=()=>{reads++;};
+    telegram.state.onEntity=()=>{
+      if(++checks!==2)return;
+      if(authority==='premium')telegram.state.me.premium=false;
+      if(authority==='channel-admin')telegram.state.resolvedTarget.creator=false;
+      if(authority==='source')db().prepare('UPDATE telegram_personal_sources SET selected=0 WHERE chat_id=?').run(source);
+      if(authority==='worker-lease')db().prepare("UPDATE telegram_relay_outbox SET lease_id='replacement-worker'").run();
+      if(authority==='settings')db().prepare("UPDATE telegram_promotion_settings SET relay_revision='replacement-settings'").run();
+      if(authority==='target')telegram.state.resolvedTarget.id='1001';
+    };
+  };
+  const result=await account.editVerifiedRelayCaptionWithAccount(input);
+  assert.equal(result.attempted,true);assert.equal(result.outcome,'uncertain');
+  assert.equal(reads,1);assert.equal(telegram.state.calls.filter(call=>call.method==='EditMessage').length,1);
+});
+
+test('personal caption confirmation preserves a genuine FloodWait and stops without another read or edit',async()=>{
+  const input=await readyAccountEdit(),session=stored().session_ciphertext,before=Date.now();let reads=0;
+  telegram.state.onEdit=()=>{telegram.state.onGetMessages=()=>{
+    reads++;throw Object.assign(new Error(),{code:420,errorMessage:'FLOOD_WAIT_120',seconds:120});
+  };};
+  assert.deepEqual(await account.editVerifiedRelayCaptionWithAccount(input),{state:'backoff',attempted:true,outcome:'uncertain'});
+  assert.equal(reads,1);assert.equal(telegram.state.calls.filter(call=>call.method==='EditMessage').length,1);
+  assert.ok(stored().next_attempt_at>=before+120000);assert.equal(stored().session_ciphertext,session);
+});
+
+test('personal caption confirmation shares the original absolute deadline instead of extending it for rereads',async t=>{
+  const input=await readyAccountEdit(),started=Date.now();let clock=started,reads=0;
+  t.mock.method(Date,'now',()=>clock);
+  telegram.state.onEdit=()=>{telegram.state.onGetMessages=()=>{reads++;clock=started+40001;};};
+  assert.deepEqual(await account.editVerifiedRelayCaptionWithAccount(input),{state:'unavailable',attempted:true,outcome:'uncertain'});
+  assert.equal(reads,1);assert.equal(telegram.state.calls.filter(call=>call.method==='EditMessage').length,1);
 });
 
 test('personal caption edit reports explicit rejection, uncertain timeout and real FloodWait without retry or credential revocation',async()=>{

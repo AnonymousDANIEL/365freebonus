@@ -234,9 +234,11 @@ export function relayStatus(db: DatabaseSync) {
   }
   const current = settings(db);
   const runtime = state(db);
-  const latest = db.prepare("SELECT last_error FROM telegram_relay_outbox WHERE status IN ('failed','unknown','sent') ORDER BY id DESC LIMIT 1").get() as { last_error: string } | undefined;
+  const latest = db.prepare(`SELECT last_error FROM telegram_relay_outbox WHERE revision=? AND status IN ('failed','unknown','sent')
+    AND last_error<>'' ORDER BY id DESC LIMIT 1`).get(current?.relay_revision || "") as { last_error: string } | undefined;
   const custom = db.prepare(`SELECT last_error FROM telegram_relay_outbox WHERE status IN ('failed','unknown','sent')
-    AND (instr(caption_entities,'"custom_emoji"')>0 OR last_error=?) ORDER BY id DESC LIMIT 1`).get(CUSTOM_EMOJI_DROPPED_ERROR) as { last_error: string } | undefined;
+    AND revision=? AND last_error<>'' AND (instr(caption_entities,'"custom_emoji"')>0 OR last_error=?)
+    ORDER BY id DESC LIMIT 1`).get(current?.relay_revision || "", CUSTOM_EMOJI_DROPPED_ERROR) as { last_error: string } | undefined;
   counts.skipped += runtime.skipped_count;
   return { ready: enabled(current) && runtime.revision === current.relay_revision && runtime.ready_until > Date.now() && runtime.target_chat_id < 0,
     counts, lastError: current?.relay_enabled === 1 ? (!current.token_ciphertext ? TOKEN_ERROR : runtime.last_error || custom?.last_error || latest?.last_error || "") : "",
