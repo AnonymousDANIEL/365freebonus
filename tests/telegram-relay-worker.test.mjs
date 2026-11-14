@@ -62,13 +62,26 @@ exports.relayMediaIdentity = async (bytes,kind) => {
 };
 `);
 writeFileSync(path.join(fixture, 'telegram-account.js'), `
-exports.calls=[];exports.results=[];
+exports.calls=[];exports.results=[];exports.blockedCalls=0;exports.blockedResults=[];exports.auditOrder=[];
+exports.inspectBlockedRelayCaptionPreflights=async()=>{
+  exports.blockedCalls++;exports.auditOrder.push('blocked');
+  return exports.blockedResults.length?exports.blockedResults.shift():{state:'ok',personalEditQualification:'unknown',posts:[]};
+};
+exports.sampleSelectedSourceEmoji=async()=>{exports.auditOrder.push('source');return {state:'ok'};};
+exports.inspectConnectedBotEmojiQualification=async()=>{exports.auditOrder.push('qualification');return {state:'ok',qualification:'unknown'};};
+exports.inspectRecentRelayDeliveries=async()=>{exports.auditOrder.push('readback');return {state:'ok',sampledPosts:0,
+  matchingCaptions:0,customEmojiPosts:0,preservedCustomEmojiPosts:0,safeLinkPosts:0,matchingButtonPosts:0,
+  invalidReferences:0,personalEditQualification:'unknown'};};
 exports.editVerifiedRelayCaptionWithAccount=async input=>{
   exports.calls.push(input);
   const result=exports.results.length?exports.results.shift():{state:'unavailable',attempted:false,outcome:'unavailable'};
   if(result instanceof Error)throw result;
   return typeof result==='function'?await result(input):result;
 };
+`);
+
+writeFileSync(path.join(fixture, 'telegram-relay-diagnostics.js'), `
+exports.relayFormattingDiagnostics=()=>({schemaVersion:24,sampledJobs:0});
 `);
 
 const require = createRequire(import.meta.url);
@@ -104,7 +117,7 @@ function closeDatabase() {
 test.beforeEach(t => {
   process.env.DATA_DIR = mkdtempSync(path.join(fixture, 'case-'));
   media.files.clear(); media.onDownload=null; media.onIdentity=null;
-  personalEdit.calls.length=0;personalEdit.results.length=0;
+  personalEdit.calls.length=0;personalEdit.results.length=0;personalEdit.blockedCalls=0;personalEdit.blockedResults.length=0;personalEdit.auditOrder.length=0;
   telegram.calls.length=0; telegram.polls.length=0; telegram.updates.length=0; telegram.sends.length=0; telegram.editReplies.length=0;
   telegram.webhook=''; telegram.targetAllowed=true; telegram.targetExists=true; telegram.targetType='supergroup'; telegram.onRequest=null; telegram.onPoll=null; telegram.now=now;
   t.mock.method(console,'info',()=>{});
@@ -1105,10 +1118,89 @@ test('personal fallback diagnostics contain only outcomes, flags and aggregate c
   await deliver(now+8000);
   const entry=output.find(values=>values[0]==='Telegram relay account caption edit check.');assert.ok(entry);
   const details=JSON.parse(entry[1]);
-  assert.deepEqual(Object.keys(details).sort(),['attempted','expectedCustomEmoji','outcome','verified','waitingCount']);
+  assert.deepEqual(Object.keys(details).sort(),['attempted','expectedCustomEmoji','outcome','persisted','reason','verified','waitingCount']);
   assert.equal(details.outcome,'account_preserved');assert.equal(details.attempted,true);assert.equal(details.verified,true);
+  assert.equal(details.reason,'helper_result');assert.equal(details.persisted,true);
   const encoded=JSON.stringify(entry);
   for(const sensitive of [original.caption,original.rewritten,token,ciphertext,String(source),'88770','100000000000000001'])assert.equal(encoded.includes(sensitive),false);
+});
+
+test('local invalid relay metadata logs a fixed worker reason and a confirmed persistence result without invoking personal editing',async t=>{
+  const output=[];t.mock.method(console,'info',(...values)=>output.push(values));
+  await botEditStillChanged();getSqlite().prepare("UPDATE telegram_relay_outbox SET caption='Plain words',caption_entities='[]'").run();
+  await deliver(now+8000);
+  const entry=output.find(values=>values[0]==='Telegram relay account caption edit check.');
+  const details=JSON.parse(entry[1]);
+  assert.equal(details.reason,'worker_job_invalid');assert.equal(details.persisted,true);assert.equal(details.attempted,false);
+  assert.equal(jobs()[0].caption_edit_outcome,'account_invalid');assert.equal(personalEdit.calls.length,0);
+});
+
+for(const afterImport of [false,true])test(`worker guard invalidation ${afterImport?'after':'before'} module import is distinct from helper preflight refusal`,async t=>{
+  const output=[];t.mock.method(console,'info',(...values)=>output.push(values));
+  await botEditStillChanged();getSqlite().prepare('UPDATE telegram_relay_state SET ready_until=?').run(now+8500);
+  let reads=0;await relay.deliverTelegramRelayOnce(decrypt,()=>now+(++reads<(afterImport?4:3)?8000:9000));
+  const entry=output.find(values=>values[0]==='Telegram relay account caption edit check.');
+  const details=JSON.parse(entry[1]);
+  assert.equal(details.reason,'worker_guard_changed');assert.equal(details.persisted,true);assert.equal(details.attempted,false);
+  assert.equal(jobs()[0].caption_edit_outcome,'account_invalid');assert.equal(personalEdit.calls.length,0);
+});
+
+test('a lost worker lease logs no persisted invalid transition and never invokes personal editing',async t=>{
+  const output=[];t.mock.method(console,'info',(...values)=>output.push(values));
+  await botEditStillChanged();let reads=0;
+  await relay.deliverTelegramRelayOnce(decrypt,()=>now+(++reads<3?8000:69000));
+  const entry=output.find(values=>values[0]==='Telegram relay account caption edit check.');
+  const details=JSON.parse(entry[1]);
+  assert.equal(details.reason,'worker_lease_lost');assert.equal(details.persisted,false);assert.equal(details.attempted,false);
+  assert.equal(jobs()[0].caption_edit_outcome,'account_attempting');assert.equal(personalEdit.calls.length,0);
+});
+
+for(const helperReason of ['caption_mismatch','private text token '+token])test(`helper diagnosis ${helperReason==='caption_mismatch'?'uses a fixed reason':'discards an unknown raw reason'}`,async t=>{
+  const output=[];t.mock.method(console,'info',(...values)=>output.push(values));
+  await botEditRejected();personalEdit.results.push({state:'ok',attempted:false,outcome:'invalid',reason:helperReason});
+  await deliver(now+8000);
+  const entry=output.find(values=>values[0]==='Telegram relay account caption edit check.');
+  const details=JSON.parse(entry[1]);
+  assert.equal(details.reason,helperReason==='caption_mismatch'?'caption_mismatch':'helper_preflight');
+  assert.equal(details.persisted,true);assert.equal(details.attempted,false);assert.equal(jobs()[0].caption_edit_outcome,'account_invalid');
+  assert.equal(JSON.stringify(entry).includes(token),false);
+  await deliver(now+12000);assert.equal(personalEdit.calls.length,1);assert.equal(sends().length,1);assert.equal(edits().length,1);
+});
+
+test('a changed guard after helper execution logs the worker result boundary without changing the uncertain terminal rule',async t=>{
+  const output=[];t.mock.method(console,'info',(...values)=>output.push(values));
+  await botEditRejected();personalEdit.results.push(async()=>{
+    getSqlite().prepare("UPDATE telegram_promotion_settings SET relay_revision='changed-after-helper'").run();
+    return {state:'ok',attempted:true,outcome:'preserved',reason:'already_preserved'};
+  });
+  await deliver(now+8000);
+  const details=JSON.parse(output.find(values=>values[0]==='Telegram relay account caption edit check.')[1]);
+  assert.equal(details.reason,'worker_result_guard_changed');assert.equal(details.persisted,true);assert.equal(details.attempted,true);
+  assert.equal(jobs()[0].caption_edit_outcome,'account_uncertain');assert.equal(sends().length,1);assert.equal(edits().length,1);
+});
+
+for(const busy of [false,true])test(`startup runs the independent blocked-post audit first${busy?' and bounds busy retries':''} without sending media`,async t=>{
+  configure();const output=[],delays=[];t.mock.method(console,'info',(...values)=>output.push(values));
+  const payload={state:busy?'busy':'ok',personalEditQualification:'qualified',posts:busy?[]:[{reason:'caption_mismatch',
+    captionMatches:false,buttonsMatch:true,linksSafe:true,expectedCustomEmoji:26,expectedUtf16Length:123,actualUtf16Length:124}]};
+  personalEdit.blockedResults.push(...Array.from({length:busy?18:1},()=>payload));
+  const originalTimeout=globalThis.setTimeout;
+  t.mock.method(globalThis,'setTimeout',(callback,delay,...args)=>{
+    if(delay===5000||delay===20000){delays.push(delay);queueMicrotask(()=>callback(...args));return {unref(){return this;}};}
+    return originalTimeout(callback,delay,...args);
+  });
+  t.mock.method(globalThis,'setInterval',()=>({unref(){return this;}}));
+  delete globalThis.telegramRelayWorkerStarted;t.after(()=>delete globalThis.telegramRelayWorkerStarted);
+  relay.startTelegramRelayWorker(decrypt);
+  for(let tick=0;tick<10&&!personalEdit.auditOrder.includes('readback');tick++)await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(personalEdit.blockedCalls,busy?18:1);assert.equal(personalEdit.auditOrder[0],'blocked');
+  assert.equal(delays.filter(delay=>delay===5000).length,busy?17:0);
+  const blockedIndex=output.findIndex(values=>values[0]==='Telegram relay blocked caption audit.');
+  const sourceIndex=output.findIndex(values=>values[0]==='Telegram relay source emoji audit.');
+  assert.ok(blockedIndex>=0&&sourceIndex>blockedIndex);assert.deepEqual(JSON.parse(output[blockedIndex][1]),payload);
+  assert.ok(personalEdit.auditOrder.includes('qualification'));assert.ok(personalEdit.auditOrder.includes('readback'));
+  assert.equal(sends().length,0);assert.equal(edits().length,0);assert.equal(personalEdit.calls.length,0);
+  const encoded=JSON.stringify(output[blockedIndex]);for(const secret of [token,ciphertext,String(source),String(target)])assert.equal(encoded.includes(secret),false);
 });
 
 test('captioned source channel_post updates use the same fixed links and destination channel support',async()=>{

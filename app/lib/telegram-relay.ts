@@ -537,8 +537,18 @@ async function repairTelegramRelayCaptionOnce(token: string, identity: number, s
   return true;
 }
 
-function auditAccountCaptionEdit(outcome: string, entities: RelayCaptionEntity[], attempted: boolean, waitingCount: number) {
-  console.info("Telegram relay account caption edit check.", JSON.stringify({ outcome, attempted, waitingCount,
+const ACCOUNT_CAPTION_REASONS = new Set([
+  "input_invalid", "expected_entities_invalid", "expected_links_unsafe", "expected_buttons_invalid",
+  "stored_entities_invalid", "stored_entities_mismatch", "message_not_found", "message_identity_invalid",
+  "message_not_direct_post", "media_invalid", "actual_entities_unsupported", "caption_mismatch",
+  "actual_links_unsafe", "buttons_mismatch", "target_unqualified", "account_unqualified", "source_inactive",
+  "ready_to_edit", "already_preserved",
+]);
+function safeAccountCaptionReason(value: unknown, attempted: boolean): string {
+  return typeof value === "string" && ACCOUNT_CAPTION_REASONS.has(value) ? value : attempted ? "helper_result" : "helper_preflight";
+}
+function auditAccountCaptionEdit(outcome: string, entities: RelayCaptionEntity[], attempted: boolean, waitingCount: number, reason: string, persisted: boolean) {
+  console.info("Telegram relay account caption edit check.", JSON.stringify({ outcome, attempted, waitingCount, reason, persisted,
     expectedCustomEmoji: entities.filter(entity => entity.type === "custom_emoji").length,
     verified: outcome === "account_preserved",
   }));
@@ -569,9 +579,9 @@ async function repairTelegramRelayCaptionWithAccountOnce(identity: number, snaps
       || !entities.some(entity => entity.type === "custom_emoji") || job.caption.length > 1024 || !preparedSafe
       || job.source_chat_id === runtime.target_chat_id
       || (job.origin === "account" && !accountAllowed(db, job.source_chat_id, job.account_generation, job.queued_at))) {
-      db.prepare("UPDATE telegram_relay_outbox SET caption_edit_outcome='account_invalid',caption_edit_attempted_at=?,last_error=? WHERE id=?")
+      const changed = db.prepare("UPDATE telegram_relay_outbox SET caption_edit_outcome='account_invalid',caption_edit_attempted_at=?,last_error=? WHERE id=?")
         .run(now, !preparedSafe ? CAPTION_UNSAFE_LINKS_ERROR : CAPTION_EDIT_INVALID_ERROR, job.id);
-      return { invalid: true as const, entities: entities || [], waitingCount };
+      return { invalid: true as const, entities: entities || [], waitingCount, persisted: changed.changes > 0 };
     }
     const leaseId = randomUUID();
     db.prepare("UPDATE telegram_relay_state SET send_lease_id=?,send_lease_until=?,next_send_at=? WHERE id='primary'")
@@ -582,34 +592,37 @@ async function repairTelegramRelayCaptionWithAccountOnce(identity: number, snaps
       job: { ...job, caption_edit_outcome: "account_attempting", caption_edit_attempted_at: now, lease_id: leaseId, lease_until: now + LEASE_MS } };
   });
   if (!claim) return false;
-  if ("invalid" in claim) { auditAccountCaptionEdit("account_invalid", claim.entities, false, claim.waitingCount); return true; }
+  if ("invalid" in claim) { auditAccountCaptionEdit("account_invalid", claim.entities, false, claim.waitingCount, "worker_job_invalid", claim.persisted === true); return true; }
   if (!captionEditAllowed(db, claim, clock(), "account_attempting")) {
+    let persisted = false;
     transaction(db, () => {
-      if (ownsCaptionEdit(db, claim, clock(), "account_attempting")) db.prepare(`UPDATE telegram_relay_outbox
+      if (ownsCaptionEdit(db, claim, clock(), "account_attempting")) persisted = db.prepare(`UPDATE telegram_relay_outbox
         SET caption_edit_outcome='account_invalid',last_error=?,lease_id='',lease_until=0 WHERE id=? AND lease_id=?`)
-        .run(CAPTION_EDIT_INVALID_ERROR, claim.job.id, claim.job.lease_id);
+        .run(CAPTION_EDIT_INVALID_ERROR, claim.job.id, claim.job.lease_id).changes > 0;
       db.prepare("UPDATE telegram_relay_state SET send_lease_id='',send_lease_until=0 WHERE id='primary' AND send_lease_id=?").run(claim.job.lease_id);
     });
-    auditAccountCaptionEdit("account_invalid", claim.entities, false, claim.waitingCount); return true;
+    auditAccountCaptionEdit("account_invalid", claim.entities, false, claim.waitingCount, persisted ? "worker_guard_changed" : "worker_lease_lost", persisted); return true;
   }
-  let result: { state: string; attempted: boolean; outcome: "preserved" | "changed" | "rejected" | "uncertain" | "invalid" | "unavailable"; retryAt?: number | null };
+  let result: { state: string; attempted: boolean; outcome: "preserved" | "changed" | "rejected" | "uncertain" | "invalid" | "unavailable"; retryAt?: number | null; reason?: string };
+  let callReason: string | null = null;
   try {
     const { editVerifiedRelayCaptionWithAccount } = await import("./telegram-account");
     // The account helper separately revalidates membership, Premium/admin
     // qualification, source generation and the actual post's safe links/buttons.
-    result = captionEditAllowed(db, claim, clock(), "account_attempting")
-      ? await editVerifiedRelayCaptionWithAccount({ targetChatId: claim.targetChatId, relayRevision: claim.settings.relay_revision,
-        messageId: claim.job.message_id!, caption: claim.job.caption, captionEntities: claim.entities })
-      : { state: "unavailable", attempted: false, outcome: "invalid" };
-  } catch { result = { state: "unavailable", attempted: true, outcome: "uncertain" }; }
-  let outcome = "account_uncertain", waited = claim.waitingCount;
+    if (captionEditAllowed(db, claim, clock(), "account_attempting")) {
+      result = await editVerifiedRelayCaptionWithAccount({ targetChatId: claim.targetChatId, relayRevision: claim.settings.relay_revision,
+        messageId: claim.job.message_id!, caption: claim.job.caption, captionEntities: claim.entities });
+    } else { result = { state: "unavailable", attempted: false, outcome: "invalid" }; callReason = "worker_guard_changed"; }
+  } catch { result = { state: "unavailable", attempted: true, outcome: "uncertain" }; callReason = "helper_exception"; }
+  let outcome = "account_uncertain", waited = claim.waitingCount, persisted = false, reason = "worker_lease_lost";
   transaction(db, () => {
     const now = clock();
     if (!ownsCaptionEdit(db, claim, now, "account_attempting")) return;
+    reason = callReason || safeAccountCaptionReason(result.reason, result.attempted);
     let error = ACCOUNT_CAPTION_UNCERTAIN_ERROR, nextSend = now + SEND_MS, nextAttempt = now;
     if (!captionEditAllowed(db, claim, now, "account_attempting")) {
       outcome = result.attempted ? "account_uncertain" : "account_invalid";
-      error = CAPTION_EDIT_INVALID_ERROR;
+      error = CAPTION_EDIT_INVALID_ERROR; reason = callReason === "worker_guard_changed" ? callReason : "worker_result_guard_changed";
     } else if (!result.attempted && (result.state === "busy" || result.state === "backoff")) {
       if (claim.waitingCount < 3) {
         waited = claim.waitingCount + 1; outcome = `account_waiting_${waited}`; error = CUSTOM_EMOJI_CHANGED_ERROR;
@@ -623,12 +636,12 @@ async function repairTelegramRelayCaptionWithAccountOnce(identity: number, snaps
         : resolved === "rejected" ? ACCOUNT_CAPTION_REJECTED_ERROR : resolved === "invalid" ? CAPTION_EDIT_INVALID_ERROR
         : resolved === "unavailable" ? ACCOUNT_CAPTION_UNAVAILABLE_ERROR : ACCOUNT_CAPTION_UNCERTAIN_ERROR;
     }
-    db.prepare("UPDATE telegram_relay_outbox SET caption_edit_outcome=?,last_error=?,next_attempt_at=?,lease_id='',lease_until=0 WHERE id=? AND lease_id=?")
-      .run(outcome, error, nextAttempt, claim.job.id, claim.job.lease_id);
+    persisted = db.prepare("UPDATE telegram_relay_outbox SET caption_edit_outcome=?,last_error=?,next_attempt_at=?,lease_id='',lease_until=0 WHERE id=? AND lease_id=?")
+      .run(outcome, error, nextAttempt, claim.job.id, claim.job.lease_id).changes > 0;
     db.prepare("UPDATE telegram_relay_state SET send_lease_id='',send_lease_until=0,next_send_at=MAX(next_send_at,?) WHERE id='primary' AND send_lease_id=?")
       .run(nextSend, claim.job.lease_id);
   });
-  auditAccountCaptionEdit(outcome, claim.entities, result.attempted, waited);
+  auditAccountCaptionEdit(outcome, claim.entities, result.attempted, waited, reason, persisted);
   return true;
 }
 let successfulEmojiAuditBudget = 5;
@@ -838,7 +851,15 @@ export function startTelegramRelayWorker(decryptToken: DecryptToken) {
       const { relayFormattingDiagnostics } = await import("./telegram-relay-diagnostics");
       console.info("Telegram relay formatting audit.", JSON.stringify(relayFormattingDiagnostics(getSqlite(), Date.now(), Date.parse("2026-11-13T11:48:35Z"))));
       if (settings(getSqlite())?.relay_enabled !== 1) return;
-      const { sampleSelectedSourceEmoji, inspectConnectedBotEmojiQualification, inspectRecentRelayDeliveries } = await import("./telegram-account");
+      const { inspectBlockedRelayCaptionPreflights, sampleSelectedSourceEmoji, inspectConnectedBotEmojiQualification, inspectRecentRelayDeliveries } = await import("./telegram-account");
+      for (let attempt = 0; attempt < 18; attempt++) {
+        const blocked = await inspectBlockedRelayCaptionPreflights();
+        if (blocked.state !== "busy" || attempt === 17) {
+          console.info("Telegram relay blocked caption audit.", JSON.stringify(blocked));
+          break;
+        }
+        await new Promise(resolve => setTimeout(resolve, 5_000));
+      }
       for (let attempt = 0; attempt < 6; attempt++) {
         const sample = await sampleSelectedSourceEmoji();
         if (sample.state !== "busy" || attempt === 5) {

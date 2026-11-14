@@ -629,7 +629,10 @@ test('personal caption edit rejects an original post with '+change+' before invo
   if(change==='foreign-link')message.entities.push(new Api.MessageEntityTextUrl({offset:2,length:5,url:'https://foreign.example'}));
   if(change==='missing-media')message.media=undefined;
   const result=await account.editVerifiedRelayCaptionWithAccount(input);
-  assert.deepEqual(result,{state:'ok',attempted:false,outcome:'invalid'});
+  const reason=['not-post','forwarded','via-bot','via-business'].includes(change)?'message_not_direct_post'
+    :change==='wrong-peer'?'message_identity_invalid':change==='wrong-id'?'message_not_found':change==='caption'?'caption_mismatch'
+    :change==='buttons'?'buttons_mismatch':change==='foreign-link'?'actual_links_unsafe':'media_invalid';
+  assert.deepEqual(result,{state:'ok',attempted:false,outcome:'invalid',reason});
   assert.equal(telegram.state.calls.filter(call=>call.method==='EditMessage').length,0);
 });
 
@@ -766,6 +769,105 @@ test('personal caption edit shares one absolute deadline across preflight RPCs',
   telegram.state.onGetMessages=()=>{clock=realNow+40001;};
   assert.deepEqual(await account.editVerifiedRelayCaptionWithAccount(input),{state:'unavailable',attempted:false,outcome:'unavailable'});
   assert.equal(telegram.state.calls.filter(call=>call.method==='EditMessage').length,0);
+});
+
+async function readyBlockedCaption(value=delivery()) {
+  const input=await readyAccountEdit(value);
+  db().prepare("UPDATE telegram_relay_outbox SET caption_edit_outcome='account_invalid',lease_id='',lease_until=0,last_error='fixture-blocked'").run();
+  db().prepare("UPDATE telegram_relay_state SET send_lease_id='',send_lease_until=0").run();
+  return input;
+}
+
+test('blocked caption diagnostic reads only three exact invalid snapshots and leaves all persisted business data unchanged',async()=>{
+  const input=await readyBlockedCaption();
+  const sentBase=Date.now()-1000;
+  db().prepare('UPDATE telegram_relay_outbox SET sent_at=?').run(sentBase);
+  for(let index=1;index<=4;index++) {
+    const value=delivery(701+index,{post:true,media:telegram.state.messages[0].media});
+    telegram.state.messages.push(value.message);sentReference(value,{sentAt:sentBase-index});
+    db().prepare("UPDATE telegram_relay_outbox SET caption_edit_outcome='account_invalid' WHERE message_id=?").run(value.message.id);
+  }
+  const value=delivery(900,{post:true,media:telegram.state.messages[0].media});sentReference(value,{sentAt:Date.now()-100});
+  db().prepare("UPDATE telegram_relay_outbox SET caption_edit_outcome='changed',last_error='fixture-other-terminal' WHERE message_id=900").run();
+  const before={...stored()},jobs=db().prepare('SELECT * FROM telegram_relay_outbox ORDER BY id').all(),beforeSources=db().prepare('SELECT * FROM telegram_personal_sources ORDER BY chat_id').all();
+  const at=telegram.state.calls.length,result=await account.inspectBlockedRelayCaptionPreflights();
+  assert.equal(result.state,'ok');assert.equal(result.personalEditQualification,'qualified');assert.equal(result.posts.length,3);
+  assert.ok(result.posts.every(post=>post.snapshotOutcome==='account_invalid'&&post.sourceActive&&post.storedEntitiesValid&&post.mediaValid&&post.isPost));
+  assert.equal(result.posts[0].reason,'ready_to_edit');assert.equal(result.posts[0].captionMatches,true);assert.equal(result.posts[0].customEmojiPreserved,false);
+  const reads=telegram.state.calls.slice(at).filter(call=>call.method==='getMessages');
+  assert.equal(reads.length,1);assert.equal(reads[0].params.limit,3);assert.ok(!reads[0].params.ids.includes(900));assert.ok(reads[0].params.ids.includes(input.messageId));
+  assert.ok(telegram.state.calls.slice(at).every(call=>['construct','connect','entity','getMe','getMessages','destroy'].includes(call.method)));
+  assert.deepEqual({...stored()},before);assert.deepEqual(db().prepare('SELECT * FROM telegram_relay_outbox ORDER BY id').all(),jobs);
+  assert.deepEqual(db().prepare('SELECT * FROM telegram_personal_sources ORDER BY chat_id').all(),beforeSources);assert.equal(telegram.state.queue.length,0);
+  assert.doesNotMatch(JSON.stringify(result),/Offer|9007199254740993123|555555555555555555|join365|fixture|secret|session|message_id|username|documentId|caption_entities/i);
+  for(const post of result.posts)assert.ok(Object.values(post).every(value=>['string','number','boolean'].includes(typeof value)));
+});
+
+test('blocked caption diagnostic distinguishes exact, trim and line-ending differences without returning characters',async()=>{
+  const value=delivery(701,{caption:'⭐ Offer\t\r\nhttps://365freebonus.com/ \uFE0F\u200B\u0001'});
+  const input=await readyBlockedCaption(value);
+  telegram.state.messages[0].message=input.caption.replace(/\r\n/g,'\n');
+  const post=(await account.inspectBlockedRelayCaptionPreflights()).posts[0];
+  assert.equal(post.reason,'caption_mismatch');assert.equal(post.captionMatches,false);assert.equal(post.lineEndingNormalizedMatches,true);
+  assert.equal(post.expectedCarriageReturns,1);assert.equal(post.actualCarriageReturns,0);assert.equal(post.expectedTabs,1);assert.equal(post.actualTabs,1);
+  assert.equal(post.expectedLineFeeds,1);assert.equal(post.actualLineFeeds,1);assert.equal(post.expectedVariationSelectors16,1);assert.equal(post.expectedZeroWidthControls,1);
+  assert.equal(post.expectedOtherControls,3);assert.equal(post.firstDifference,input.caption.indexOf('\r'));assert.equal(post.firstDifferenceExpectedKind,'control');
+  assert.equal(post.expectedUtf16Length,post.actualUtf16Length+1);
+  const expected=delivery(701,{caption:'⭐ Offer https://365freebonus.com/ \r\n'});
+  db().prepare('UPDATE telegram_relay_outbox SET caption=?,caption_entities=?').run(expected.caption,JSON.stringify(expected.entities));
+  telegram.state.messages[0].message=expected.caption.trim();telegram.state.messages[0].entities=expected.message.entities.filter(entity=>!(entity instanceof Api.MessageEntityCustomEmoji));
+  const trimmed=(await account.inspectBlockedRelayCaptionPreflights()).posts[0];
+  assert.equal(trimmed.reason,'caption_mismatch');assert.equal(trimmed.trimmedCaptionMatches,true);assert.equal(trimmed.expectedTrailingWhitespace,3);assert.equal(trimmed.actualTrailingWhitespace,0);
+});
+
+for(const scenario of [
+  {name:'unknown TL entity',reason:'actual_entities_unsupported',change:message=>message.entities.push(new Api.MessageEntityUnknown({offset:2,length:5}))},
+  {name:'wrong peer',reason:'message_identity_invalid',change:message=>message.peerId=new Api.PeerChannel({channelId:'1001'})},
+  {name:'forwarded post',reason:'message_not_direct_post',change:message=>message.fwdFrom={private:'private-source'}},
+  {name:'missing media',reason:'media_invalid',change:message=>message.media=undefined},
+  {name:'foreign hidden link',reason:'actual_links_unsafe',change:message=>message.entities.push(new Api.MessageEntityTextUrl({offset:2,length:5,url:'https://private-source.example/'}))},
+  {name:'changed buttons',reason:'buttons_mismatch',change:message=>message.replyMarkup.rows[0].buttons[0].text='private-button-label'},
+])test('blocked caption diagnostic reports fixed reason for '+scenario.name,async()=>{
+  await readyBlockedCaption();scenario.change(telegram.state.messages[0]);
+  const result=await account.inspectBlockedRelayCaptionPreflights();assert.equal(result.posts[0].reason,scenario.reason);
+  if(scenario.reason==='actual_entities_unsupported')assert.equal(result.posts[0].unsupportedActualEntityCount,1);
+  assert.doesNotMatch(JSON.stringify(result),/private-source|private-button|MessageEntityUnknown|555555|900719/);
+  assert.equal(telegram.state.calls.filter(call=>call.method==='EditMessage').length,0);
+});
+
+test('blocked caption diagnostic reports invalid stored entities, inactive source and current qualification independently',async()=>{
+  await readyBlockedCaption();
+  db().prepare("UPDATE telegram_relay_outbox SET origin='account',account_generation=?,queued_at=?").run(stored().generation,Date.now());
+  db().prepare('UPDATE telegram_personal_sources SET selected=0 WHERE chat_id=?').run(source);
+  let result=await account.inspectBlockedRelayCaptionPreflights();assert.equal(result.posts[0].sourceActive,false);assert.equal(result.posts[0].reason,'source_inactive');
+  db().prepare("UPDATE telegram_relay_outbox SET caption_entities='[{\"type\":\"future_kind\",\"offset\":0,\"length\":1}]'").run();
+  result=await account.inspectBlockedRelayCaptionPreflights();assert.equal(result.posts[0].storedEntitiesValid,false);assert.equal(result.posts[0].unsupportedExpectedEntityCount,1);
+  assert.equal(result.posts[0].reason,'stored_entities_invalid');
+  db().prepare('UPDATE telegram_relay_outbox SET caption_entities=?').run(JSON.stringify(delivery().entities));
+  telegram.state.me.premium=false;
+  result=await account.inspectBlockedRelayCaptionPreflights();assert.equal(result.personalEditQualification,'not_premium');assert.equal(result.posts[0].sourceActive,false);
+});
+
+test('blocked caption diagnostic falls back only to recent errored custom terminal posts, never active or public unrelated messages',async()=>{
+  await readyBlockedCaption();db().prepare("UPDATE telegram_relay_outbox SET caption_edit_outcome='rejected'").run();
+  assert.equal((await account.inspectBlockedRelayCaptionPreflights()).posts[0].snapshotOutcome,'rejected');
+  db().prepare("UPDATE telegram_relay_outbox SET caption_edit_outcome='account_attempting'").run();
+  const at=telegram.state.calls.length;assert.deepEqual((await account.inspectBlockedRelayCaptionPreflights()).posts,[]);assert.equal(telegram.state.calls.length,at);
+  db().prepare("UPDATE telegram_relay_outbox SET caption_edit_outcome='rejected',caption_entities='[]'").run();
+  assert.deepEqual((await account.inspectBlockedRelayCaptionPreflights()).posts,[]);
+  db().prepare("UPDATE telegram_relay_outbox SET caption_edit_outcome='account_invalid',sent_at=?").run(Date.now()-25*3600000);
+  assert.deepEqual((await account.inspectBlockedRelayCaptionPreflights()).posts,[]);
+});
+
+test('blocked caption diagnostic rechecks destination and source snapshots after network reads and respects real backoff',async()=>{
+  await readyBlockedCaption();
+  telegram.state.onEntity=()=>db().prepare('UPDATE telegram_relay_state SET target_chat_id=-1001001').run();
+  assert.equal((await account.inspectBlockedRelayCaptionPreflights()).state,'unavailable');assert.equal(telegram.state.calls.filter(call=>call.method==='getMessages').length,0);
+  telegram.state.onEntity=null;db().prepare('UPDATE telegram_relay_state SET target_chat_id=?').run(target);
+  telegram.state.error={method:'getMessages',errorMessage:'FLOOD_WAIT_120',seconds:120};
+  const at=Date.now();assert.equal((await account.inspectBlockedRelayCaptionPreflights()).state,'backoff');assert.ok(stored().next_attempt_at>=at+120000);
+  const calls=telegram.state.calls.length;assert.equal((await account.inspectBlockedRelayCaptionPreflights()).state,'backoff');assert.equal(telegram.state.calls.length,calls);
+  assert.equal(db().prepare('SELECT caption_edit_outcome FROM telegram_relay_outbox').get().caption_edit_outcome,'account_invalid');
 });
 
 for (const scenario of [
