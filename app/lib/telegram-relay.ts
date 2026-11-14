@@ -79,7 +79,9 @@ function state(db: DatabaseSync): RelayState {
   return db.prepare("SELECT * FROM telegram_relay_state WHERE id='primary'").get() as RelayState;
 }
 /** Invalidates queued work but keeps a global in-flight send lease until it settles. */
-export function cancelRelayPending(db: DatabaseSync) {
+export function cancelRelayPending(db: DatabaseSync, now = Date.now()) {
+  const inFlight = db.prepare("SELECT id,origin,media_kind,file_unique_id FROM telegram_relay_outbox WHERE status='sending'").all() as MediaReference[];
+  for (const job of inFlight) retainMediaDay(db, job.id, relayDayKey(now), jobMediaKeys(db, job));
   db.prepare(`UPDATE telegram_relay_outbox SET status='cancelled',lease_id='',lease_until=0,media_bytes=NULL
     WHERE status='pending'`).run();
   // A request already handed to Telegram may still succeed after settings
@@ -88,22 +90,28 @@ export function cancelRelayPending(db: DatabaseSync) {
     WHERE status='sending'`).run(UNCERTAIN);
 }
 
-/** Persistent media identities are independent of caption, source, target and settings generations. */
-function mediaOwner(db: DatabaseSync, keys: string[], exceptId = 0): number {
+/** Kuala Lumpur has a fixed UTC+8 day boundary and no daylight-saving changes. */
+export function relayDayKey(at: number): string {
+  if (!Number.isSafeInteger(at) || at < 0) throw new RangeError("Invalid relay day timestamp.");
+  return new Date(at + 8 * 60 * 60_000).toISOString().slice(0, 10);
+}
+/** Media identities are independent of captions and sources, within one MYT day. */
+function mediaOwner(db: DatabaseSync, dayKey: string, keys: string[], exceptId = 0): number {
   for (const key of keys) {
     const existing = db.prepare(`SELECT k.outbox_id,o.status FROM telegram_relay_media_keys k
-      JOIN telegram_relay_outbox o ON o.id=k.outbox_id WHERE k.media_key=?`).get(key) as { outbox_id: number; status: string } | undefined;
+      JOIN telegram_relay_outbox o ON o.id=k.outbox_id WHERE k.day_key=? AND k.media_key=?`).get(dayKey, key) as { outbox_id: number; status: string } | undefined;
     if (!existing) continue;
     if (["failed", "cancelled"].includes(existing.status)) {
-      db.prepare("DELETE FROM telegram_relay_media_keys WHERE media_key=?").run(key);
+      db.prepare("DELETE FROM telegram_relay_media_keys WHERE day_key=? AND media_key=?").run(dayKey, key);
     } else if (existing.outbox_id !== exceptId) return existing.outbox_id;
   }
   return 0;
 }
-function registerMedia(db: DatabaseSync, id: number, keys: string[]): boolean {
-  const duplicate = mediaOwner(db, keys, id);
+function registerMedia(db: DatabaseSync, id: number, dayKey: string, keys: string[]): boolean {
+  const duplicate = mediaOwner(db, dayKey, keys, id);
   const owner = duplicate || id;
-  for (const key of keys) db.prepare("INSERT OR IGNORE INTO telegram_relay_media_keys(media_key,outbox_id) VALUES(?,?)").run(key, owner);
+  for (const key of keys) db.prepare("INSERT OR IGNORE INTO telegram_relay_media_keys(day_key,media_key,outbox_id) VALUES(?,?,?)")
+    .run(dayKey, key, owner);
   if (!duplicate) return true;
   db.prepare("UPDATE telegram_relay_outbox SET status='cancelled',media_bytes=NULL,lease_id='',lease_until=0,last_error='' WHERE id=?").run(id);
   db.prepare("UPDATE telegram_relay_state SET skipped_count=skipped_count+1 WHERE id='primary'").run();
@@ -111,6 +119,37 @@ function registerMedia(db: DatabaseSync, id: number, keys: string[]): boolean {
 }
 function identityKeys(kind: string, contentHash: string, visualHash: string) {
   return [contentHash ? `content:${kind}:${contentHash}` : "", visualHash ? `visual:${kind}:${visualHash}` : ""].filter(Boolean);
+}
+/** Include all previously learned aliases when a prepared job crosses midnight. */
+type MediaReference = Pick<RelayJob, "id" | "origin" | "media_kind" | "file_unique_id">;
+function jobMediaKeys(db: DatabaseSync, job: MediaReference): string[] {
+  const stored = db.prepare("SELECT DISTINCT media_key FROM telegram_relay_media_keys WHERE outbox_id=?").all(job.id) as { media_key: string }[];
+  const latest = db.prepare("SELECT content_hash,visual_hash FROM telegram_relay_outbox WHERE id=?").get(job.id) as { content_hash: string; visual_hash: string };
+  return [...new Set([`${job.origin === "account" ? "account" : "file"}:${job.media_kind}:${job.file_unique_id}`,
+    ...identityKeys(job.media_kind, latest.content_hash, latest.visual_hash), ...stored.map(row => row.media_key)])];
+}
+/** Preserve a completed or uncertain request without cancelling an existing post. */
+function retainMediaDay(db: DatabaseSync, id: number, dayKey: string, keys: string[]) {
+  const cancelled = new Set<number>();
+  for (const key of keys) {
+    const owner = db.prepare(`SELECT k.outbox_id,o.status FROM telegram_relay_media_keys k
+      LEFT JOIN telegram_relay_outbox o ON o.id=k.outbox_id WHERE k.day_key=? AND k.media_key=?`)
+      .get(dayKey, key) as { outbox_id: number; status: string | null } | undefined;
+    if (owner && owner.outbox_id !== id && owner.status === "pending") {
+      db.prepare("UPDATE telegram_relay_outbox SET status='cancelled',media_bytes=NULL,lease_id='',lease_until=0,last_error='' WHERE id=? AND status='pending'")
+        .run(owner.outbox_id);
+      cancelled.add(owner.outbox_id);
+      // This pending copy may have learned additional aliases for the same
+      // media. Keep all of its current-day evidence with the confirmed owner.
+      db.prepare("UPDATE telegram_relay_media_keys SET outbox_id=? WHERE day_key=? AND outbox_id=?")
+        .run(id, dayKey, owner.outbox_id);
+    }
+    if (owner && owner.outbox_id !== id && (owner.status === "pending" || owner.status === "failed" || owner.status === "cancelled")) {
+      db.prepare("UPDATE telegram_relay_media_keys SET outbox_id=? WHERE day_key=? AND media_key=? AND outbox_id=?")
+        .run(id, dayKey, key, owner.outbox_id);
+    } else db.prepare("INSERT OR IGNORE INTO telegram_relay_media_keys(day_key,media_key,outbox_id) VALUES(?,?,?)").run(dayKey, key, id);
+  }
+  if (cancelled.size) db.prepare("UPDATE telegram_relay_state SET skipped_count=skipped_count+? WHERE id='primary'").run(cancelled.size);
 }
 function accountAllowed(db: DatabaseSync, sourceChatId: number, generation: string, queuedAt = Number.MAX_SAFE_INTEGER): boolean {
   if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='telegram_personal_account'").get()) return false;
@@ -156,13 +195,13 @@ export async function enqueuePersonalRelayMedia(input: {
     const latestSelection = db.prepare("SELECT selected_at FROM telegram_personal_sources WHERE chat_id=?").get(input.sourceChatId) as { selected_at: number };
     if (latestSelection.selected_at !== selected.selected_at) return false;
     const keys = [`account:${input.mediaKind}:${sourceId}`, ...identityKeys(input.mediaKind, hashes.contentHash, hashes.visualHash)];
-    const duplicate = mediaOwner(db, keys);
+    const now = Date.now(), dayKey = relayDayKey(now);
+    const duplicate = mediaOwner(db, dayKey, keys);
     const exists = db.prepare("SELECT 1 FROM telegram_relay_outbox WHERE source_chat_id=? AND source_message_id=?")
       .get(input.sourceChatId, input.sourceMessageId);
     if (duplicate || exists) { db.prepare("UPDATE telegram_relay_state SET skipped_count=skipped_count+1 WHERE id='primary'").run(); return true; }
     const queue = db.prepare("SELECT COUNT(*) AS count,COALESCE(SUM(length(media_bytes)),0) AS bytes FROM telegram_relay_outbox WHERE status IN ('pending','sending')").get() as { count: number; bytes: number };
     if (queue.count >= 128 || queue.bytes + input.bytes.length > QUEUE_MAX_BYTES) return false;
-    const now = Date.now();
     const inserted = db.prepare(`INSERT OR IGNORE INTO telegram_relay_outbox
       (source_chat_id,source_message_id,media_group_id,fingerprint,queued_at,revision,media_kind,file_id,file_unique_id,caption,has_spoiler,
        next_attempt_at,origin,account_generation,media_bytes,content_hash,visual_hash,media_prepared,mime_type,caption_entities,status,last_error)
@@ -171,14 +210,14 @@ export async function enqueuePersonalRelayMedia(input: {
         content.mediaKind, "", sourceId, content.caption, Number(content.hasSpoiler), now, "account", input.accountGeneration,
         contentError ? null : input.bytes, hashes.contentHash, hashes.visualHash, mimeType,
         JSON.stringify(content.captionEntities), contentError ? "failed" : "pending", contentError);
-    if (inserted.changes) registerMedia(db, Number(inserted.lastInsertRowid), keys);
+    if (inserted.changes) registerMedia(db, Number(inserted.lastInsertRowid), dayKey, keys);
     return true;
   });
 }
-function synchronize(db: DatabaseSync, current: RelaySettings, identity: number): RelayState {
+function synchronize(db: DatabaseSync, current: RelaySettings, identity: number, now = Date.now()): RelayState {
   const previous = state(db);
   if (previous.revision !== current.relay_revision || previous.bot_id !== identity) {
-    cancelRelayPending(db);
+    cancelRelayPending(db, now);
     db.prepare(`UPDATE telegram_relay_state SET revision=?,bot_id=?,
       next_offset=CASE WHEN bot_id=? THEN next_offset ELSE 0 END,
       last_polled_at=CASE WHEN bot_id=? THEN last_polled_at ELSE 0 END,
@@ -260,7 +299,7 @@ async function verifyTarget(token: string, claim: PollClaim): Promise<{ targetId
 export async function pollTelegramRelayOnce(decryptToken: DecryptToken, clock = Date.now) {
   const db = getSqlite();
   const snapshot = settings(db);
-  if (!enabled(snapshot)) { transaction(db, () => cancelRelayPending(db)); return; }
+  if (!enabled(snapshot)) { transaction(db, () => cancelRelayPending(db, clock())); return; }
   let token = "";
   try { token = decryptToken(snapshot.token_ciphertext); } catch { /* Never expose stored credentials. */ }
   const identity = botId(token);
@@ -273,7 +312,7 @@ export async function pollTelegramRelayOnce(decryptToken: DecryptToken, clock = 
   const claim = transaction(db, () => {
     const current = settings(db);
     if (!enabled(current) || current.token_ciphertext !== snapshot.token_ciphertext) return null;
-    const runtime = synchronize(db, current, identity);
+    const runtime = synchronize(db, current, identity, clock());
     const now = clock();
     if (runtime.poll_lease_until > now || runtime.next_poll_at > now) return null;
     const leaseId = randomUUID();
@@ -346,7 +385,7 @@ export async function pollTelegramRelayOnce(decryptToken: DecryptToken, clock = 
       if (!content) { skipped++; continue; }
       const contentError = content.captionTruncated ? CAPTION_LIMIT_ERROR : content.customEmojiLost ? CUSTOM_EMOJI_DROPPED_ERROR : "";
       const mediaKey = `file:${content.mediaKind}:${content.fileUniqueId}`;
-      const duplicate = mediaOwner(db, [mediaKey]);
+      const duplicate = mediaOwner(db, relayDayKey(now), [mediaKey]);
       if (duplicate) { skipped++; continue; }
       const queued = db.prepare("SELECT COUNT(*) AS count FROM telegram_relay_outbox WHERE status IN ('pending','sending')").get() as { count: number };
       if (queued.count >= 128) { offset = id; break; }
@@ -354,7 +393,7 @@ export async function pollTelegramRelayOnce(decryptToken: DecryptToken, clock = 
         claim.settings.relay_revision, content.mediaKind, content.fileId, content.fileUniqueId, content.caption, Number(content.hasSpoiler), now,
         JSON.stringify(content.captionEntities), contentError ? "failed" : "pending", contentError);
       if (!result.changes) skipped++;
-      else registerMedia(db, Number(result.lastInsertRowid), [mediaKey]);
+      else registerMedia(db, Number(result.lastInsertRowid), relayDayKey(now), [mediaKey]);
     }
     db.prepare(`UPDATE telegram_relay_state SET next_offset=?,last_polled_at=?,next_poll_at=MAX(next_poll_at,?),
       skipped_count=skipped_count+?,last_error=CASE WHEN ready_until>? THEN '' ELSE last_error END
@@ -429,7 +468,7 @@ async function repairTelegramRelayCaptionOnce(token: string, identity: number, s
   const claim = transaction(db, () => {
     const current = settings(db);
     if (!enabled(current) || current.token_ciphertext !== snapshot.token_ciphertext) return null;
-    const runtime = synchronize(db, current, identity), now = clock();
+    const runtime = synchronize(db, current, identity, clock()), now = clock();
     db.prepare(`UPDATE telegram_relay_outbox SET caption_edit_outcome='uncertain',last_error=?,lease_id='',lease_until=0
       WHERE status='sent' AND caption_edit_outcome='attempting' AND lease_until<=?`).run(CAPTION_EDIT_UNCERTAIN_ERROR, now);
     if (runtime.ready_until <= now || runtime.target_chat_id >= 0 || runtime.send_lease_until > now || runtime.next_send_at > now) return null;
@@ -510,7 +549,7 @@ async function repairTelegramRelayCaptionWithAccountOnce(identity: number, snaps
   const claim = transaction(db, () => {
     const current = settings(db);
     if (!enabled(current) || current.token_ciphertext !== snapshot.token_ciphertext) return null;
-    const runtime = synchronize(db, current, identity), now = clock();
+    const runtime = synchronize(db, current, identity, clock()), now = clock();
     db.prepare(`UPDATE telegram_relay_outbox SET caption_edit_outcome='account_uncertain',last_error=?,lease_id='',lease_until=0
       WHERE status='sent' AND caption_edit_outcome='account_attempting' AND lease_until<=?`).run(ACCOUNT_CAPTION_UNCERTAIN_ERROR, now);
     if (runtime.ready_until <= now || runtime.target_chat_id >= 0 || runtime.send_lease_until > now || runtime.next_send_at > now) return null;
@@ -609,7 +648,7 @@ function auditEmojiDelivery(expected: RelayCaptionEntity[], actual: unknown, out
 export async function deliverTelegramRelayOnce(decryptToken: DecryptToken, clock = Date.now) {
   const db = getSqlite();
   const snapshot = settings(db);
-  if (!enabled(snapshot)) { transaction(db, () => cancelRelayPending(db)); return; }
+  if (!enabled(snapshot)) { transaction(db, () => cancelRelayPending(db, clock())); return; }
   let token = "";
   try { token = decryptToken(snapshot.token_ciphertext); } catch { /* Keep credentials private. */ }
   const identity = botId(token);
@@ -619,8 +658,11 @@ export async function deliverTelegramRelayOnce(decryptToken: DecryptToken, clock
   const claim = transaction(db, () => {
     const current = settings(db);
     if (!enabled(current) || current.token_ciphertext !== snapshot.token_ciphertext) return null;
-    const runtime = synchronize(db, current, identity);
+    const runtime = synchronize(db, current, identity, clock());
     const now = clock();
+    const expired = db.prepare("SELECT id,origin,media_kind,file_unique_id FROM telegram_relay_outbox WHERE status='sending' AND lease_until<=?")
+      .all(now) as MediaReference[];
+    for (const job of expired) retainMediaDay(db, job.id, relayDayKey(now), jobMediaKeys(db, job));
     db.prepare(`UPDATE telegram_relay_outbox SET status='unknown',last_error=?,lease_id='',lease_until=0,media_bytes=NULL
       WHERE status='sending' AND lease_until<=?`).run(UNCERTAIN, now);
     db.prepare(`UPDATE telegram_relay_outbox SET status='cancelled',lease_id='',lease_until=0,media_bytes=NULL
@@ -684,7 +726,7 @@ export async function deliverTelegramRelayOnce(decryptToken: DecryptToken, clock
     const hashes = await relayMediaIdentity(bytes, claim.job.media_kind);
     const accepted = transaction(db, () => {
       if (!sendAllowed(db, claim, clock())) return false;
-      if (!registerMedia(db, claim.job.id, identityKeys(claim.job.media_kind, hashes.contentHash, hashes.visualHash))) return false;
+      if (!registerMedia(db, claim.job.id, relayDayKey(clock()), identityKeys(claim.job.media_kind, hashes.contentHash, hashes.visualHash))) return false;
       db.prepare("UPDATE telegram_relay_outbox SET content_hash=?,visual_hash=?,media_prepared=1 WHERE id=? AND lease_id=?")
         .run(hashes.contentHash, hashes.visualHash, claim.job.id, claim.job.lease_id);
       return true;
@@ -717,12 +759,34 @@ export async function deliverTelegramRelayOnce(decryptToken: DecryptToken, clock
   const upload = claim.job.origin === "account" && uploadBytes ? { field: videoAsFile ? "document" as const : claim.job.media_kind,
     fileName: claim.job.media_kind === "photo" ? "photo.jpg" : claim.job.media_kind === "video" ? videoAsFile ? `video.${extension}` : "video.mp4" : isGif ? "animation.gif" : "animation.mp4",
     mime: claim.job.media_kind === "photo" ? "image/jpeg" : claim.job.media_kind === "video" ? videoMime : isGif ? "image/gif" : "video/mp4", bytes: uploadBytes } : undefined;
+  // Claim the actual dispatch day even for already prepared media. Temporarily
+  // reserve the following day if this bounded request can cross midnight, so an
+  // in-flight or interrupted request cannot race a newly received copy.
+  const reserved = transaction(db, () => {
+    if (!sendAllowed(db, claim, clock())) {
+      db.prepare("UPDATE telegram_relay_outbox SET status='cancelled',media_bytes=NULL,lease_id='',lease_until=0 WHERE id=? AND status='sending' AND lease_id=?")
+        .run(claim.job.id, claim.job.lease_id);
+      db.prepare("UPDATE telegram_relay_state SET send_lease_id='',send_lease_until=0 WHERE id='primary' AND send_lease_id=?").run(claim.job.lease_id);
+      return false;
+    }
+    const at = clock(), days = [...new Set([relayDayKey(at), relayDayKey(at + LEASE_MS)])];
+    const keys = jobMediaKeys(db, claim.job);
+    for (const day of days) if (!registerMedia(db, claim.job.id, day, keys)) {
+      db.prepare("UPDATE telegram_relay_state SET send_lease_id='',send_lease_until=0 WHERE id='primary' AND send_lease_id=?")
+        .run(claim.job.lease_id);
+      return false;
+    }
+    return true;
+  });
+  if (!reserved) return;
   const reply = await telegramRequest(token, method, parameters, upload).catch(() => null);
   uploadBytes = null;
   transaction(db, () => {
     const now = clock();
     let nextSend = now + SEND_MS;
     const owned = ownsSend(db, claim, now);
+    const rejected = reply && !reply.ok && reply.code >= 400 && reply.code < 500;
+    if (!rejected) retainMediaDay(db, claim.job.id, relayDayKey(now), jobMediaKeys(db, claim.job));
     if (owned) {
       if (reply?.ok && typeof reply.result.message_id === "number" && Number.isSafeInteger(reply.result.message_id) && reply.result.message_id > 0) {
         const warning = messageIdentityMatches(reply.result, claim.targetChatId)
@@ -752,6 +816,12 @@ export async function deliverTelegramRelayOnce(decryptToken: DecryptToken, clock
             .run(now + (code === 401 ? VERIFY_MS : SEND_MS), error);
         }
       }
+    }
+    // A trusted success or explicit rejection completed before midnight cannot
+    // publish in the next day. Unconfirmed outcomes retain both-day protection.
+    if (owned && ((reply?.ok && messageIdentityMatches(reply.result, claim.targetChatId))
+      || (reply && !reply.ok && reply.code >= 400 && reply.code < 500))) {
+      db.prepare("DELETE FROM telegram_relay_media_keys WHERE outbox_id=? AND day_key>?").run(claim.job.id, relayDayKey(now));
     }
     db.prepare("UPDATE telegram_relay_outbox SET media_bytes=NULL WHERE id=? AND status NOT IN ('pending','sending')").run(claim.job.id);
     db.prepare(`UPDATE telegram_relay_state SET send_lease_id='',send_lease_until=0,next_send_at=MAX(next_send_at,?)

@@ -440,7 +440,7 @@ export default function TelegramGroupSettings({ request, signInPath }: AdminProp
             <small>💬 NEED HELP? — https://t.me/FreeBonus365ChatBot</small>
             <small>来源群需允许机器人接收普通消息：将机器人设为管理员，或在 BotFather 关闭 Group Privacy。其他机器人发出的消息还可能需要开启 Bot-to-Bot Communication Mode。</small>
             <small>不要同时为此机器人使用其他 Webhook 或轮询接收服务。系统会去重、限速，并忽略自己的消息和目标群消息。</small>
-            <small>相同 Telegram 图片身份或相同图片内容会跳过，文案、链接或来源改变也不会重复发送。不同媒体使用相同文案仍可发送；同一相册里不同的带文案媒体也会分别处理。去重记录在重新开启和重启后保留。</small>
+            <small>按马来西亚日期（UTC+8）每天 00:00 重新计算媒体去重：同一天相同图片身份或内容会跳过，第二天新收到相同媒体可以再转发。文案相同不会单独去重，不同媒体仍可分别发送；纯文字或没有文案的媒体会跳过。当天记录在重新开启和重启后保留，历史消息不会在午夜自动重发；跨午夜仍在发送或结果未确认的请求会保留防重保护。</small>
             <small>保留原文换行、文字格式和自定义 Emoji 资料；正文链接改为本站，按钮统一为下方三项。发送结果不符时，机器人对同一条消息补正一次。若仍缺少自定义表情，已连接个人账号具备 Premium 及该频道编辑权限时，可再编辑一次，并回读核对原媒体、文案、表情和三个按钮。每个通道最多编辑一次，不会重复转发；不具备权限或核验失败时后台会提示。超长文案或缺少原始格式资料的旧待发消息会停止发送。</small>
             <dl className="cms-telegram-counts" aria-label="群图片转发记录">
               {Object.entries(config.relay.counts).map(([key, count]) => <div key={key}><dt>{({ ...deliveryLabels, cancelled: "已取消" } as Record<string, string>)[key] || key}</dt><dd>{count}</dd></div>)}

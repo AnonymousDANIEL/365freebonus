@@ -12,7 +12,7 @@ export function getDataDirectory(): string {
 function migrate(db: DatabaseSync) {
   if (migrated.has(db)) return;
   const readVersion = () => (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
-  if (readVersion() < 23) {
+  if (readVersion() < 24) {
     db.exec("BEGIN IMMEDIATE");
     try {
       // Read again inside the write lock, so concurrent process starts cannot
@@ -399,6 +399,32 @@ function migrate(db: DatabaseSync) {
           CREATE INDEX telegram_relay_album ON telegram_relay_outbox(source_chat_id,media_group_id)
             WHERE media_group_id<>'';
           PRAGMA user_version=23;
+        `);
+      }
+      if (version < 24) {
+        // Retain every historical identity and owner, now scoped to Malaysia
+        // calendar dates. Existing source-message uniqueness and queues stay
+        // untouched; changing the date never replays a previous source post.
+        db.exec(`
+          CREATE TABLE telegram_relay_media_keys_v24 (
+            day_key TEXT NOT NULL, media_key TEXT NOT NULL, outbox_id INTEGER NOT NULL,
+            PRIMARY KEY(day_key,media_key)
+          );
+          INSERT INTO telegram_relay_media_keys_v24(day_key,media_key,outbox_id)
+            SELECT COALESCE(strftime('%Y-%m-%d',
+              (CASE WHEN o.status='sent' AND typeof(o.sent_at)='integer' AND o.sent_at>0 THEN o.sent_at
+                WHEN typeof(o.queued_at)='integer' AND o.queued_at>0 THEN o.queued_at ELSE 0 END)/1000,
+              'unixepoch','+8 hours'),'1970-01-01'), k.media_key,k.outbox_id
+            FROM telegram_relay_media_keys k LEFT JOIN telegram_relay_outbox o ON o.id=k.outbox_id;
+          INSERT OR IGNORE INTO telegram_relay_media_keys_v24(day_key,media_key,outbox_id)
+            SELECT COALESCE(strftime('%Y-%m-%d',o.lease_until/1000,'unixepoch','+8 hours'),'1970-01-01'),
+              k.media_key,k.outbox_id
+            FROM telegram_relay_media_keys k JOIN telegram_relay_outbox o ON o.id=k.outbox_id
+            WHERE o.status='sending' AND typeof(o.lease_until)='integer' AND o.lease_until>0;
+          DROP TABLE telegram_relay_media_keys;
+          ALTER TABLE telegram_relay_media_keys_v24 RENAME TO telegram_relay_media_keys;
+          CREATE INDEX telegram_relay_media_key_job ON telegram_relay_media_keys(outbox_id);
+          PRAGMA user_version=24;
         `);
       }
       db.exec("COMMIT");

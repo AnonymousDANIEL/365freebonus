@@ -87,6 +87,15 @@ const token = '12345678:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
 const ciphertext = 'fixture-promotion-ciphertext';
 const ok = result => ({ok:true,result});
 
+function restoreLegacyMediaKeys(db) {
+  db.exec(`CREATE TABLE telegram_relay_media_keys_legacy(media_key TEXT PRIMARY KEY,outbox_id INTEGER NOT NULL);
+    INSERT OR IGNORE INTO telegram_relay_media_keys_legacy(media_key,outbox_id)
+      SELECT media_key,outbox_id FROM telegram_relay_media_keys ORDER BY day_key DESC;
+    DROP TABLE telegram_relay_media_keys;
+    ALTER TABLE telegram_relay_media_keys_legacy RENAME TO telegram_relay_media_keys;
+    CREATE INDEX telegram_relay_media_key_job ON telegram_relay_media_keys(outbox_id);`);
+}
+
 function closeDatabase() {
   const filename = path.join(process.env.DATA_DIR, 'directory.sqlite');
   globalThis.__directorySqlite?.get(filename)?.close();
@@ -445,7 +454,7 @@ test('v17 migration preserves notes, credentials and existing queues while activ
     ALTER TABLE telegram_promotion_settings DROP COLUMN relay_revision;
     PRAGMA user_version=17;`);
   closeDatabase();const migrated=getSqlite();
-  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,23);
+  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,24);
   const current=migrated.prepare("SELECT * FROM telegram_promotion_settings WHERE id='primary'").get();
   assert.equal(current.relay_enabled,1);assert.equal(current.relay_started_at,now);assert.ok(current.relay_revision);
   assert.equal(current.relay_chat_id,'@join365freebonusgroup');
@@ -1156,14 +1165,156 @@ test('same bot video identity is not resent with another caption',async()=>{
   assert.equal(jobs().length,1);assert.equal(sends().length,1);
 });
 
-test('identical file identity is not resent after caption changes, a new day, or settings generation change',async()=>{
+test('identical file identity is not resent after caption changes or settings generation changes within the same MYT day',async()=>{
   configure();const first=photo();await poll(now,[first]);await deliver();
-  const later=now+2*86_400_000;
+  const later=now+10000;
   getSqlite().prepare("UPDATE telegram_promotion_settings SET relay_revision='second-generation',relay_started_at=? WHERE id='primary'").run(later);
   await poll(later,[photo(2,{date:later/1000,caption:'Different caption and source link https://changed.example',photo:first.message.photo})]);
   await deliver(later);
   assert.equal(jobs().length,1);assert.equal(sends().length,1);
   assert.equal(jobs()[0].status,'sent');assert.ok(state().skipped_count>=1);
+});
+
+test('MYT date keys change at UTC 16:00 rather than UTC midnight',()=>{
+  assert.equal(relay.relayDayKey(Date.parse('2027-01-16T15:59:59.999Z')),'2027-01-16');
+  assert.equal(relay.relayDayKey(Date.parse('2027-01-16T16:00:00.000Z')),'2027-01-17');
+  assert.equal(relay.relayDayKey(Date.parse('2027-01-17T00:00:00.000Z')),'2027-01-17');
+});
+
+const mytMidnight=Date.parse('2027-01-16T16:00:00.000Z');
+for(const kind of ['photo','video','animation'])test(`a new Bot ${kind} post may reuse yesterday's media once while old source messages stay consumed`,async()=>{
+  const before=mytMidnight-120000,after=mytMidnight+1000;
+  configure({startedAt:before-10000});
+  const input=(id,at,extra={})=>kind==='video'?video(id,{date:at/1000,...extra}):kind==='animation'
+    ?photo(id,{date:at/1000,photo:undefined,animation:{file_id:'daily-gif',file_unique_id:'daily-gif-unique'},...extra}):photo(id,{date:at/1000,...extra});
+  const first=input(1,before);await poll(before,[first]);await deliver(before);
+  const attached=kind==='video'?{video:first.message.video}:kind==='photo'?{photo:first.message.photo}:{};
+  await poll(after,[input(2,after,attached)]);await deliver(after);
+  await poll(after+4000,[input(3,after+4000,attached),{...input(4,after+4000,attached),message:{...first.message,date:(after+4000)/1000}}]);
+  await deliver(after+4000);
+  assert.equal(sends().length,2);assert.deepEqual(jobs().map(job=>job.status),['sent','sent']);
+  assert.equal(jobs()[0].source_message_id,1001);assert.equal(jobs()[1].source_message_id,1002);
+  assert.equal(new Set(getSqlite().prepare('SELECT day_key FROM telegram_relay_media_keys').all().map(row=>row.day_key)).size,2);
+});
+
+test('daily photo content identity spans Bot and personal sources without making caption text a duplicate key',async t=>{
+  await configureAccount(t);let clock=mytMidnight-120000;t.mock.method(Date,'now',()=>clock);
+  await poll(clock,[]);
+  const first=accountPhoto({sourceDate:clock/1000});await relay.enqueuePersonalRelayMedia(first);await deliver(clock);
+  media.files.set('photo-1',first.bytes);media.files.set('photo-2',first.bytes);
+  await poll(clock+4000,[photo(1,{date:(clock+4000)/1000,caption:'New words'})]);await deliver(clock+4000);
+  assert.equal(sends().length,1);
+  clock=mytMidnight+1000;await poll(clock,[photo(2,{date:clock/1000,caption:first.caption})]);await deliver(clock);
+  assert.equal(sends().length,2);
+  await relay.enqueuePersonalRelayMedia({...first,sourceMessageId:2002,sourceDate:clock/1000});
+  assert.equal(jobs().filter(job=>job.status==='sent').length,2);
+  clock+=4000;
+  await relay.enqueuePersonalRelayMedia({...first,sourceMessageId:2003,sourceDate:clock/1000,
+    sourceMediaId:'new-day-different-photo',bytes:Buffer.from('different-photo-same-caption')});await deliver(clock);
+  assert.equal(sends().length,3);assert.equal(sends()[1].parameters.caption,sends()[2].parameters.caption);
+});
+
+test('a new personal post may reuse the prior day photo once but never replays the earlier source message',async t=>{
+  await configureAccount(t);let clock=mytMidnight-120000;t.mock.method(Date,'now',()=>clock);
+  await poll(clock,[]);const first=accountPhoto({sourceDate:clock/1000});
+  await relay.enqueuePersonalRelayMedia(first);await deliver(clock);
+  clock=mytMidnight+1000;await poll(clock,[]);
+  await relay.enqueuePersonalRelayMedia({...first,sourceMessageId:2002,sourceDate:clock/1000});await deliver(clock);
+  await relay.enqueuePersonalRelayMedia({...first,sourceDate:clock/1000});
+  await relay.enqueuePersonalRelayMedia({...first,sourceMessageId:2003,sourceDate:clock/1000});
+  assert.equal(sends().length,2);assert.deepEqual(jobs().map(job=>job.status),['sent','sent']);
+});
+
+for(const kind of ['photo','video'])test(`a retried prepared Bot ${kind} must reclaim the dispatch day instead of duplicating a newly reserved post`,async()=>{
+  const before=mytMidnight-120000,after=mytMidnight+1000;configure({startedAt:before-10000});
+  const first=kind==='photo'?photo(1,{date:before/1000}):video(1,{date:before/1000});
+  await poll(before,[first]);telegram.sends.push({ok:false,code:429,retryAfter:1});await deliver(before);
+  assert.equal(jobs()[0].status,'pending');
+  const second={...first,update_id:2,message:{...first.message,message_id:1002,date:after/1000}};
+  await poll(after,[second]);await deliver(after);await deliver(after+4000);
+  assert.deepEqual(jobs().map(job=>job.status),['cancelled','sent']);assert.equal(sends().length,2);
+});
+
+test('a prepared personal job crossing midnight cannot send over a new-day reservation for the same photo',async t=>{
+  await configureAccount(t);let clock=mytMidnight-120000;t.mock.method(Date,'now',()=>clock);
+  await poll(clock,[]);const first=accountPhoto({sourceDate:clock/1000});await relay.enqueuePersonalRelayMedia(first);
+  assert.equal(jobs()[0].media_prepared,1);
+  clock=mytMidnight+1000;await poll(clock,[]);
+  await relay.enqueuePersonalRelayMedia({...first,sourceMessageId:2002,sourceDate:clock/1000});
+  await deliver(clock);await deliver(clock+4000);
+  assert.deepEqual(jobs().map(job=>job.status),['cancelled','sent']);assert.equal(sends().length,1);
+});
+
+for(const uncertain of [false,true])test(`an in-flight midnight ${uncertain?'unconfirmed':'successful'} request blocks a new-day copy without repeating its media`,async()=>{
+  let clock=mytMidnight-1000;configure({startedAt:clock-10000});
+  const first=photo(1,{date:Math.floor(clock/1000)});await poll(clock,[first]);
+  telegram.sends.push(async()=>{
+    clock=mytMidnight+1000;
+    await poll(clock,[photo(2,{date:clock/1000,photo:first.message.photo})]);
+    return uncertain?null:ok({message_id:88770});
+  });
+  await relay.deliverTelegramRelayOnce(decrypt,()=>clock);
+  await poll(clock+4000,[photo(3,{date:(clock+4000)/1000,photo:first.message.photo})]);await deliver(clock+4000);
+  assert.equal(sends().length,1);assert.equal(jobs().length,1);assert.equal(jobs()[0].status,uncertain?'unknown':'sent');
+  assert.ok(getSqlite().prepare('SELECT 1 FROM telegram_relay_media_keys WHERE day_key=? AND outbox_id=?').get(relay.relayDayKey(clock),jobs()[0].id));
+  const tomorrow=mytMidnight+86400000+1000;
+  await poll(tomorrow,[photo(4,{date:tomorrow/1000,photo:first.message.photo})]);await deliver(tomorrow);
+  assert.equal(sends().length,2);assert.equal(jobs()[0].status,uncertain?'unknown':'sent');
+});
+
+test('a trusted completion before midnight releases its provisional next-day keys so new posts may send tomorrow',async()=>{
+  const before=mytMidnight-1000,after=mytMidnight+4000;configure({startedAt:before-10000});
+  const first=photo(1,{date:Math.floor(before/1000)});await poll(before,[first]);await deliver(before);
+  assert.equal(getSqlite().prepare('SELECT COUNT(*) AS count FROM telegram_relay_media_keys WHERE day_key=?').get(relay.relayDayKey(after)).count,0);
+  await poll(after,[photo(2,{date:after/1000,photo:first.message.photo})]);await deliver(after);
+  assert.equal(sends().length,2);assert.ok(jobs().every(job=>job.status==='sent'));
+});
+
+test('an explicit Telegram rejection before midnight releases provisional future-day reservations',async()=>{
+  const before=mytMidnight-1000,after=mytMidnight+4000;configure({startedAt:before-10000});
+  const first=photo(1,{date:Math.floor(before/1000)});await poll(before,[first]);
+  telegram.sends.push({ok:false,code:400,retryAfter:0});await deliver(before);
+  assert.equal(jobs()[0].status,'failed');
+  assert.equal(getSqlite().prepare('SELECT COUNT(*) AS count FROM telegram_relay_media_keys WHERE day_key=?').get(relay.relayDayKey(after)).count,0);
+  await poll(after,[photo(2,{date:after/1000,photo:first.message.photo})]);await deliver(after);
+  assert.equal(sends().length,2);assert.equal(jobs()[1].status,'sent');
+});
+
+for(const existingStatus of ['sent','unknown'])test(`late-request day protection never cancels or resets another ${existingStatus} post`,async()=>{
+  let clock=mytMidnight-120000;configure({startedAt:clock-10000});
+  const first=photo(1,{date:clock/1000});await poll(clock,[first]);
+  telegram.sends.push(async()=>{
+    clock=mytMidnight+1000;await poll(clock,[photo(2,{date:clock/1000,photo:first.message.photo})]);
+    getSqlite().prepare('UPDATE telegram_relay_outbox SET status=?,message_id=?,sent_at=? WHERE id=?')
+      .run(existingStatus,existingStatus==='sent'?88771:null,existingStatus==='sent'?clock:null,jobs()[1].id);
+    return null;
+  });
+  await relay.deliverTelegramRelayOnce(decrypt,()=>clock);await deliver(clock+4000);
+  assert.equal(jobs()[0].status,'unknown');assert.equal(jobs()[1].status,existingStatus);
+  assert.equal(getSqlite().prepare('SELECT outbox_id FROM telegram_relay_media_keys WHERE day_key=? AND media_key=?')
+    .get(relay.relayDayKey(clock),'file:photo:photo-unique-1').outbox_id,jobs()[1].id);
+  assert.equal(sends().length,1);
+});
+
+for(const cancelled of [false,true])test(`a late response after ${cancelled?'settings cancellation':'lease expiry'} protects the current day and cancels only a competing pending copy`,async()=>{
+  let clock=mytMidnight-120000;configure({startedAt:clock-10000});
+  const first=photo(1,{date:clock/1000});await poll(clock,[first]);
+  telegram.sends.push(async()=>{
+    clock=mytMidnight+1000;await poll(clock,[photo(2,{date:clock/1000,photo:first.message.photo})]);
+    assert.equal(jobs()[1].status,'pending');
+    getSqlite().prepare('INSERT INTO telegram_relay_media_keys(day_key,media_key,outbox_id) VALUES(?,?,?)')
+      .run(relay.relayDayKey(clock),'visual:photo:competing-copy-extra-alias',jobs()[1].id);
+    if(cancelled)relay.cancelRelayPending(getSqlite(),clock);
+    return ok({message_id:88770});
+  });
+  await relay.deliverTelegramRelayOnce(decrypt,()=>clock);await deliver(clock+4000);
+  assert.equal(jobs()[0].status,'unknown');assert.equal(jobs()[1].status,'cancelled');assert.equal(sends().length,1);
+  assert.equal(getSqlite().prepare('SELECT outbox_id FROM telegram_relay_media_keys WHERE day_key=? AND media_key=?')
+    .get(relay.relayDayKey(clock),'file:photo:photo-unique-1').outbox_id,jobs()[0].id);
+  assert.equal(getSqlite().prepare('SELECT outbox_id FROM telegram_relay_media_keys WHERE day_key=? AND media_key=?')
+    .get(relay.relayDayKey(clock),'visual:photo:competing-copy-extra-alias').outbox_id,jobs()[0].id);
+  await poll(clock+8000,[photo(3,{date:(clock+8000)/1000,photo:first.message.photo})]);await deliver(clock+8000);
+  assert.equal(sends().length,1);
 });
 
 test('same downloaded image under different Telegram file IDs and captions sends only once',async()=>{
@@ -1174,7 +1325,7 @@ test('same downloaded image under different Telegram file IDs and captions sends
   assert.ok(state().skipped_count>=1);
 });
 
-test('an uncertain image transmission permanently reserves its image identity across database reopening',async()=>{
+test('an uncertain image transmission reserves its image identity for the same MYT day across database reopening',async()=>{
   configure();media.files.set('photo-1',Buffer.from('shared-image'));media.files.set('photo-2',Buffer.from('shared-image'));
   await poll(now,[photo(1)]);telegram.sends.push(null);await deliver(now);
   assert.equal(jobs()[0].status,'unknown');closeDatabase();
@@ -1432,7 +1583,7 @@ test('v18 upgrade preserves settings and PIN while seeding permanent image ident
   }
   db.exec('PRAGMA user_version=18');closeDatabase();
   const migrated=getSqlite();
-  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,23);
+  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,24);
   assert.deepEqual({...migrated.prepare("SELECT * FROM telegram_promotion_settings WHERE id='primary'").get()},settingsBefore);
   assert.deepEqual({...migrated.prepare("SELECT * FROM notes_vault_settings WHERE id='primary'").get()},vaultBefore);
   assert.deepEqual({...migrated.prepare("SELECT * FROM telegram_relay_state WHERE id='primary'").get()},stateBefore);
@@ -1456,6 +1607,7 @@ test('v19 upgrade preserves queued media bytes, permanent identities, settings a
   const stateBefore={...db.prepare("SELECT * FROM telegram_relay_state WHERE id='primary'").get()};
   const vaultBefore={...db.prepare("SELECT * FROM notes_vault_settings WHERE id='primary'").get()};
   const columns=db.prepare('PRAGMA table_info(telegram_relay_outbox)').all().map(row=>row.name).filter(name=>!['mime_type','caption_entities','caption_edit_attempted_at','caption_edit_outcome'].includes(name));
+  restoreLegacyMediaKeys(db);
   db.exec(`BEGIN IMMEDIATE;
     CREATE TABLE telegram_relay_outbox_v19 (
       id INTEGER PRIMARY KEY AUTOINCREMENT,source_chat_id INTEGER NOT NULL,source_message_id INTEGER NOT NULL,
@@ -1478,7 +1630,7 @@ test('v19 upgrade preserves queued media bytes, permanent identities, settings a
   assert.throws(()=>db.prepare(`INSERT INTO telegram_relay_outbox(source_chat_id,source_message_id,fingerprint,
     queued_at,revision,media_kind,file_id,file_unique_id,caption) VALUES(? ,9999,'before-video',?,'relay-revision','video','v','vu','Video')`).run(source,now),/CHECK/);
   closeDatabase();const migrated=getSqlite();
-  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,23);
+  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,24);
   assert.deepEqual(jobs().map(({caption_entities,...row})=>({...row})),rowsBefore);
   assert.ok(jobs().every(row=>row.caption_entities===''));
   assert.deepEqual(migrated.prepare('SELECT * FROM telegram_relay_media_keys ORDER BY media_key').all().map(row=>({...row})),keysBefore);
@@ -1507,9 +1659,10 @@ test('v20 upgrade marks unavailable legacy caption entities without changing job
   const beforeSettings={...db.prepare("SELECT * FROM telegram_promotion_settings WHERE id='primary'").get()};
   const beforeState={...db.prepare("SELECT * FROM telegram_relay_state WHERE id='primary'").get()};
   const beforePin={...db.prepare("SELECT * FROM notes_vault_settings WHERE id='primary'").get()};
+  restoreLegacyMediaKeys(db);
   db.exec('DROP INDEX telegram_relay_caption_edits; ALTER TABLE telegram_relay_outbox DROP COLUMN caption_edit_attempted_at; ALTER TABLE telegram_relay_outbox DROP COLUMN caption_edit_outcome; ALTER TABLE telegram_relay_outbox DROP COLUMN caption_entities; PRAGMA user_version=20');
   closeDatabase();const migrated=getSqlite();
-  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,23);
+  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,24);
   assert.deepEqual(jobs().map(({caption_entities,...row})=>({...row})),beforeJobs);
   assert.ok(jobs().every(row=>row.caption_entities===''),'old queues mark unavailable original custom emoji metadata instead of fabricating an empty entity list');
   assert.deepEqual(migrated.prepare('SELECT * FROM telegram_relay_media_keys ORDER BY media_key').all().map(row=>({...row})),beforeKeys);
@@ -1535,9 +1688,10 @@ test('v21 upgrade preserves sent messages, pending media, identities, settings a
   const beforeSettings={...db.prepare("SELECT * FROM telegram_promotion_settings WHERE id='primary'").get()};
   const beforeState={...db.prepare("SELECT * FROM telegram_relay_state WHERE id='primary'").get()};
   const beforePin={...db.prepare("SELECT * FROM notes_vault_settings WHERE id='primary'").get()};
+  restoreLegacyMediaKeys(db);
   db.exec('DROP INDEX telegram_relay_caption_edits; ALTER TABLE telegram_relay_outbox DROP COLUMN caption_edit_attempted_at; ALTER TABLE telegram_relay_outbox DROP COLUMN caption_edit_outcome; PRAGMA user_version=21');
   closeDatabase();const migrated=getSqlite();
-  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,23);
+  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,24);
   assert.deepEqual(jobs().map(({caption_edit_attempted_at,caption_edit_outcome,...row})=>({...row})),beforeJobs);
   assert.ok(jobs().every(row=>row.caption_edit_attempted_at===0&&row.caption_edit_outcome===''));
   assert.deepEqual(migrated.prepare('SELECT * FROM telegram_relay_media_keys ORDER BY media_key').all().map(row=>({...row})),beforeKeys);
@@ -1561,9 +1715,10 @@ test('v22 upgrade removes only album uniqueness and preserves messages, media ke
   const beforeSettings={...db.prepare("SELECT * FROM telegram_promotion_settings WHERE id='primary'").get()};
   const beforeState={...db.prepare("SELECT * FROM telegram_relay_state WHERE id='primary'").get()};
   const beforePin={...db.prepare("SELECT * FROM notes_vault_settings WHERE id='primary'").get()};
+  restoreLegacyMediaKeys(db);
   db.exec("DROP INDEX telegram_relay_album; CREATE UNIQUE INDEX telegram_relay_album ON telegram_relay_outbox(source_chat_id,media_group_id) WHERE media_group_id<>''; PRAGMA user_version=22");
   closeDatabase();const migrated=getSqlite();
-  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,23);
+  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,24);
   assert.deepEqual(jobs().map(row=>({...row})),beforeJobs);
   assert.deepEqual(migrated.prepare('SELECT * FROM telegram_relay_media_keys ORDER BY media_key').all().map(row=>({...row})),beforeKeys);
   assert.deepEqual({...migrated.prepare("SELECT * FROM telegram_promotion_settings WHERE id='primary'").get()},beforeSettings);
@@ -1577,6 +1732,55 @@ test('v22 upgrade removes only album uniqueness and preserves messages, media ke
   assert.equal(await relay.enqueuePersonalRelayMedia(accountPhoto({sourceChatId:source,sourceMessageId:2004,
     sourceMediaId:'v23-reuploaded-original',caption:'Changed caption'})),true);
   assert.equal(jobs().length,3,'permanent media identities still prevent an already sent photo from being requeued');
+});
+
+test('v23 upgrade dates every legacy key without changing outbox data, cursors, media bytes, PIN or sequence',async t=>{
+  await configureAccount(t);const db=getSqlite(),before=mytMidnight-2000,after=mytMidnight+2000;
+  const insert=db.prepare(`INSERT INTO telegram_relay_outbox(id,source_chat_id,source_message_id,fingerprint,queued_at,revision,
+    media_kind,file_id,file_unique_id,caption,caption_entities,status,sent_at,message_id,media_bytes,origin,account_generation,lease_until)
+    VALUES(?,?,?,?,?,'relay-revision','photo',?,?,'Legacy caption','[]',?,?,?,?, 'account','account-generation',?)`);
+  insert.run(101,source,2101,'sent-fingerprint',before,'legacy-file-1','legacy-unique-1','sent',after,88770,null,0);
+  insert.run(102,source,2102,'pending-fingerprint',before,'legacy-file-2','legacy-unique-2','pending',null,null,Buffer.from('pending-media-bytes'),0);
+  insert.run(103,source,2103,'unknown-fingerprint',after,'legacy-file-3','legacy-unique-3','unknown',null,null,null,0);
+  insert.run(104,source,2104,'sending-fingerprint',before,'legacy-file-4','legacy-unique-4','sending',null,null,Buffer.from('in-flight-media-bytes'),after);
+  db.prepare("INSERT INTO notes_vault_settings(id,pin_hash,revision,created_at,updated_at) VALUES('primary','v23-pin','v23-vault',61,62)").run();
+  db.prepare("UPDATE sqlite_sequence SET seq=9200 WHERE name='telegram_relay_outbox'").run();
+  const beforeJobs=jobs().map(row=>({...row}));
+  const beforeSettings={...db.prepare("SELECT * FROM telegram_promotion_settings WHERE id='primary'").get()};
+  const beforeState={...db.prepare("SELECT * FROM telegram_relay_state WHERE id='primary'").get()};
+  const beforePin={...db.prepare("SELECT * FROM notes_vault_settings WHERE id='primary'").get()};
+  const beforeAccount={...db.prepare("SELECT * FROM telegram_personal_account WHERE id='primary'").get()};
+  const beforeSources=db.prepare('SELECT * FROM telegram_personal_sources ORDER BY chat_id').all().map(row=>({...row}));
+  restoreLegacyMediaKeys(db);
+  const legacy=[['legacy-sent-key',101],['legacy-pending-key',102],['legacy-unknown-key',103],['legacy-sending-key',104],['orphan-legacy-key',99999]];
+  for(const [key,id] of legacy)db.prepare('INSERT INTO telegram_relay_media_keys(media_key,outbox_id) VALUES(?,?)').run(key,id);
+  db.exec('PRAGMA user_version=23');closeDatabase();const migrated=getSqlite();
+  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,24);
+  assert.deepEqual(jobs().map(row=>({...row})),beforeJobs);
+  assert.deepEqual({...migrated.prepare("SELECT * FROM telegram_promotion_settings WHERE id='primary'").get()},beforeSettings);
+  assert.deepEqual({...migrated.prepare("SELECT * FROM telegram_relay_state WHERE id='primary'").get()},beforeState);
+  assert.deepEqual({...migrated.prepare("SELECT * FROM notes_vault_settings WHERE id='primary'").get()},beforePin);
+  assert.deepEqual({...migrated.prepare("SELECT * FROM telegram_personal_account WHERE id='primary'").get()},beforeAccount);
+  assert.deepEqual(migrated.prepare('SELECT * FROM telegram_personal_sources ORDER BY chat_id').all().map(row=>({...row})),beforeSources);
+  assert.equal(migrated.prepare("SELECT seq FROM sqlite_sequence WHERE name='telegram_relay_outbox'").get().seq,9200);
+  const expected=[
+    {day_key:relay.relayDayKey(after),media_key:'legacy-sent-key',outbox_id:101},
+    {day_key:relay.relayDayKey(before),media_key:'legacy-pending-key',outbox_id:102},
+    {day_key:relay.relayDayKey(after),media_key:'legacy-unknown-key',outbox_id:103},
+    {day_key:relay.relayDayKey(before),media_key:'legacy-sending-key',outbox_id:104},
+    {day_key:relay.relayDayKey(after),media_key:'legacy-sending-key',outbox_id:104},
+    {day_key:'1970-01-01',media_key:'orphan-legacy-key',outbox_id:99999},
+  ].sort((a,b)=>a.day_key.localeCompare(b.day_key)||a.media_key.localeCompare(b.media_key));
+  assert.deepEqual(migrated.prepare('SELECT * FROM telegram_relay_media_keys ORDER BY day_key,media_key').all().map(row=>({...row})),expected);
+  assert.ok(migrated.prepare('PRAGMA index_list(telegram_relay_media_keys)').all().some(row=>row.name==='telegram_relay_media_key_job'));
+  assert.throws(()=>migrated.prepare('INSERT INTO telegram_relay_media_keys(day_key,media_key,outbox_id) VALUES(?,?,?)')
+    .run(relay.relayDayKey(before),'legacy-pending-key',102),/UNIQUE/);
+  assert.doesNotThrow(()=>migrated.prepare('INSERT INTO telegram_relay_media_keys(day_key,media_key,outbox_id) VALUES(?,?,?)')
+    .run(relay.relayDayKey(after),'legacy-pending-key',102));
+  assert.throws(()=>migrated.prepare(`INSERT INTO telegram_relay_outbox(source_chat_id,source_message_id,fingerprint,queued_at,
+    revision,media_kind,file_id,file_unique_id,caption) VALUES(?,2101,'replayed-source',?,'relay-revision','photo','new-file','new-unique','Caption')`)
+    .run(source,after),/UNIQUE/);
+  assert.equal(sends().length,0);
 });
 
 test('a full bot queue retains the source update until capacity is available and then queues it exactly once',async()=>{
