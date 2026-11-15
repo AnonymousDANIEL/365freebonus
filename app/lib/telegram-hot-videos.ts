@@ -234,6 +234,8 @@ export function hotVideoStatus(db: DatabaseSync, clock = Date.now) {
     ready:s.verified_at > 0 && s.token_hash === tokenHash && !s.last_error,lastError:s.last_error,lastSyncedAt:s.last_synced_at || null,
     historyComplete:s.backfill_done === 1 })), sourceCandidates,
     videoCount: (db.prepare("SELECT COUNT(*) AS n FROM telegram_hot_videos WHERE deleted_at=0").get() as {n:number}).n,
+    unusedVideoCount: (db.prepare(`SELECT COUNT(*) AS n FROM telegram_hot_videos v WHERE v.deleted_at=0 AND v.last_sent_at=0
+      AND NOT EXISTS(SELECT 1 FROM telegram_hot_video_jobs j WHERE j.video_id=v.id AND j.status IN ('sent','unknown'))`).get() as {n:number}).n,
     enabled: value.enabled === 1, targetChatId: target ? String(target) : "", targetTitle: value.target_title || "🔞365 Free Bonus Hot",
     intervalHours: value.interval_hours, nextRunAt: value.enabled && value.next_run_at ? value.next_run_at : null, revision: value.revision,
     ready: value.target_chat_id < 0 && value.verified_at > 0 && value.token_hash === tokenHash && !!cipher && !value.last_error,

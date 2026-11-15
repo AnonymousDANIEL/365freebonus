@@ -21,7 +21,7 @@ type Scheduler = { now: number; heartbeatAt: number | null; lastTickAt: number |
   queuedCount: number; eligibleCount: number; unusedCount?: number; sourceCount?: number; blockedReason: string; nextJobs: HotJob[]; lastError?: string };
 type HotStatus = { enabled: boolean; targetChatId: string; targetTitle: string; intervalHours: number; nextRunAt: number | null;
   revision: string; ready: boolean; lastError: string; lastCheckedAt: number | null; markSourceUsed?: boolean; scheduler?: Scheduler;
-  sourceChannels?: SourceChannel[]; sourceCandidates?: SourceCandidate[]; videoCount?: number;
+  sourceChannels?: SourceChannel[]; sourceCandidates?: SourceCandidate[]; videoCount?: number; unusedVideoCount?: number;
   videos: HotVideo[]; jobs: HotJob[]; counts: Record<string, number>; candidates?: { chatId: string; title: string }[] };
 type SourceDraft = { targetChatId: string; sources: string[]; markSourceUsed: boolean; revision: string };
 type RecurrenceDraft = { enabled: boolean; intervalHours: number; revision: string };
@@ -34,7 +34,7 @@ const HOUR = 3_600_000, DAY = 24 * HOUR;
 const tabs = [
   { id: "sources", label: "来源频道", icon: Radio },
   { id: "time", label: "时间管理", icon: CalendarClock },
-  { id: "queue", label: "视频队列", icon: Film },
+  { id: "queue", label: "未使用", icon: Film },
   { id: "history", label: "发送记录", icon: History },
 ] as const;
 const timezone = "Asia/Kuala_Lumpur";
@@ -214,11 +214,12 @@ export default function TelegramHotVideos({ request, signInPath }: Props) {
   const statusText = loading && !status ? "读取中" : staleStatus ? "等待刷新状态" : !status?.enabled ? "自动队列已暂停"
     : !scheduler ? "等待调度检查" : !scheduler.workerHealthy ? "调度服务需要检查" : blockedReason ? "计划已保存，等待处理" : phaseLabels[scheduler.phase] || "等待下一次发送";
   const statusTone = !status?.enabled || staleStatus ? "neutral" : scheduler?.workerHealthy && !blockedReason ? "ready" : blockedReason || scheduler && !scheduler.workerHealthy ? "warning" : "neutral";
+  const unusedVideoCount = status?.unusedVideoCount ?? (status?.videos || []).filter(video => !["used", "unknown"].includes(usage(video))).length;
   const visibleVideos = (status?.videos || []).filter(video => {
     const state = usage(video);
     if (videoFilter === "all") return true;
     if (videoFilter === "used") return state === "used";
-    return videoFilter === "attention" ? ["unknown", "failed"].includes(state) : state !== "used";
+    return videoFilter === "attention" ? ["unknown", "failed"].includes(state) : !["used", "unknown"].includes(state);
   });
   const savedJobMap = new Map<string, HotJob>();
   for (const job of [...(scheduler?.nextJobs || []), ...(status?.jobs || [])]) if (job.status === "pending") savedJobMap.set(job.id, job);
@@ -258,7 +259,7 @@ export default function TelegramHotVideos({ request, signInPath }: Props) {
       <nav className="cms-hot-tabs" role="tablist" aria-label="Hot 视频管理页面">{tabs.map(tab => { const Icon = tab.icon; return <button key={tab.id} id={`cms-hot-tab-${tab.id}`} type="button" role="tab"
         aria-selected={activeTab === tab.id} aria-controls={`cms-hot-panel-${tab.id}`} tabIndex={activeTab === tab.id ? 0 : -1} onKeyDown={tabKeys} onClick={() => setActiveTab(tab.id)}>
         <Icon size={16} />{tab.label}{tab.id === "sources" && !savedSources.length && <span className="cms-hot-tab-dot" aria-label="需要设置来源" />}
-        {tab.id === "queue" && <small>{status?.videoCount ?? status?.videos.length ?? 0}</small>}</button>; })}</nav>
+        {tab.id === "queue" && <small title="未使用视频数量">{unusedVideoCount}</small>}</button>; })}</nav>
 
       <section className="cms-hot-panel" id="cms-hot-panel-sources" role="tabpanel" aria-labelledby="cms-hot-tab-sources" hidden={activeTab !== "sources"}>
         <div className="cms-hot-section-heading"><div><h3>来源与发布目标</h3><p>先保存来源，再检查频道。识别到的视频进入队列，不会一次发完。</p></div>
@@ -325,7 +326,7 @@ export default function TelegramHotVideos({ request, signInPath }: Props) {
       </section>
 
       <section className="cms-hot-panel" id="cms-hot-panel-queue" role="tabpanel" aria-labelledby="cms-hot-tab-queue" hidden={activeTab !== "queue"}>
-        <div className="cms-hot-section-heading"><div><h3>视频队列 <span>{status?.videoCount ?? status?.videos.length ?? 0}</span></h3><p>每条视频保留来源和使用状态。单次时间需单独保存。</p></div>
+        <div className="cms-hot-section-heading"><div><h3>视频列表 <span>未使用 {unusedVideoCount} 条</span></h3><p>每条视频保留来源和使用状态。单次时间需单独保存。</p></div>
           <button className="cms-secondary" type="button" disabled={disabled || sourceDirty || !savedSources.length} onClick={() => void syncSources()}><RefreshCw size={14} />检查新视频</button></div>
         <div className="cms-hot-segment" role="group" aria-label="视频状态筛选">{([["unused", "未使用"], ["used", "已使用"], ["attention", "需要处理"], ["all", "全部"]] as const).map(([value, label]) => <button key={value} type="button" aria-pressed={videoFilter === value} onClick={() => setVideoFilter(value)}>{label}</button>)}</div>
         {status && (status.videoCount || 0) > status.videos.length && <small className="cms-hot-muted">已载入 {status.videos.length} 条 / 共 {status.videoCount} 条；筛选只针对已载入的视频，完整队列保留在后台。</small>}
