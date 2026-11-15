@@ -4,7 +4,7 @@ import { Api, Logger, TelegramClient, utils } from "teleproto";
 import { StringSession } from "teleproto/sessions";
 import bigInt from "big-integer";
 import { getSqlite } from "./sqlite";
-import { inspectRelayDelivery, isRelayCustomEmojiId, normalizeRelayCaptionEntities, relayCaptionEntitiesMatch, relayKeyboard, type RelayCaptionEntity } from "./telegram-relay-content";
+import { inspectRelayDelivery, isRelayCustomEmojiId, normalizeRelayCaptionEntities, relayCaptionEntitiesMatch, relayCaptionFormattingMatches, relayKeyboard, type RelayCaptionEntity } from "./telegram-relay-content";
 
 type Stage = "disconnected" | "code" | "password" | "connected";
 type AccountRow = {
@@ -626,6 +626,25 @@ type BlockedCaptionReference = {
   id: number; message_id: number | null; caption: string; caption_entities: string; caption_edit_outcome: string;
   origin: string; account_generation: string; queued_at: number; source_chat_id: number;
 };
+function customEmojiSubset(caption: string, expected: RelayCaptionEntity[], actual: RelayCaptionEntity[]) {
+  return relayCaptionEntitiesMatch(caption, expected.filter(entity => entity.type === "custom_emoji"),
+    actual.filter(entity => entity.type === "custom_emoji"), { allowMissingCustomEmoji: true });
+}
+function captionEntityCoverage(expected: RelayCaptionEntity[], actual: RelayCaptionEntity[]) {
+  const coverage = (entities: RelayCaptionEntity[]) => {
+    let total = 0, end = -1;
+    for (const entity of [...entities].sort((left, right) => left.offset - right.offset || left.length - right.length)) {
+      const nextEnd = entity.offset + entity.length;
+      total += Math.max(0, nextEnd - Math.max(entity.offset, end)); end = Math.max(end, nextEnd);
+    }
+    return total;
+  };
+  return [...new Set([...expected, ...actual].map(entity => entity.type))].sort().map(type => {
+    const wanted = expected.filter(entity => entity.type === type), received = actual.filter(entity => entity.type === type);
+    return { type, expectedCount: wanted.length, actualCount: received.length,
+      expectedCoveredUtf16: coverage(wanted), actualCoveredUtf16: coverage(received) };
+  });
+}
 function blockedCaptionSummary(reference: BlockedCaptionReference, sourceActive: boolean, targetChatId: number,
   qualification: RelayDeliverySample["personalEditQualification"], message?: Api.Message) {
   const caption = typeof reference.caption === "string" ? reference.caption : "";
@@ -665,6 +684,9 @@ function blockedCaptionSummary(reference: BlockedCaptionReference, sourceActive:
   const unsupportedActualEntityCount = Math.max(0, actualEntityCount - convertibleEntityCount);
   const prepared = inspectRelayDelivery(caption, expected, { caption, caption_entities: expected, reply_markup: { inline_keyboard: relayKeyboard() } });
   const inspected = inspectRelayDelivery(caption, expected, actual);
+  const actualEntities = actual?.caption_entities || [];
+  const actualCustomSubset = !!actual && customEmojiSubset(caption, expected, actualEntities);
+  const semanticFormattingMatches = !!actual && relayCaptionFormattingMatches(caption, expected, actualEntities);
   let reason: RelayCaptionPreflightReason = "ready_to_edit";
   if (!inputValid) reason = "input_invalid";
   else if (!storedEntitiesValid) reason = "stored_entities_invalid";
@@ -681,8 +703,9 @@ function blockedCaptionSummary(reference: BlockedCaptionReference, sourceActive:
   else if (!inspected.captionMatches) reason = "caption_mismatch";
   else if (!inspected.linksSafe) reason = "actual_links_unsafe";
   else if (!inspected.buttonsMatch) reason = "buttons_mismatch";
-  else if (inspected.customEmojiPreserved) reason = "already_preserved";
-  const outcomes = ["invalid", "changed", "rejected", "preserved", "uncertain", "account_invalid", "account_changed", "account_rejected",
+  else if (!actualCustomSubset) reason = "stored_entities_mismatch";
+  else if (inspected.customEmojiPreserved && semanticFormattingMatches) reason = "already_preserved";
+  const outcomes = ["invalid", "changed", "rejected", "preserved", "uncertain", "account_invalid", "account_invalid_final", "account_changed", "account_rejected",
     "account_preserved", "account_uncertain", "account_unavailable_final", "account_unavailable"] as const;
   const snapshotOutcome = outcomes.find(outcome => outcome === reference.caption_edit_outcome) || "other";
   const leading = (value: string) => /^\s*/u.exec(value)?.[0].length || 0;
@@ -699,6 +722,9 @@ function blockedCaptionSummary(reference: BlockedCaptionReference, sourceActive:
     return /\s/u.test(String.fromCodePoint(point)) ? "whitespace" : "ordinary";
   };
   return { reason, snapshotOutcome, inputValid, sourceActive, storedEntitiesValid,
+    actualCustomSubset, semanticFormattingMatches,
+    exactEntitiesMatch: !!actual && relayCaptionEntitiesMatch(caption, expected, actualEntities),
+    entityCoverage: captionEntityCoverage(expected, actualEntities),
     expectedEntityCount: Array.isArray(raw) ? raw.length : 0, unsupportedExpectedEntityCount,
     expectedCustomEmoji: expected.filter(entity => entity.type === "custom_emoji").length,
     messageFound, idMatches, peerMatches, isPost, viaBot, viaBusinessBot, forwarded, mediaValid,
@@ -748,7 +774,7 @@ export async function inspectBlockedRelayCaptionPreflights(): Promise<{
     caption,caption_entities,caption_edit_outcome,origin,account_generation,queued_at,source_chat_id
     FROM telegram_relay_outbox WHERE status='sent' AND revision=? AND sent_at>=? AND sent_at<=?
     AND ${exact ? "caption_edit_outcome='account_invalid'" : `caption_edit_outcome IN ('invalid','changed','rejected','preserved','uncertain',
-      'account_invalid','account_changed','account_rejected','account_preserved','account_uncertain','account_unavailable_final','account_unavailable')
+      'account_invalid','account_invalid_final','account_changed','account_rejected','account_preserved','account_uncertain','account_unavailable_final','account_unavailable')
       AND last_error<>'' AND instr(caption_entities,'"custom_emoji"')>0`}
     ORDER BY sent_at DESC,id DESC LIMIT 3`).all(settings.relay_revision, now - 24 * 60 * 60_000, now) as BlockedCaptionReference[];
   const exact = selectReferences(true).length > 0, references = selectReferences(exact);
@@ -1023,16 +1049,22 @@ async function runVerifiedRelayCaptionWithAccount(input: VerifiedCaptionInput,
           if (sourceEdit) {
             const desired = inspectRelayDelivery(input.caption, expected, original);
             if (desired.captionMatches && desired.customEmojiPreserved && desired.linksSafe && desired.buttonsMatch
-              && relayCaptionEntitiesMatch(input.caption, expected, original.caption_entities)) return { state: "ok", attempted: false, outcome: "preserved" };
+              && relayCaptionFormattingMatches(input.caption, expected, original.caption_entities)) return { state: "ok", attempted: false, outcome: "preserved" };
           }
           const verified = inspectRelayDelivery(baselineCaption, baselineEntities, original);
+          const baselineExpected = sourceEdit && allowMissingBaselineCustom
+            ? [...baselineEntities.filter(entity => entity.type !== "custom_emoji"),
+              ...original.caption_entities.filter(entity => entity.type === "custom_emoji")]
+            : baselineEntities;
           if (!verified.captionMatches) failure = "caption_mismatch";
           else if (!verified.linksSafe) failure = "actual_links_unsafe";
           else if (!verified.buttonsMatch) failure = "buttons_mismatch";
-          else if (!relayCaptionEntitiesMatch(baselineCaption, baselineEntities, original.caption_entities,
-            { allowMissingCustomEmoji: allowMissingBaselineCustom })) failure = "stored_entities_mismatch";
+          else if (sourceEdit ? !relayCaptionFormattingMatches(baselineCaption, baselineExpected, original.caption_entities)
+            || allowMissingBaselineCustom && !customEmojiSubset(baselineCaption, baselineEntities, original.caption_entities)
+            : !customEmojiSubset(baselineCaption, baselineEntities, original.caption_entities)) failure = "stored_entities_mismatch";
           else {
-            if (!sourceEdit && verified.customEmojiPreserved && verified.formattingPreserved) return { state: "ok", attempted: false, outcome: "preserved" };
+            if (!sourceEdit && verified.customEmojiPreserved && relayCaptionFormattingMatches(input.caption, expected, original.caption_entities))
+              return { state: "ok", attempted: false, outcome: "preserved" };
             originalMedia = media;
             break;
           }
@@ -1082,8 +1114,8 @@ async function runVerifiedRelayCaptionWithAccount(input: VerifiedCaptionInput,
         const actual = relayDeliveryMessage(after[0]);
         if (actual) {
           const inspected = inspectRelayDelivery(input.caption, expected, actual);
-          if (inspected.captionMatches && inspected.customEmojiPreserved && inspected.formattingPreserved && inspected.linksSafe && inspected.buttonsMatch
-            && (!sourceEdit || relayCaptionEntitiesMatch(input.caption, expected, actual.caption_entities)))
+          if (inspected.captionMatches && inspected.customEmojiPreserved && inspected.linksSafe && inspected.buttonsMatch
+            && relayCaptionFormattingMatches(input.caption, expected, actual.caption_entities))
             return { state: "ok", attempted: true, outcome: "preserved" };
         }
         readOutcome = "changed";
@@ -1380,17 +1412,22 @@ export async function pollTelegramAccountOnce() {
     WHERE e.status='pending' AND (e.next_attempt_at<=? OR (e.preflight_waits>0 AND e.next_attempt_at<=?))
     AND e.source_version=o.source_version AND o.status='sent' AND o.message_id>0 AND o.revision=? LIMIT 1`)
     .get(repairNow, repairNow + LEASE_MS, relay.relay_revision)) return;
-  // Give a due caption repair the account lease first. No current poll is
-  // interrupted, and future/backed-off or terminal repairs cannot starve receive.
+  // Initial Emoji repairs share the same lease reservation as source updates.
+  // Match the actual worker's eligibility so obsolete work cannot block receive.
   if (ready && db.prepare(`SELECT 1 FROM telegram_relay_outbox WHERE status='sent' AND revision=? AND message_id>0
-    AND sent_at>=? AND sent_at<=? AND caption_edit_attempted_at>0 AND next_attempt_at<=?
+    AND sent_at>=? AND sent_at<=? AND caption_edit_attempted_at>0
+    AND (next_attempt_at<=? OR (caption_edit_outcome IN ('account_waiting_1','account_waiting_2','account_waiting_3',
+      'account_recheck_waiting_1','account_recheck_waiting_2','account_recheck_waiting_3') AND next_attempt_at<=?))
+    AND source_content_hash NOT LIKE 'invalid:%'
+    AND NOT EXISTS(SELECT 1 FROM telegram_relay_source_edits e WHERE e.outbox_id=telegram_relay_outbox.id AND e.outcome<>'applied_before_send')
     AND ((caption_edit_outcome IN ('changed','account_waiting_1','account_waiting_2','account_waiting_3','account_revalidated') AND last_error=?)
       OR (caption_edit_outcome='account_unavailable' AND last_error=?)
       OR (caption_edit_outcome='rejected' AND last_error=? AND instr(caption_entities,'"custom_emoji"')>0)
       OR (((caption_edit_outcome='account_invalid' AND caption_edit_recheck_count=0)
+        OR (caption_edit_outcome='account_invalid_final' AND caption_edit_recheck_count=1 AND caption_metadata_recovery_count=0)
         OR (caption_edit_outcome IN ('account_recheck_waiting_1','account_recheck_waiting_2','account_recheck_waiting_3') AND caption_edit_recheck_count=1))
         AND instr(caption_entities,'"custom_emoji"')>0)) LIMIT 1`)
-    .get(relay.relay_revision, repairNow - 24 * 60 * 60_000, repairNow, repairNow,
+    .get(relay.relay_revision, repairNow - 24 * 60 * 60_000, repairNow, repairNow, repairNow + LEASE_MS,
       "Telegram 未保留部分原始自定义 Emoji，请检查机器人的自定义 Emoji 使用权限。该消息不会自动重发。",
       "个人账号备用补正当前不可用，请检查本人账号连接和编辑权限；原媒体不会重复发送。",
       "Telegram 拒绝补正文案或按钮，请检查机器人权限及原消息格式；不会重复发送媒体。")) return;

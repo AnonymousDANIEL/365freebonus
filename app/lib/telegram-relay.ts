@@ -21,6 +21,7 @@ type RelayJob = {
   content_hash: string; visual_hash: string; media_prepared: number; mime_type: string; caption_entities: string;
   message_id: number | null; sent_at: number | null; last_error: string;
   caption_edit_attempted_at: number; caption_edit_outcome: string; caption_edit_recheck_count: number;
+  caption_metadata_recovery_count: number;
   source_version: number; source_content_hash: string;
 };
 type SendClaim = { settings: RelaySettings; targetChatId: number; job: RelayJob };
@@ -678,7 +679,7 @@ function auditBlockedCaptionRecovery(outcome: string, entities: RelayCaptionEnti
     verified: outcome === "account_preserved",
   }));
 }
-/** Legacy invalid rows receive one leased read-only validation before any editor can see them. */
+/** Preflight-only failures receive bounded leased read-only validation before any editor can see them. */
 async function recheckTelegramRelayCaptionWithAccountOnce(identity: number, snapshot: RelaySettings, clock: () => number): Promise<boolean> {
   const db = getSqlite();
   const claim = transaction(db, () => {
@@ -695,6 +696,7 @@ async function recheckTelegramRelayCaptionWithAccountOnce(identity: number, snap
       AND source_content_hash NOT LIKE 'invalid:%'
       AND NOT EXISTS(SELECT 1 FROM telegram_relay_source_edits e WHERE e.outbox_id=telegram_relay_outbox.id AND e.outcome<>'applied_before_send')
       AND ((caption_edit_outcome='account_invalid' AND caption_edit_recheck_count=0)
+        OR (caption_edit_outcome='account_invalid_final' AND caption_edit_recheck_count=1 AND caption_metadata_recovery_count=0)
         OR (caption_edit_outcome IN ('account_recheck_waiting_1','account_recheck_waiting_2','account_recheck_waiting_3') AND caption_edit_recheck_count=1))
       ORDER BY sent_at DESC,id DESC LIMIT 1`).get(current.relay_revision, now - CAPTION_EDIT_WINDOW_MS, now, now) as RelayJob | undefined;
     if (!job) return null;
@@ -703,22 +705,26 @@ async function recheckTelegramRelayCaptionWithAccountOnce(identity: number, snap
       { caption: job.caption, caption_entities: entities, reply_markup: { inline_keyboard: relayKeyboard() } }).linksSafe;
     const waitingCount = Number(/^account_recheck_waiting_([1-3])$/.exec(job.caption_edit_outcome)?.[1] || 0);
     const increment = job.caption_edit_outcome === "account_invalid" ? 1 : 0;
+    const metadataIncrement = Number(job.caption_edit_outcome === "account_invalid_final");
     if (!Number.isSafeInteger(job.message_id) || Number(job.message_id) <= 0 || !entities
       || !entities.some(entity => entity.type === "custom_emoji") || job.caption.length > 1024 || !preparedSafe
       || job.source_chat_id === runtime.target_chat_id
       || (job.origin === "account" && !accountAllowed(db, job.source_chat_id, job.account_generation, job.queued_at))) {
-      const changed = db.prepare("UPDATE telegram_relay_outbox SET caption_edit_outcome='account_invalid_final',caption_edit_attempted_at=?,last_error=?,caption_edit_recheck_count=caption_edit_recheck_count+? WHERE id=?")
-        .run(now, !preparedSafe ? CAPTION_UNSAFE_LINKS_ERROR : CAPTION_EDIT_INVALID_ERROR, increment, job.id);
+      const changed = db.prepare(`UPDATE telegram_relay_outbox SET caption_edit_outcome='account_invalid_final',caption_edit_attempted_at=?,last_error=?,
+        caption_edit_recheck_count=caption_edit_recheck_count+?,caption_metadata_recovery_count=caption_metadata_recovery_count+? WHERE id=?`)
+        .run(now, !preparedSafe ? CAPTION_UNSAFE_LINKS_ERROR : CAPTION_EDIT_INVALID_ERROR, increment, metadataIncrement, job.id);
       return { invalid: true as const, entities: entities || [], waitingCount, persisted: changed.changes > 0 };
     }
     const leaseId = randomUUID();
     db.prepare("UPDATE telegram_relay_state SET send_lease_id=?,send_lease_until=?,next_send_at=? WHERE id='primary'")
       .run(leaseId, now + LEASE_MS, now + SEND_MS);
     db.prepare(`UPDATE telegram_relay_outbox SET caption_edit_outcome='account_rechecking',caption_edit_attempted_at=?,lease_id=?,lease_until=?,
-      caption_edit_recheck_count=caption_edit_recheck_count+? WHERE id=? AND status='sent'`).run(now, leaseId, now + LEASE_MS, increment, job.id);
+      caption_edit_recheck_count=caption_edit_recheck_count+?,caption_metadata_recovery_count=caption_metadata_recovery_count+?
+      WHERE id=? AND status='sent'`).run(now, leaseId, now + LEASE_MS, increment, metadataIncrement, job.id);
     return { settings: current, targetChatId: runtime.target_chat_id, entities, waitingCount,
       job: { ...job, caption_edit_outcome: "account_rechecking", caption_edit_attempted_at: now,
-        caption_edit_recheck_count: job.caption_edit_recheck_count + increment, lease_id: leaseId, lease_until: now + LEASE_MS } };
+        caption_edit_recheck_count: job.caption_edit_recheck_count + increment,
+        caption_metadata_recovery_count: job.caption_metadata_recovery_count + metadataIncrement, lease_id: leaseId, lease_until: now + LEASE_MS } };
   });
   if (!claim) return false;
   if ("expired" in claim) { auditBlockedCaptionRecovery("account_invalid_final", [], 0, "worker_lease_lost", true); return true; }

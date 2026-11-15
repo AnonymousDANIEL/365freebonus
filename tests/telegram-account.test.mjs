@@ -842,7 +842,7 @@ test('personal receive remains available when caption repair is '+reason,async()
   }
   if(reason.startsWith('recheck-')) {
     db().prepare("UPDATE telegram_relay_outbox SET caption_edit_outcome='account_recheck_waiting_1',caption_edit_recheck_count=1").run();
-    if(reason==='recheck-future-due')db().prepare('UPDATE telegram_relay_outbox SET next_attempt_at=?').run(Date.now()+60000);
+    if(reason==='recheck-future-due')db().prepare('UPDATE telegram_relay_outbox SET next_attempt_at=?').run(Date.now()+61000);
     if(reason==='recheck-without-custom')db().prepare("UPDATE telegram_relay_outbox SET caption_entities='[]'").run();
   }
   if(reason==='invalid-final')db().prepare("UPDATE telegram_relay_outbox SET caption_edit_outcome='account_invalid_final'").run();
@@ -972,7 +972,13 @@ test('blocked caption diagnostic reads only three exact invalid snapshots and le
   assert.deepEqual({...stored()},before);assert.deepEqual(db().prepare('SELECT * FROM telegram_relay_outbox ORDER BY id').all(),jobs);
   assert.deepEqual(db().prepare('SELECT * FROM telegram_personal_sources ORDER BY chat_id').all(),beforeSources);assert.equal(telegram.state.queue.length,0);
   assert.doesNotMatch(JSON.stringify(result),/Offer|9007199254740993123|555555555555555555|join365|fixture|secret|session|message_id|username|documentId|caption_entities/i);
-  for(const post of result.posts)assert.ok(Object.values(post).every(value=>['string','number','boolean'].includes(typeof value)));
+  for(const post of result.posts) {
+    assert.ok(Object.entries(post).filter(([key])=>key!=='entityCoverage').every(([,value])=>['string','number','boolean'].includes(typeof value)));
+    for(const coverage of post.entityCoverage) {
+      assert.deepEqual(Object.keys(coverage).sort(),['actualCount','actualCoveredUtf16','expectedCount','expectedCoveredUtf16','type']);
+      assert.ok(Object.entries(coverage).every(([key,value])=>key==='type'?typeof value==='string':Number.isSafeInteger(value)&&value>=0));
+    }
+  }
 });
 
 test('blocked caption diagnostic distinguishes exact, trim and line-ending differences without returning characters',async()=>{
@@ -1602,4 +1608,112 @@ for(const scenario of [
   assert.equal(telegram.state.calls.length===before,scenario.blocked);
   assert.deepEqual(db().prepare('SELECT * FROM telegram_relay_source_edits').get(),job);
   if(scenario.blocked)assert.deepEqual(stored(),accountBefore);
+});
+
+test('initial Emoji restoration repairs a missing bold style with one verified edit',async()=>{
+  const value=delivery();value.entities.push({type:'bold',offset:2,length:5});
+  const input=await readyAccountEdit(value);
+  assert.deepEqual(await account.editVerifiedRelayCaptionWithAccount(input),{state:'ok',attempted:true,outcome:'preserved'});
+  assert.equal(telegram.state.calls.filter(call=>call.method==='EditMessage').length,1);
+  assert.ok(telegram.state.messages[0].entities.some(entity=>entity instanceof Api.MessageEntityBold));
+});
+
+test('initial restoration refuses custom metadata belonging to another Emoji even when caption text is unchanged',async()=>{
+  const input=await readyAccountEdit();
+  telegram.state.messages[0].entities.push(new Api.MessageEntityCustomEmoji({offset:0,length:1,documentId:{toString:()=>'-777777777777777777'}}));
+  assert.deepEqual(await account.editVerifiedRelayCaptionWithAccount(input),{state:'ok',attempted:false,outcome:'invalid',reason:'stored_entities_mismatch'});
+  assert.equal(telegram.state.calls.filter(call=>call.method==='EditMessage').length,0);
+});
+
+test('a source revision still refuses the same missing bold style in its immutable baseline',async()=>{
+  const input=await readySourceCaptionEdit();
+  input.sourceEdit.expectedCaptionEntities.push({type:'bold',offset:2,length:5});
+  const baseline=JSON.stringify(input.sourceEdit.expectedCaptionEntities);
+  db().prepare('UPDATE telegram_relay_outbox SET caption_entities=?').run(baseline);
+  db().prepare('UPDATE telegram_relay_source_edits SET baseline_entities=?').run(baseline);
+  assert.deepEqual(await account.editVerifiedRelayCaptionWithAccount(input),{state:'ok',attempted:false,outcome:'invalid',reason:'stored_entities_mismatch'});
+  assert.equal(telegram.state.calls.filter(call=>call.method==='EditMessage').length,0);
+});
+
+test('initial Emoji restoration does not report success when readback still loses expected styles',async()=>{
+  const value=delivery();value.entities.push({type:'bold',offset:2,length:5});
+  const input=await readyAccountEdit(value);
+  telegram.state.onGetMessages=()=>{if(telegram.state.calls.some(call=>call.method==='EditMessage'))telegram.state.messages[0].entities=
+    telegram.state.messages[0].entities.filter(entity=>!(entity instanceof Api.MessageEntityBold));};
+  assert.deepEqual(await account.editVerifiedRelayCaptionWithAccount(input),{state:'ok',attempted:true,outcome:'changed'});
+  assert.equal(telegram.state.calls.filter(call=>call.method==='EditMessage').length,1);
+});
+
+test('initial Emoji restoration accepts Telegram merging adjacent equal-style spans in the verified readback',async()=>{
+  const value=delivery();value.entities.push({type:'bold',offset:2,length:2},{type:'bold',offset:4,length:3});
+  const input=await readyAccountEdit(value);
+  telegram.state.onGetMessages=()=>{if(telegram.state.calls.some(call=>call.method==='EditMessage'))telegram.state.messages[0].entities=[
+    ...telegram.state.messages[0].entities.filter(entity=>!(entity instanceof Api.MessageEntityBold)),new Api.MessageEntityBold({offset:2,length:5})];};
+  assert.deepEqual(await account.editVerifiedRelayCaptionWithAccount(input),{state:'ok',attempted:true,outcome:'preserved'});
+  assert.equal(telegram.state.calls.filter(call=>call.method==='EditMessage').length,1);
+});
+
+for(const scenario of [
+  {name:'initial busy retry within the next lease',outcome:'account_waiting_1',delay:30000,blocked:true},
+  {name:'initial busy retry exactly at the lease boundary',outcome:'account_waiting_3',delay:60000,blocked:true},
+  {name:'initial retry outside the lease boundary',outcome:'account_waiting_1',delay:60001,blocked:false},
+  {name:'readonly recheck busy retry before its due time',outcome:'account_recheck_waiting_1',rechecks:1,delay:30000,blocked:true},
+  {name:'future initial work that has not waited',outcome:'changed',delay:30000,blocked:false},
+  {name:'invalidated source content',outcome:'account_invalid',hash:'invalid:source',blocked:false},
+  {name:'obsolete repair with a source revision row',outcome:'account_invalid',sourceEdit:true,blocked:false},
+  {name:'metadata recovery not yet used',outcome:'account_invalid_final',rechecks:1,recoveries:0,blocked:true},
+  {name:'metadata recovery already used',outcome:'account_invalid_final',rechecks:1,recoveries:1,blocked:false},
+])test('initial repair account reservation respects '+scenario.name,async t=>{
+  await readyAccountEdit();const now=Date.now(),id=db().prepare('SELECT id FROM telegram_relay_outbox').get().id;
+  db().prepare(`UPDATE telegram_relay_outbox SET caption_edit_attempted_at=${now},caption_edit_outcome=?,next_attempt_at=?,caption_edit_recheck_count=?,
+    caption_metadata_recovery_count=?,source_content_hash=?,lease_id='',lease_until=0,last_error=?`).run(scenario.outcome,now+(scenario.delay||0),
+      scenario.rechecks||0,scenario.recoveries||0,scenario.hash||'',
+      'Telegram 未保留部分原始自定义 Emoji，请检查机器人的自定义 Emoji 使用权限。该消息不会自动重发。');
+  db().prepare("UPDATE telegram_relay_state SET send_lease_id='',send_lease_until=0").run();
+  if(scenario.sourceEdit)db().prepare(`INSERT INTO telegram_relay_source_edits(outbox_id,source_version,status,outcome,caption,caption_entities,
+    baseline_caption,baseline_entities,created_at) VALUES(?,1,'failed','account_invalid','new','[]','old','[]',?)`).run(id,now);
+  t.mock.method(Date,'now',()=>now);
+  const before=telegram.state.calls.length,job=db().prepare('SELECT * FROM telegram_relay_outbox').get();
+  await account.pollTelegramAccountOnce();
+  assert.equal(telegram.state.calls.length===before,scenario.blocked);
+  assert.deepEqual(db().prepare('SELECT * FROM telegram_relay_outbox').get(),job);
+});
+
+test('a source revision accepts an equivalent server-merged baseline style before applying one new caption version',async()=>{
+  const input=await readySourceCaptionEdit();
+  input.sourceEdit.expectedCaptionEntities.push({type:'bold',offset:2,length:2},{type:'bold',offset:4,length:3});
+  const baseline=JSON.stringify(input.sourceEdit.expectedCaptionEntities);
+  db().prepare('UPDATE telegram_relay_outbox SET caption_entities=?').run(baseline);
+  db().prepare('UPDATE telegram_relay_source_edits SET baseline_entities=?').run(baseline);
+  telegram.state.messages[0].entities.push(new Api.MessageEntityBold({offset:2,length:5}));
+  assert.deepEqual(await account.editVerifiedRelayCaptionWithAccount(input),{state:'ok',attempted:true,outcome:'preserved'});
+  assert.equal(telegram.state.calls.filter(call=>call.method==='EditMessage').length,1);
+});
+
+for(const change of ['added-hidden-link','removed-hidden-link'])
+test('a source revision refuses an actual baseline with '+change+' even when every URL points to the owner website',async()=>{
+  const input=await readySourceCaptionEdit();
+  if(change==='added-hidden-link')telegram.state.messages[0].entities.push(new Api.MessageEntityTextUrl({offset:2,length:5,url:'https://365freebonus.com/'}));
+  else {
+    input.sourceEdit.expectedCaptionEntities.push({type:'text_link',offset:2,length:5,url:'https://365freebonus.com/'});
+    const baseline=JSON.stringify(input.sourceEdit.expectedCaptionEntities);
+    db().prepare('UPDATE telegram_relay_outbox SET caption_entities=?').run(baseline);
+    db().prepare('UPDATE telegram_relay_source_edits SET baseline_entities=?').run(baseline);
+  }
+  assert.deepEqual(await account.editVerifiedRelayCaptionWithAccount(input),{state:'ok',attempted:false,outcome:'invalid',reason:'stored_entities_mismatch'});
+  assert.equal(telegram.state.calls.filter(call=>call.method==='EditMessage').length,0);
+});
+
+test('readonly caption metadata audit includes the current final preflight row without rearming it',async()=>{
+  const value=delivery();value.entities.push({type:'bold',offset:2,length:5});
+  await readyBlockedCaption(value);
+  db().prepare("UPDATE telegram_relay_outbox SET caption_edit_outcome='account_invalid_final',caption_edit_recheck_count=1").run();
+  const before=db().prepare('SELECT * FROM telegram_relay_outbox').get();
+  const result=await account.inspectBlockedRelayCaptionPreflights();
+  assert.equal(result.posts.length,1);const post=result.posts[0];
+  assert.equal(post.snapshotOutcome,'account_invalid_final');assert.equal(post.reason,'ready_to_edit');
+  assert.equal(post.actualCustomSubset,true);assert.equal(post.semanticFormattingMatches,false);
+  assert.deepEqual(post.entityCoverage.find(coverage=>coverage.type==='bold'),{type:'bold',expectedCount:1,actualCount:0,expectedCoveredUtf16:5,actualCoveredUtf16:0});
+  assert.deepEqual(db().prepare('SELECT * FROM telegram_relay_outbox').get(),before);
+  assert.equal(telegram.state.calls.filter(call=>call.method==='EditMessage').length,0);
 });

@@ -194,6 +194,39 @@ export function relayCaptionEntitiesMatch(caption: string, expected: unknown, ac
   return received.filter(entity => entity.type === "custom_emoji").every(entity => custom.has(key(entity)));
 }
 
+/** Equivalent visible formatting may use merged/split runs on Telegram readback. */
+export function relayCaptionFormattingMatches(caption: string, expected: unknown, actual: unknown): boolean {
+  if (!Array.isArray(expected) || !Array.isArray(actual) || expected.length > 1024 || actual.length > 1024) return false;
+  const wanted = normalizeRelayCaptionEntities(caption, expected), received = normalizeRelayCaptionEntities(caption, actual);
+  if (wanted.length !== expected.length || received.length !== actual.length) return false;
+  const coverage = (entities: RelayCaptionEntity[]) => {
+    const runs = new Map<string, [number, number][]>(), exact: string[] = [];
+    for (const entity of entities) {
+      // Visible owner URLs can be auto-detected by Telegram. Hidden link labels
+      // remain explicit below, and inspectRelayDelivery independently checks all
+      // clickable targets and literal URLs before an edit can be confirmed.
+      if (entity.type === "url") continue;
+      const kind = JSON.stringify([entity.type, entity.custom_emoji_id ?? null, entity.url ?? null,
+        entity.language || null, entity.unix_time ?? null, entity.date_time_format || null]);
+      if (styleTypes.has(entity.type)) {
+        const values = runs.get(kind) || [];
+        values.push([entity.offset, entity.offset + entity.length]); runs.set(kind, values);
+      } else exact.push(JSON.stringify([kind, entity.offset, entity.length]));
+    }
+    for (const [kind, values] of runs) {
+      const merged: [number, number][] = [];
+      for (const [start, end] of values.sort((a, b) => a[0] - b[0] || a[1] - b[1])) {
+        const prior = merged.at(-1);
+        if (prior && start <= prior[1]) prior[1] = Math.max(prior[1], end);
+        else merged.push([start, end]);
+      }
+      for (const [start, end] of merged) exact.push(JSON.stringify([kind, start, end - start]));
+    }
+    return JSON.stringify(exact.sort());
+  };
+  return coverage(wanted) === coverage(received);
+}
+
 export type RelayDeliveryInspection = {
   captionMatches: boolean;
   customEmojiPreserved: boolean;
@@ -244,7 +277,7 @@ export function inspectRelayDelivery(caption: string, expected: RelayCaptionEnti
   return {
     captionMatches: returnedCaption === caption,
     customEmojiPreserved: returnedCaption !== null && expectedCustomValid && actualCustomValid && JSON.stringify(expectedKeys) === JSON.stringify(actualKeys),
-    formattingPreserved: returnedCaption === caption && validList && relayCaptionEntitiesMatch(caption, expected, raw ?? []),
+    formattingPreserved: returnedCaption === caption && validList && relayCaptionFormattingMatches(caption, expected, raw ?? []),
     linksSafe,
     buttonsMatch,
   };

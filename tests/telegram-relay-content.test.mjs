@@ -16,7 +16,7 @@ for (const name of ['telegram-relay-content', 'telegram-bot']) {
   ).outputText);
 }
 const require = createRequire(import.meta.url);
-const { prepareRelayMessage, normalizeRelayCaptionEntities, relayCaptionEntitiesMatch, inspectRelayDelivery, isRelayCustomEmojiId, relayKeyboard, RELAY_WEBSITE, RELAY_DEFAULT_TARGET } = require(path.join(fixture, 'telegram-relay-content.js'));
+const { prepareRelayMessage, normalizeRelayCaptionEntities, relayCaptionEntitiesMatch, relayCaptionFormattingMatches, inspectRelayDelivery, isRelayCustomEmojiId, relayKeyboard, RELAY_WEBSITE, RELAY_DEFAULT_TARGET } = require(path.join(fixture, 'telegram-relay-content.js'));
 const transport = require(path.join(fixture, 'telegram-bot.js'));
 const https = require('node:https');
 const now = 1_800_000_000_123;
@@ -632,4 +632,31 @@ test('source caption comparison verifies rewritten link targets, pre language an
     [...entities.slice(0,2),{...entities[2],url:'https://source.example'}],
     [...entities.slice(0,2),{...entities[2],length:caption.length}],
   ]) assert.equal(relayCaptionEntitiesMatch(caption,entities,altered),false);
+});
+
+test('readback formatting accepts equivalent split or merged style runs and safe raw URL autodetection',()=>{
+  const caption=`⭐ Bonus now ${RELAY_WEBSITE}`;
+  const custom={type:'custom_emoji',offset:0,length:1,custom_emoji_id:'5368324170671202286'};
+  const expected=[custom,{type:'bold',offset:2,length:9},{type:'url',offset:12,length:RELAY_WEBSITE.length}];
+  const split=[{type:'bold',offset:2,length:5},custom,{type:'bold',offset:7,length:4}];
+  assert.equal(relayCaptionEntitiesMatch(caption,expected,split),false);
+  assert.equal(relayCaptionFormattingMatches(caption,expected,split),true);
+  const overlapping=[custom,{type:'bold',offset:2,length:9},{type:'bold',offset:7,length:4}];
+  assert.equal(relayCaptionFormattingMatches(caption,expected,overlapping),true);
+  const result=inspectRelayDelivery(caption,expected,delivery(caption,split));
+  assert.equal(result.formattingPreserved,true);assert.equal(result.customEmojiPreserved,true);assert.equal(result.linksSafe,true);
+});
+
+test('readback formatting still rejects real style loss, gaps, foreign or missing custom emoji and hidden links',()=>{
+  const caption='⭐ Bonus now';
+  const custom={type:'custom_emoji',offset:0,length:1,custom_emoji_id:'5368324170671202286'};
+  const expected=[custom,{type:'bold',offset:2,length:9}];
+  for(const actual of [[custom], [{type:'bold',offset:2,length:9}],
+    [custom,{type:'italic',offset:2,length:9}],
+    [custom,{type:'bold',offset:2,length:4},{type:'bold',offset:7,length:4}],
+    [{...custom,custom_emoji_id:'5368324170671202287'},expected[1]],
+    [custom,{...expected[1],length:10}]]) assert.equal(relayCaptionFormattingMatches(caption,expected,actual),false);
+  const linked=[...expected,{type:'text_link',offset:2,length:5,url:RELAY_WEBSITE}];
+  assert.equal(relayCaptionFormattingMatches(caption,linked,expected),false);
+  assert.equal(relayCaptionFormattingMatches(caption,linked,[...expected,{type:'text_link',offset:2,length:5,url:'https://other.example'}]),false);
 });

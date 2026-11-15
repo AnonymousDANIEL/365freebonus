@@ -517,7 +517,7 @@ test('v17 migration preserves notes, credentials and existing queues while activ
     ALTER TABLE telegram_promotion_settings DROP COLUMN relay_revision;
     PRAGMA user_version=17;`);
   closeDatabase();const migrated=getSqlite();
-  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,27);
+  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,28);
   const current=migrated.prepare("SELECT * FROM telegram_promotion_settings WHERE id='primary'").get();
   assert.equal(current.relay_enabled,1);assert.equal(current.relay_started_at,now);assert.ok(current.relay_revision);
   assert.equal(current.relay_chat_id,'@join365freebonusgroup');
@@ -983,8 +983,9 @@ test('a read-only recheck finding the original artwork already preserved needs n
   assert.equal(personalEdit.recheckCalls.length,1);assert.equal(personalEdit.calls.length,0);assert.equal(sends().length,1);
 });
 
-for(const outcome of ['invalid','rejected','unavailable'])test(`a legacy read-only recheck ending ${outcome} is final and cannot rearm another recheck or edit`,async()=>{
+for(const outcome of ['invalid','rejected','unavailable'])test(`after metadata recovery is spent a legacy read-only recheck ending ${outcome} cannot rearm another recheck or edit`,async()=>{
   await legacyBlockedCaption();personalEdit.recheckResults.push({state:outcome==='unavailable'?'unavailable':'ok',attempted:false,outcome,reason:'caption_mismatch'});
+  getSqlite().prepare('UPDATE telegram_relay_outbox SET caption_metadata_recovery_count=1').run();
   await deliver(now+8000);
   assert.equal(jobs()[0].caption_edit_outcome,outcome==='unavailable'?'account_unavailable_final':'account_invalid_final');
   closeDatabase();await deliver(now+12000);await deliver(now+16000);
@@ -1068,10 +1069,11 @@ test('legacy recovery diagnostics are fixed aggregates and never expose unexpect
   const encoded=JSON.stringify(entry);for(const secret of [token,ciphertext,original.caption,String(source),'88770'])assert.equal(encoded.includes(secret),false);
 });
 
-test('a future first preflight invalid may revalidate once, and a second invalid stays final across restart',async()=>{
+test('after metadata recovery is spent a first preflight invalid may revalidate once and a second invalid stays final across restart',async()=>{
   await botEditRejected();personalEdit.results.push(
     {state:'ok',attempted:false,outcome:'invalid',reason:'caption_mismatch'},
     {state:'ok',attempted:false,outcome:'invalid',reason:'caption_mismatch'});
+  getSqlite().prepare('UPDATE telegram_relay_outbox SET caption_metadata_recovery_count=1').run();
   personalEdit.recheckResults.push({state:'ok',attempted:false,outcome:'ready',reason:'ready_to_edit'});
   await deliver(now+8000);assert.equal(jobs()[0].caption_edit_outcome,'account_invalid');assert.equal(jobs()[0].caption_edit_recheck_count,0);
   closeDatabase();await deliver(now+12000);
@@ -1881,7 +1883,7 @@ test('v18 upgrade preserves settings and PIN while seeding permanent image ident
   }
   db.exec('PRAGMA user_version=18');closeDatabase();
   const migrated=getSqlite();
-  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,27);
+  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,28);
   assert.deepEqual({...migrated.prepare("SELECT * FROM telegram_promotion_settings WHERE id='primary'").get()},settingsBefore);
   assert.deepEqual({...migrated.prepare("SELECT * FROM notes_vault_settings WHERE id='primary'").get()},vaultBefore);
   assert.deepEqual({...migrated.prepare("SELECT * FROM telegram_relay_state WHERE id='primary'").get()},stateBefore);
@@ -1904,7 +1906,7 @@ test('v19 upgrade preserves queued media bytes, permanent identities, settings a
   const settingsBefore={...db.prepare("SELECT * FROM telegram_promotion_settings WHERE id='primary'").get()};
   const stateBefore={...db.prepare("SELECT * FROM telegram_relay_state WHERE id='primary'").get()};
   const vaultBefore={...db.prepare("SELECT * FROM notes_vault_settings WHERE id='primary'").get()};
-  const columns=db.prepare('PRAGMA table_info(telegram_relay_outbox)').all().map(row=>row.name).filter(name=>!['mime_type','caption_entities','caption_edit_attempted_at','caption_edit_outcome','caption_edit_recheck_count','source_version','source_content_hash'].includes(name));
+  const columns=db.prepare('PRAGMA table_info(telegram_relay_outbox)').all().map(row=>row.name).filter(name=>!['mime_type','caption_entities','caption_edit_attempted_at','caption_edit_outcome','caption_edit_recheck_count','source_version','source_content_hash','caption_metadata_recovery_count'].includes(name));
   restoreLegacyMediaKeys(db);
   db.exec(`BEGIN IMMEDIATE;
     CREATE TABLE telegram_relay_outbox_v19 (
@@ -1928,7 +1930,7 @@ test('v19 upgrade preserves queued media bytes, permanent identities, settings a
   assert.throws(()=>db.prepare(`INSERT INTO telegram_relay_outbox(source_chat_id,source_message_id,fingerprint,
     queued_at,revision,media_kind,file_id,file_unique_id,caption) VALUES(? ,9999,'before-video',?,'relay-revision','video','v','vu','Video')`).run(source,now),/CHECK/);
   closeDatabase();const migrated=getSqlite();
-  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,27);
+  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,28);
   assert.deepEqual(jobs().map(({caption_entities,...row})=>({...row})),rowsBefore);
   assert.ok(jobs().every(row=>row.caption_entities===''));
   assert.deepEqual(migrated.prepare('SELECT * FROM telegram_relay_media_keys ORDER BY media_key').all().map(row=>({...row})),keysBefore);
@@ -1960,7 +1962,7 @@ test('v20 upgrade marks unavailable legacy caption entities without changing job
   restoreLegacyMediaKeys(db);
   db.exec('DROP INDEX telegram_relay_caption_edits; ALTER TABLE telegram_relay_outbox DROP COLUMN caption_edit_attempted_at; ALTER TABLE telegram_relay_outbox DROP COLUMN caption_edit_outcome; ALTER TABLE telegram_relay_outbox DROP COLUMN caption_entities; PRAGMA user_version=20');
   closeDatabase();const migrated=getSqlite();
-  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,27);
+  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,28);
   assert.deepEqual(jobs().map(({caption_entities,...row})=>({...row})),beforeJobs);
   assert.ok(jobs().every(row=>row.caption_entities===''),'old queues mark unavailable original custom emoji metadata instead of fabricating an empty entity list');
   assert.deepEqual(migrated.prepare('SELECT * FROM telegram_relay_media_keys ORDER BY media_key').all().map(row=>({...row})),beforeKeys);
@@ -1989,7 +1991,7 @@ test('v21 upgrade preserves sent messages, pending media, identities, settings a
   restoreLegacyMediaKeys(db);
   db.exec('DROP INDEX telegram_relay_caption_edits; ALTER TABLE telegram_relay_outbox DROP COLUMN caption_edit_attempted_at; ALTER TABLE telegram_relay_outbox DROP COLUMN caption_edit_outcome; PRAGMA user_version=21');
   closeDatabase();const migrated=getSqlite();
-  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,27);
+  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,28);
   assert.deepEqual(jobs().map(({caption_edit_attempted_at,caption_edit_outcome,...row})=>({...row})),beforeJobs);
   assert.ok(jobs().every(row=>row.caption_edit_attempted_at===0&&row.caption_edit_outcome===''));
   assert.deepEqual(migrated.prepare('SELECT * FROM telegram_relay_media_keys ORDER BY media_key').all().map(row=>({...row})),beforeKeys);
@@ -2016,7 +2018,7 @@ test('v22 upgrade removes only album uniqueness and preserves messages, media ke
   restoreLegacyMediaKeys(db);
   db.exec("DROP INDEX telegram_relay_album; CREATE UNIQUE INDEX telegram_relay_album ON telegram_relay_outbox(source_chat_id,media_group_id) WHERE media_group_id<>''; PRAGMA user_version=22");
   closeDatabase();const migrated=getSqlite();
-  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,27);
+  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,28);
   assert.deepEqual(jobs().map(row=>({...row})),beforeJobs);
   assert.deepEqual(migrated.prepare('SELECT * FROM telegram_relay_media_keys ORDER BY media_key').all().map(row=>({...row})),beforeKeys);
   assert.deepEqual({...migrated.prepare("SELECT * FROM telegram_promotion_settings WHERE id='primary'").get()},beforeSettings);
@@ -2053,7 +2055,7 @@ test('v23 upgrade dates every legacy key without changing outbox data, cursors, 
   const legacy=[['legacy-sent-key',101],['legacy-pending-key',102],['legacy-unknown-key',103],['legacy-sending-key',104],['orphan-legacy-key',99999]];
   for(const [key,id] of legacy)db.prepare('INSERT INTO telegram_relay_media_keys(media_key,outbox_id) VALUES(?,?)').run(key,id);
   db.exec('PRAGMA user_version=23');closeDatabase();const migrated=getSqlite();
-  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,27);
+  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,28);
   assert.deepEqual(jobs().map(row=>({...row})),beforeJobs);
   assert.deepEqual({...migrated.prepare("SELECT * FROM telegram_promotion_settings WHERE id='primary'").get()},beforeSettings);
   assert.deepEqual({...migrated.prepare("SELECT * FROM telegram_relay_state WHERE id='primary'").get()},beforeState);
@@ -2087,7 +2089,7 @@ test('v24 upgrade adds a zero recovery counter without changing existing media, 
   const db=getSqlite(),before=jobs().map(({caption_edit_recheck_count,...row})=>({...row}));
   const keys=db.prepare('SELECT * FROM telegram_relay_media_keys ORDER BY day_key,media_key').all().map(row=>({...row}));
   const runtime={...state()};db.exec('ALTER TABLE telegram_relay_outbox DROP COLUMN caption_edit_recheck_count; PRAGMA user_version=24');
-  closeDatabase();const migrated=getSqlite();assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,27);
+  closeDatabase();const migrated=getSqlite();assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,28);
   assert.deepEqual(jobs().map(({caption_edit_recheck_count,...row})=>({...row})),before);
   assert.ok(jobs().every(job=>job.caption_edit_recheck_count===0));assert.deepEqual({...state()},runtime);
   assert.deepEqual(migrated.prepare('SELECT * FROM telegram_relay_media_keys ORDER BY day_key,media_key').all().map(row=>({...row})),keys);
@@ -2256,7 +2258,7 @@ test('schema27 additively preserves v26 source identities, metadata repair termi
   const db=getSqlite(),before=jobs().map(({source_version,source_content_hash,...job})=>({...job}));
   const keys=db.prepare('SELECT * FROM telegram_relay_media_keys').all().map(row=>({...row}));
   db.exec('DROP TABLE telegram_relay_source_edits; DROP TABLE telegram_personal_source_posts; ALTER TABLE telegram_relay_outbox DROP COLUMN source_version; ALTER TABLE telegram_relay_outbox DROP COLUMN source_content_hash; PRAGMA user_version=26');
-  closeDatabase();const migrated=getSqlite();assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,27);
+  closeDatabase();const migrated=getSqlite();assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,28);
   assert.deepEqual(jobs().map(({source_version,source_content_hash,...job})=>({...job})),before);
   assert.deepEqual(migrated.prepare('SELECT * FROM telegram_relay_media_keys').all().map(row=>({...row})),keys);
   assert.equal(jobs()[0].source_version,0);assert.equal(jobs()[0].source_content_hash,'');
@@ -2296,4 +2298,94 @@ test('plain formatting stripped by Telegram produces a visible warning instead o
   configure();await poll(now,[photo(1,{caption:'Bold text',caption_entities:[{type:'bold',offset:0,length:4}]})]);
   telegram.sends.push({ok:true,result:{message_id:987,caption_entities:[]}});await deliver();
   assert.equal(jobs()[0].status,'sent');assert.match(jobs()[0].last_error,/文案与提交原文不一致/);assert.equal(sends().length,1);
+});
+
+async function metadataBlockedCaption(options={}){
+  await botEditRejected(options);
+  getSqlite().prepare(`UPDATE telegram_relay_outbox SET caption_edit_outcome='account_invalid_final',caption_edit_recheck_count=1,
+    caption_metadata_recovery_count=0,last_error=?`).run('原消息身份、设置或来源已改变，已停止自动补正文案；不会重复发送媒体。');
+}
+
+test('metadata regression recovery persists its separate budget before read-only validation then permits one actual edit',async()=>{
+  await metadataBlockedCaption();const before={...jobs()[0]},keys=getSqlite().prepare('SELECT * FROM telegram_relay_media_keys').all();
+  personalEdit.recheckResults.push(()=>{
+    assert.equal(jobs()[0].caption_metadata_recovery_count,1);assert.equal(jobs()[0].caption_edit_recheck_count,1);
+    assert.equal(jobs()[0].caption_edit_outcome,'account_rechecking');assert.equal(personalEdit.calls.length,0);
+    return {state:'ok',attempted:false,outcome:'ready',reason:'ready_to_edit'};
+  });
+  await deliver(now+8000);assert.equal(jobs()[0].caption_edit_outcome,'account_revalidated');closeDatabase();
+  personalEdit.results.push({state:'ok',attempted:true,outcome:'preserved'});await deliver(now+12000);
+  assert.equal(jobs()[0].caption_edit_outcome,'account_preserved');assert.equal(jobs()[0].caption_edit_recheck_count,1);
+  assert.equal(jobs()[0].caption_metadata_recovery_count,1);assert.equal(personalEdit.recheckCalls.length,1);assert.equal(personalEdit.calls.length,1);
+  assert.equal(jobs()[0].message_id,before.message_id);assert.equal(jobs()[0].caption,before.caption);assert.equal(jobs()[0].caption_entities,before.caption_entities);
+  assert.deepEqual(getSqlite().prepare('SELECT * FROM telegram_relay_media_keys').all(),keys);
+  await deliver(now+16000);assert.equal(personalEdit.calls.length,1);assert.equal(sends().length,1);assert.equal(edits().length,1);
+});
+
+test('metadata recovery that still fails real preflight stays final across restart without another check or actual edit',async()=>{
+  await metadataBlockedCaption();personalEdit.recheckResults.push({state:'ok',attempted:false,outcome:'invalid',reason:'caption_mismatch'});
+  await deliver(now+8000);assert.equal(jobs()[0].caption_edit_outcome,'account_invalid_final');assert.equal(jobs()[0].caption_metadata_recovery_count,1);
+  closeDatabase();await deliver(now+12000);await deliver(now+16000);
+  assert.equal(personalEdit.recheckCalls.length,1);assert.equal(personalEdit.calls.length,0);assert.equal(sends().length,1);assert.equal(edits().length,1);
+});
+
+test('interrupted metadata read-only validation consumes only its added budget and never reaches an editor',async()=>{
+  await metadataBlockedCaption();let clock=now+8000;
+  personalEdit.recheckResults.push(()=>{clock+=61000;return {state:'ok',attempted:false,outcome:'ready',reason:'ready_to_edit'};});
+  await relay.deliverTelegramRelayOnce(decrypt,()=>clock);closeDatabase();await relay.deliverTelegramRelayOnce(decrypt,()=>clock);
+  assert.equal(jobs()[0].caption_metadata_recovery_count,1);assert.equal(jobs()[0].caption_edit_recheck_count,1);
+  assert.equal(jobs()[0].caption_edit_outcome,'account_invalid_final');assert.equal(personalEdit.calls.length,0);assert.equal(personalEdit.recheckCalls.length,1);
+});
+
+for(const terminal of ['account_preserved','account_rejected','account_changed','account_uncertain','account_unavailable_final'])test(`metadata recovery cannot reopen actual terminal ${terminal}`,async()=>{
+  await metadataBlockedCaption();getSqlite().prepare('UPDATE telegram_relay_outbox SET caption_edit_outcome=?').run(terminal);
+  await deliver(now+8000);assert.equal(jobs()[0].caption_edit_outcome,terminal);assert.equal(jobs()[0].caption_metadata_recovery_count,0);
+  assert.equal(personalEdit.calls.length,0);assert.equal(personalEdit.recheckCalls.length,0);assert.equal(sends().length,1);assert.equal(edits().length,1);
+});
+
+for(const blocked of ['unknown','no-message','no-custom','invalid-source','other-revision','unused-old-recheck','spent-metadata','source-version','expired-window'])test(`metadata recovery excludes ${blocked} without resetting any existing attempt counter`,async()=>{
+  await metadataBlockedCaption();const db=getSqlite();
+  if(blocked==='unknown')db.prepare("UPDATE telegram_relay_outbox SET status='unknown'").run();
+  if(blocked==='no-message')db.prepare('UPDATE telegram_relay_outbox SET message_id=NULL').run();
+  if(blocked==='no-custom')db.prepare("UPDATE telegram_relay_outbox SET caption_entities='[]'").run();
+  if(blocked==='invalid-source')db.prepare("UPDATE telegram_relay_outbox SET source_content_hash='invalid:source'").run();
+  if(blocked==='other-revision')db.prepare("UPDATE telegram_relay_outbox SET revision='previous-revision'").run();
+  if(blocked==='unused-old-recheck')db.prepare('UPDATE telegram_relay_outbox SET caption_edit_recheck_count=0').run();
+  if(blocked==='spent-metadata')db.prepare('UPDATE telegram_relay_outbox SET caption_metadata_recovery_count=1').run();
+  if(blocked==='source-version')db.prepare(`INSERT INTO telegram_relay_source_edits(outbox_id,source_version,status,caption,caption_entities,baseline_caption,baseline_entities,created_at)
+    VALUES(?,1,'failed','Changed source','[]','Saved original','[]',?)`).run(jobs()[0].id,now);
+  if(blocked==='expired-window')db.prepare('UPDATE telegram_relay_outbox SET sent_at=?').run(now-24*60*60*1000);
+  const before={...jobs()[0]};await deliver(now+8000);
+  assert.equal(jobs()[0].caption_metadata_recovery_count,before.caption_metadata_recovery_count);
+  assert.equal(jobs()[0].caption_edit_recheck_count,before.caption_edit_recheck_count);
+  assert.equal(personalEdit.calls.length,0);assert.equal(personalEdit.recheckCalls.length,0);assert.equal(sends().length,1);
+});
+
+test('source deselection before metadata recovery prevents both read-only account access and actual editing',async t=>{
+  await metadataBlockedCaption({personal:true,t});getSqlite().prepare('UPDATE telegram_personal_sources SET selected=0 WHERE chat_id=?').run(source);
+  await deliver(now+8000);assert.equal(personalEdit.recheckCalls.length,0);assert.equal(personalEdit.calls.length,0);
+  assert.equal(jobs()[0].caption_edit_outcome,'account_invalid_final');assert.equal(jobs()[0].caption_metadata_recovery_count,1);
+  await deliver(now+12000);assert.equal(sends().length,1);
+});
+
+test('schema28 adds only a zero metadata recovery budget while preserving source watchers, terminals, bytes, PIN, cursors and daily keys',async t=>{
+  await configureAccount(t);await relay.enqueuePersonalRelayMedia(accountPhoto());await deliver();
+  await relay.enqueuePersonalRelayMedia(accountPhoto({sourceMessageId:2002,sourceMediaId:'another-photo',bytes:Buffer.from('another-photo')}));
+  const db=getSqlite();db.prepare("UPDATE telegram_relay_outbox SET caption_edit_outcome='account_uncertain',caption_edit_recheck_count=1,caption_edit_attempted_at=? WHERE status='sent'").run(now);
+  db.prepare("INSERT INTO notes_vault_settings(id,pin_hash,revision,created_at,updated_at) VALUES('primary','retained-pin','vault-revision',1,2)").run();
+  db.prepare(`INSERT INTO telegram_personal_source_posts(source_chat_id,source_message_id,account_generation,relay_revision,selected_at,source_date,media_id_hash,revision_hash,checked_at)
+    VALUES(?,2001,'account-generation','relay-revision',?,?, 'opaque-media-hash','source-revision',?)`).run(source,now-5000,now/1000,now);
+  const snapshots={outbox:jobs().map(({caption_metadata_recovery_count,...row})=>({...row})),state:{...state()},
+    keys:db.prepare('SELECT * FROM telegram_relay_media_keys ORDER BY day_key,media_key').all().map(row=>({...row})),
+    watchers:db.prepare('SELECT * FROM telegram_personal_source_posts').all().map(row=>({...row})),
+    vault:{...db.prepare("SELECT * FROM notes_vault_settings WHERE id='primary'").get()},
+    settings:{...db.prepare("SELECT * FROM telegram_promotion_settings WHERE id='primary'").get()}};
+  db.exec('ALTER TABLE telegram_relay_outbox DROP COLUMN caption_metadata_recovery_count; PRAGMA user_version=27');closeDatabase();
+  const migrated=getSqlite();assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,28);
+  assert.deepEqual(jobs().map(({caption_metadata_recovery_count,...row})=>({...row})),snapshots.outbox);
+  assert.ok(jobs().every(job=>job.caption_metadata_recovery_count===0));assert.deepEqual({...state()},snapshots.state);
+  assert.deepEqual(migrated.prepare('SELECT * FROM telegram_relay_media_keys ORDER BY day_key,media_key').all().map(row=>({...row})),snapshots.keys);
+  assert.deepEqual(migrated.prepare('SELECT * FROM telegram_personal_source_posts').all().map(row=>({...row})),snapshots.watchers);
+  assert.deepEqual({...migrated.prepare("SELECT * FROM notes_vault_settings WHERE id='primary'").get()},snapshots.vault);
+  assert.deepEqual({...migrated.prepare("SELECT * FROM telegram_promotion_settings WHERE id='primary'").get()},snapshots.settings);
 });

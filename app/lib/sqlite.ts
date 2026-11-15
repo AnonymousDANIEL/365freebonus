@@ -12,7 +12,7 @@ export function getDataDirectory(): string {
 function migrate(db: DatabaseSync) {
   if (migrated.has(db)) return;
   const readVersion = () => (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
-  if (readVersion() < 27) {
+  if (readVersion() < 28) {
     db.exec("BEGIN IMMEDIATE");
     try {
       // Read again inside the write lock, so concurrent process starts cannot
@@ -499,6 +499,13 @@ function migrate(db: DatabaseSync) {
           CREATE INDEX IF NOT EXISTS telegram_relay_source_edits_due ON telegram_relay_source_edits(status,next_attempt_at,id);
           PRAGMA user_version=27;
         `);
+      }
+      if (version < 28) {
+        const columns = db.prepare("PRAGMA table_info(telegram_relay_outbox)").all() as { name: string }[];
+        if (!columns.some(column => column.name === "caption_metadata_recovery_count")) {
+          db.exec("ALTER TABLE telegram_relay_outbox ADD COLUMN caption_metadata_recovery_count INTEGER NOT NULL DEFAULT 0");
+        }
+        db.exec("PRAGMA user_version=28");
       }
       db.exec("COMMIT");
     } catch (error) { db.exec("ROLLBACK"); throw error; }
