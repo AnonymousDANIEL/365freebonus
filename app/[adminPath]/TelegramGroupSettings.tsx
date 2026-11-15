@@ -5,6 +5,7 @@ import { Check, LoaderCircle, Pencil, Plus, Trash2 } from "lucide-react";
 import "./telegram-keywords-admin.css";
 import TelegramPersonalAccount from "./TelegramPersonalAccount";
 import TelegramJoinGate from "./TelegramJoinGate";
+import TelegramHotVideos from "./TelegramHotVideos";
 
 type RelayStatus = { enabled: boolean; chatId: string; ready: boolean; counts: { pending: number; sending: number; sent: number; failed: number; unknown: number; cancelled: number; skipped: number }; lastError: string; lastPolledAt: number | null };
 type WelcomeDraft = { enabled: boolean; chatId: string; message: string };
@@ -601,5 +602,5 @@ export default function TelegramGroupSettings({ request, signInPath }: AdminProp
         </div>
       </>}
     </fieldset>
-  </form><TelegramJoinGate request={request} signInPath={signInPath} /><TelegramKeywordRules request={request} signInPath={signInPath} /></>;
+  </form><TelegramJoinGate request={request} signInPath={signInPath} /><TelegramHotVideos request={request} signInPath={signInPath} /><TelegramKeywordRules request={request} signInPath={signInPath} /></>;
 }

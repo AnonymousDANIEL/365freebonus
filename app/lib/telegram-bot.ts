@@ -1,5 +1,9 @@
 import { randomBytes } from "node:crypto";
 import { request } from "node:https";
+import { constants } from "node:fs";
+import { open } from "node:fs/promises";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 
 type TelegramMethod = "getMe" | "getChat" | "getChatMember" | "getWebhookInfo" | "getFile" | "sendMessage" | "sendPhoto" | "sendAnimation" | "sendVideo" | "sendDocument" | "editMessageCaption" | "createChatInviteLink";
 type TelegramBooleanMethod = "approveChatJoinRequest" | "declineChatJoinRequest" | "banChatMember" | "unbanChatMember";
@@ -90,6 +94,61 @@ function requestTelegram<Result>(token: string, method: TelegramMethod | Telegra
 
 export function telegramRequest(token: string, method: TelegramMethod, parameters: Record<string, unknown> = {}, upload?: TelegramUpload) {
   return requestTelegram(token, method, parameters, asRecord, upload);
+}
+
+/** Stream one private MP4 without copying the complete video into RAM. */
+export async function telegramVideoFileRequest(token: string, parameters: Record<string, unknown>,
+  upload: { path: string; fileName: string; bytes: number }): Promise<TelegramReply<Record<string, unknown>>> {
+  if (!Number.isSafeInteger(upload.bytes) || upload.bytes < 24 || upload.bytes > 50 * 1024 * 1024
+    || Object.keys(parameters).some(key => !["chat_id", "reply_markup", "supports_streaming", "disable_notification"].includes(key))) return null;
+  let handle: Awaited<ReturnType<typeof open>>;
+  try { handle = await open(upload.path, constants.O_RDONLY | constants.O_NOFOLLOW); } catch { return null; }
+  try {
+    const metadata = await handle.stat();
+    if (!metadata.isFile() || metadata.size !== upload.bytes) return null;
+    const boundary = `365freebonus-${randomBytes(18).toString("hex")}`;
+    const parts: Buffer[] = [];
+    for (const [name, value] of Object.entries(parameters)) if (value !== undefined) {
+      const content = typeof value === "string" ? value : JSON.stringify(value);
+      parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${content}\r\n`));
+    }
+    const fileName = upload.fileName.replace(/[^A-Za-z0-9_.-]/g, "_") || "video.mp4";
+    parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="video"; filename="${fileName}"\r\nContent-Type: video/mp4\r\n\r\n`));
+    const prefix = Buffer.concat(parts), suffix = Buffer.from(`\r\n--${boundary}--\r\n`);
+    if (prefix.length > 65_536) return null;
+    return await new Promise<TelegramReply<Record<string, unknown>>>(resolve => {
+      const source = handle.createReadStream({ autoClose: false, highWaterMark: 64 * 1024 });
+      let total = 0;
+      const body = Readable.from((async function* () {
+        yield prefix;
+        for await (const chunk of source) {
+          total += chunk.length;
+          if (total > upload.bytes) throw new Error("Video size changed.");
+          yield chunk;
+        }
+        if (total !== upload.bytes) throw new Error("Video size changed.");
+        yield suffix;
+      })());
+      let settled = false;
+      const finish = (value: TelegramReply<Record<string, unknown>>) => {
+        if (settled) return;
+        settled = true; body.destroy(); source.destroy(); resolve(value);
+      };
+      const outgoing = request({ hostname: "api.telegram.org", method: "POST", path: `/bot${token}/sendVideo`,
+        headers: { "Content-Type": `multipart/form-data; boundary=${boundary}`, "Content-Length": prefix.length + upload.bytes + suffix.length },
+        signal: AbortSignal.timeout(40_000),
+      }, response => {
+        let content = "";
+        response.setEncoding("utf8");
+        response.on("data", chunk => { content += chunk; if (content.length > 65_536) response.destroy(); });
+        response.on("end", () => { try { finish(parseReply(content, asRecord)); } catch { finish(null); } });
+        response.on("error", () => finish(null)); response.on("close", () => finish(null));
+      });
+      outgoing.on("error", () => finish(null));
+      void pipeline(body, outgoing).catch(() => finish(null));
+    });
+  } catch { return null; }
+  finally { await handle.close().catch(() => undefined); }
 }
 
 /** Moderation methods return true, rather than a Message or Chat object. */

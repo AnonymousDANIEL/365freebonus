@@ -12,7 +12,7 @@ export function getDataDirectory(): string {
 function migrate(db: DatabaseSync) {
   if (migrated.has(db)) return;
   const readVersion = () => (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
-  if (readVersion() < 28) {
+  if (readVersion() < 29) {
     db.exec("BEGIN IMMEDIATE");
     try {
       // Read again inside the write lock, so concurrent process starts cannot
@@ -507,6 +507,35 @@ function migrate(db: DatabaseSync) {
         }
         db.exec("PRAGMA user_version=28");
       }
+      if (version < 29) db.exec(`
+        CREATE TABLE IF NOT EXISTS telegram_hot_video_settings (
+          id TEXT PRIMARY KEY,enabled INTEGER NOT NULL DEFAULT 0,target_chat_id INTEGER NOT NULL DEFAULT 0,
+          target_title TEXT NOT NULL DEFAULT '',interval_hours INTEGER NOT NULL DEFAULT 6,next_run_at INTEGER NOT NULL DEFAULT 0,
+          revision TEXT NOT NULL DEFAULT '',token_hash TEXT NOT NULL DEFAULT '',bot_id INTEGER NOT NULL DEFAULT 0,
+          verified_at INTEGER NOT NULL DEFAULT 0,last_checked_at INTEGER NOT NULL DEFAULT 0,last_error TEXT NOT NULL DEFAULT '',
+          last_auto_order INTEGER NOT NULL DEFAULT 0,lease_id TEXT NOT NULL DEFAULT '',lease_until INTEGER NOT NULL DEFAULT 0,
+          next_send_at INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS telegram_hot_videos (
+          id TEXT PRIMARY KEY,title TEXT NOT NULL,original_name TEXT NOT NULL,file_name TEXT NOT NULL,
+          bytes INTEGER NOT NULL,sha256 TEXT NOT NULL,active INTEGER NOT NULL DEFAULT 1,sort_order INTEGER NOT NULL,
+          created_at INTEGER NOT NULL,last_sent_at INTEGER NOT NULL DEFAULT 0,deleted_at INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS telegram_hot_video_uploads (
+          id TEXT PRIMARY KEY,bytes INTEGER NOT NULL,created_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS telegram_hot_video_jobs (
+          id TEXT PRIMARY KEY,request_id TEXT NOT NULL UNIQUE,video_id TEXT NOT NULL REFERENCES telegram_hot_videos(id),
+          kind TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'pending',run_at INTEGER NOT NULL,created_at INTEGER NOT NULL,
+          settings_revision TEXT NOT NULL,target_chat_id INTEGER NOT NULL,token_hash TEXT NOT NULL,bot_id INTEGER NOT NULL,
+          attempts INTEGER NOT NULL DEFAULT 0,next_attempt_at INTEGER NOT NULL DEFAULT 0,lease_id TEXT NOT NULL DEFAULT '',
+          lease_until INTEGER NOT NULL DEFAULT 0,dispatch_started_at INTEGER NOT NULL DEFAULT 0,last_error TEXT NOT NULL DEFAULT '',
+          sent_at INTEGER NOT NULL DEFAULT 0,message_id INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS telegram_hot_video_jobs_due ON telegram_hot_video_jobs(status,next_attempt_at,run_at);
+        CREATE INDEX IF NOT EXISTS telegram_hot_videos_rotation ON telegram_hot_videos(deleted_at,active,sort_order);
+        PRAGMA user_version=29;
+      `);
       db.exec("COMMIT");
     } catch (error) { db.exec("ROLLBACK"); throw error; }
   }
