@@ -12,7 +12,7 @@ export function getDataDirectory(): string {
 function migrate(db: DatabaseSync) {
   if (migrated.has(db)) return;
   const readVersion = () => (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
-  if (readVersion() < 29) {
+  if (readVersion() < 30) {
     db.exec("BEGIN IMMEDIATE");
     try {
       // Read again inside the write lock, so concurrent process starts cannot
@@ -535,6 +535,19 @@ function migrate(db: DatabaseSync) {
         CREATE INDEX IF NOT EXISTS telegram_hot_video_jobs_due ON telegram_hot_video_jobs(status,next_attempt_at,run_at);
         CREATE INDEX IF NOT EXISTS telegram_hot_videos_rotation ON telegram_hot_videos(deleted_at,active,sort_order);
         PRAGMA user_version=29;
+      `);
+      if (version < 30) db.exec(`
+        CREATE TABLE IF NOT EXISTS telegram_hot_video_upload_sessions (
+          id TEXT PRIMARY KEY,request_id TEXT NOT NULL UNIQUE,title TEXT NOT NULL,original_name TEXT NOT NULL,
+          bytes INTEGER NOT NULL,received_bytes INTEGER NOT NULL DEFAULT 0,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,
+          state TEXT NOT NULL DEFAULT 'uploading',lease_id TEXT NOT NULL DEFAULT '',lease_until INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS telegram_hot_video_upload_chunks (
+          upload_id TEXT NOT NULL REFERENCES telegram_hot_video_upload_sessions(id),offset INTEGER NOT NULL,bytes INTEGER NOT NULL,
+          sha256 TEXT NOT NULL,created_at INTEGER NOT NULL,PRIMARY KEY(upload_id,offset)
+        );
+        CREATE INDEX IF NOT EXISTS telegram_hot_video_upload_sessions_expiry ON telegram_hot_video_upload_sessions(state,updated_at,lease_until);
+        PRAGMA user_version=30;
       `);
       db.exec("COMMIT");
     } catch (error) { db.exec("ROLLBACK"); throw error; }

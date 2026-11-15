@@ -31,6 +31,10 @@
 .cms-hot-videos-storage > span { display: block; height: 100%; background: var(--cms-green); }
 .cms-hot-videos-upload-progress { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: .6rem; align-items: center; color: var(--cms-muted); font-size: .75rem; }
 .cms-hot-videos-upload-progress progress { width: 100%; height: .5rem; accent-color: var(--cms-green); }
+.cms-hot-video-resume { display: flex; flex-wrap: wrap; align-items: center; gap: .6rem; padding: .8rem; border: 1px solid var(--cms-line); background: var(--cms-accent-bg); border-radius: .5rem; }
+.cms-hot-video-resume > div { display: grid; gap: .3rem; flex: 1 1 200px; min-width: 0; }
+.cms-hot-video-resume strong { font-size: .8rem; }
+.cms-hot-video-resume small { overflow-wrap: anywhere; color: var(--cms-muted); line-height: 1.6; }
 .cms-hot-video-card { display: grid; gap: .9rem; padding: 1rem; border: 1px solid var(--cms-line); border-radius: .75rem; background: var(--cms-input); min-width: 0; }
 .cms-hot-video-identity { display: flex; align-items: center; gap: .65rem; min-width: 0; flex: 1 1 180px; }
 .cms-hot-video-identity > div { display: grid; gap: .2rem; min-width: 0; }

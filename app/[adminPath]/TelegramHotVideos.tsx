@@ -2,6 +2,8 @@
 
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { CalendarClock, Check, Clock3, Film, LoaderCircle, Pencil, Play, RefreshCw, Trash2, Upload, X } from "lucide-react";
+import { cancelHotVideoUpload, getHotVideoUploadResumes, HotVideoUploadError, uploadHotVideoFile,
+  type SavedHotVideoUpload, type UploadProgress } from "./hot-video-upload-client";
 import "./telegram-hot-videos-admin.css";
 
 type AdminRequest = <T>(path: string, method?: string, body?: unknown) => Promise<T>;
@@ -56,13 +58,18 @@ export default function TelegramHotVideos({ request, signInPath }: Props) {
   const [file, setFile] = useState<File | null>(null);
   const [uploadTitle, setUploadTitle] = useState("");
   const [uploadPercent, setUploadPercent] = useState<number | null>(null);
+  const [uploadPhase, setUploadPhase] = useState<UploadProgress["phase"]>("preparing");
+  const [savedUpload, setSavedUpload] = useState<SavedHotVideoUpload | null>(null);
   const [uploadInputKey, setUploadInputKey] = useState(0);
   const [scheduledTimes, setScheduledTimes] = useState<Record<string, string>>({});
   const [renaming, setRenaming] = useState<{ id: string; title: string } | null>(null);
   const dirtyRef = useRef(false);
   const busyRef = useRef("");
   const mutationEpoch = useRef(0);
-  const uploadRef = useRef<XMLHttpRequest | null>(null);
+  const uploadRef = useRef<AbortController | null>(null);
+  const uploadSession = useRef<SavedHotVideoUpload | null>(null);
+  const cancelRequested = useRef(false);
+  const mounted = useRef(true);
   const sendIds = useRef(new Map<string, string>());
 
   useEffect(() => {
@@ -84,7 +91,12 @@ export default function TelegramHotVideos({ request, signInPath }: Props) {
     const timer = setInterval(() => void read(false), 15_000);
     return () => { active = false; clearInterval(timer); };
   }, [request, reload]);
-  useEffect(() => () => { uploadRef.current?.abort(); }, []);
+  useEffect(() => {
+    mounted.current = true;
+    const cached = getHotVideoUploadResumes().at(-1) || null;
+    setSavedUpload(cached); uploadSession.current = cached;
+    return () => { mounted.current = false; uploadRef.current?.abort(); };
+  }, []);
 
   function change(patch: Partial<Draft>) {
     dirtyRef.current = true; setDirty(true); setNotice(null); setDraft(current => ({ ...current, ...patch }));
@@ -134,40 +146,53 @@ export default function TelegramHotVideos({ request, signInPath }: Props) {
       setFile(null); setUploadInputKey(key => key + 1); setNotice({ message: "请选择不超过 50 MB 的 MP4 视频。", error: true }); return;
     }
     setFile(value);
-    if (!uploadTitle) setUploadTitle(shortTitle(value.name.replace(/\.mp4$/i, "")));
+    const cached = getHotVideoUploadResumes().find(item => item.originalName === value.name && item.bytes === value.size && item.lastModified === value.lastModified) || null;
+    setSavedUpload(cached); uploadSession.current = cached;
+    if (cached) setUploadTitle(cached.title);
+    else if (!uploadTitle || savedUpload) setUploadTitle(shortTitle(value.name.replace(/\.mp4$/i, "")));
   }
   async function upload(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!file || busyRef.current) return;
     const selected = file;
-    setWorking("upload"); setUploadPercent(0); setNotice(null);
+    const controller = new AbortController(); uploadRef.current = controller; cancelRequested.current = false;
+    setWorking("upload"); setUploadPercent(0); setUploadPhase("preparing"); setNotice(null);
     try {
-      const value = await new Promise<HotStatus>((resolve, reject) => {
-        const outgoing = new XMLHttpRequest(); uploadRef.current = outgoing;
-        outgoing.open("POST", `${endpoint}/upload`);
-        outgoing.withCredentials = true;
-        outgoing.timeout = 330_000;
-        outgoing.setRequestHeader("Content-Type", "video/mp4");
-        outgoing.setRequestHeader("X-Video-Filename", encodeURIComponent(selected.name));
-        outgoing.setRequestHeader("X-Video-Title", encodeURIComponent(uploadTitle.trim()));
-        outgoing.setRequestHeader("X-Video-Size", String(selected.size));
-        outgoing.upload.onprogress = progress => { if (progress.lengthComputable) setUploadPercent(Math.min(100, Math.round(progress.loaded / progress.total * 100))); };
-        outgoing.onload = () => {
-          let body: unknown;
-          try { body = JSON.parse(outgoing.responseText); } catch { reject(new Error("未能确认上传结果，请刷新视频列表后重试。")); return; }
-          if (outgoing.status >= 200 && outgoing.status < 300) { resolve(body as HotStatus); return; }
-          const message = body && typeof body === "object" && "error" in body && typeof body.error === "string" ? body.error : "视频上传失败，请稍后重试。";
-          reject(Object.assign(new Error(message), { status: outgoing.status }));
-        };
-        outgoing.onerror = () => reject(new Error("连接中断，未能确认上传结果；请刷新视频列表后重试。"));
-        outgoing.ontimeout = () => reject(new Error("上传超时，未能确认结果；请刷新视频列表后重试。"));
-        outgoing.onabort = () => reject(new Error("上传已停止。"));
-        outgoing.send(selected);
+      const value = await uploadHotVideoFile<HotStatus>({ file: selected, title: uploadTitle, signal: controller.signal,
+        onProgress: value => {
+          if (!mounted.current) return;
+          setUploadPhase(value.phase);
+          setUploadPercent(Math.min(100, Math.max(0, Math.round((value.acknowledgedBytes + value.loadedBytes) / value.totalBytes * 100))));
+        },
+        onSession: value => { uploadSession.current = value; if (mounted.current) setSavedUpload(value); },
       });
+      if (!mounted.current) return;
       accept(value); setFile(null); setUploadTitle(""); setUploadInputKey(key => key + 1);
+      uploadSession.current = null; setSavedUpload(null);
       setNotice({ message: "视频已保存。可立即发送、指定时间发送，或加入自动轮播。" });
-    } catch (error) { setNotice(failed(error)); }
+    } catch (error) {
+      if (cancelRequested.current && uploadSession.current) {
+        try {
+          await cancelHotVideoUpload(uploadSession.current.id);
+          uploadSession.current = null;
+          if (mounted.current) { setSavedUpload(null); setNotice({ message: "上传已停止。已经完整保存的视频会保留在列表。" }); setReload(value => value + 1); }
+        } catch (cancelError) { if (mounted.current) setNotice(failed(cancelError)); }
+      } else if (mounted.current && !(error instanceof HotVideoUploadError && error.kind === "aborted" && !cancelRequested.current)) {
+        setNotice(error instanceof HotVideoUploadError && error.kind === "aborted" ? { message: "上传已停止。" } : failed(error));
+      }
+    }
     finally { uploadRef.current = null; setUploadPercent(null); setWorking(""); }
+  }
+  async function discardUpload() {
+    if (!savedUpload || busyRef.current) return;
+    setWorking("cancel-upload"); setNotice(null);
+    try {
+      await cancelHotVideoUpload(savedUpload.id);
+      setSavedUpload(null); uploadSession.current = null;
+      setNotice({ message: "上次上传进度已取消。已经完整保存的视频会保留在列表。" });
+      setReload(value => value + 1);
+    } catch (error) { setNotice(failed(error)); }
+    finally { setWorking(""); }
   }
   async function rename(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -178,6 +203,7 @@ export default function TelegramHotVideos({ request, signInPath }: Props) {
   const savedTarget = status?.targetTitle || "🔞365 Free Bonus Hot";
   const usedPercent = status && status.storage.maxBytes > 0 ? Math.min(100, status.storage.bytes / status.storage.maxBytes * 100) : 0;
   const keepNextTime = status?.enabled && draft.targetChatId.trim() === status.targetChatId && draft.intervalHours === status.intervalHours;
+  const matchingUpload = savedUpload && file && savedUpload.originalName === file.name && savedUpload.bytes === file.size && savedUpload.lastModified === file.lastModified;
 
   return <section className="cms-settings-form cms-telegram-settings cms-hot-videos" aria-labelledby="hot-videos-title">
     <div className="cms-settings-panel">
@@ -235,15 +261,19 @@ export default function TelegramHotVideos({ request, signInPath }: Props) {
             <span style={{ width: `${usedPercent}%` }} /></div>}
           <fieldset disabled={loading || Boolean(busy)}>
             <label>视频文件<input key={uploadInputKey} type="file" accept="video/mp4,.mp4" required onChange={event => chooseFile(event.target.files?.[0] || null)} />
-              <small>MP4，每个最多 {formatSize(status?.storage.maxVideoBytes || maxVideoBytes)}。上传后保存在后台，后续自动发送无需保持页面开启。</small></label>
-            <label>后台名称<input value={uploadTitle} maxLength={120} placeholder="例如：Hot 视频 01" onChange={event => setUploadTitle(event.target.value)} />
-              <small>仅用于后台识别，不会作为文案发到频道。</small></label>
+              <small>MP4，每个最多 {formatSize(status?.storage.maxVideoBytes || maxVideoBytes)}。连接中断后，重新选择同一个文件可继续已保存的上传进度。</small></label>
+            <label>后台名称<input value={uploadTitle} maxLength={120} readOnly={Boolean(matchingUpload)} placeholder="例如：Hot 视频 01" onChange={event => setUploadTitle(event.target.value)} />
+              <small>{matchingUpload ? "继续上传沿用原名称；保存完成后可在视频列表重命名。" : "仅用于后台识别，不会作为文案发到频道。"}</small></label>
             {file && <small className="cms-hot-videos-selected"><Film size={14} />{file.name} · {formatSize(file.size)}</small>}
-            <button className="cms-secondary" type="submit" disabled={!file}>{busy === "upload" ? <LoaderCircle size={16} className="cms-spin" /> : <Upload size={16} />}上传并保存视频</button>
+            <button className="cms-secondary" type="submit" disabled={!file}>{busy === "upload" ? <LoaderCircle size={16} className="cms-spin" /> : <Upload size={16} />}{matchingUpload ? "继续上传并保存" : "上传并保存视频"}</button>
           </fieldset>
+          {savedUpload && uploadPercent === null && <div className="cms-hot-video-resume"><div><strong>{savedUpload.state === "complete" ? "上次视频已上传，等待核对保存结果" : "检测到未完成的上传"}</strong>
+            <small>{savedUpload.originalName} · 已保存 {formatSize(savedUpload.receivedBytes)} / {formatSize(savedUpload.bytes)}。{matchingUpload ? "点击继续上传即可接续。" : "请选择原来的同一个文件继续。"}</small></div>
+            <button type="button" className="cms-secondary" disabled={Boolean(busy)} onClick={() => void discardUpload()}>取消上次上传</button>
+          </div>}
           {uploadPercent !== null && <div className="cms-hot-videos-upload-progress" role="status">
-            <progress max="100" value={uploadPercent} aria-label="上传进度" /><span>{uploadPercent < 100 ? `正在上传 ${uploadPercent}%` : "上传完成，正在检查并保存…"}</span>
-            <button type="button" className="cms-secondary" onClick={() => uploadRef.current?.abort()}>取消上传</button>
+            <progress max="100" value={uploadPercent} aria-label="上传进度" /><span>{uploadPhase === "preparing" ? "正在读取视频…" : uploadPhase === "reconnecting" ? "正在重新连接，已保存的进度会保留…" : uploadPhase === "verifying" ? "上传完成，正在检查并保存…" : `正在上传 ${uploadPercent}%`}</span>
+            <button type="button" className="cms-secondary" onClick={() => { cancelRequested.current = true; uploadRef.current?.abort(); }}>取消上传</button>
           </div>}
         </form>
 

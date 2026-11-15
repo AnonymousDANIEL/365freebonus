@@ -69,7 +69,7 @@ function storageBytes(db: DatabaseSync, now: number): number {
   const reserved = db.prepare("SELECT COALESCE(SUM(bytes),0) AS n FROM telegram_hot_video_uploads WHERE created_at>?").get(now - UPLOAD_MS) as { n: number };
   return saved.n + reserved.n;
 }
-export function reserveHotVideoUpload(db: DatabaseSync, input: { id: string; bytes: number }, clock = Date.now) {
+export function reserveHotVideoUpload(db: DatabaseSync, input: { id: string; bytes: number }, clock = Date.now, onReserved?: (now: number) => void) {
   if (!UUID.test(input.id) || !positive(input.bytes) || input.bytes > HOT_VIDEO_MAX_BYTES) throw new HotVideoError("请上传不超过 50 MiB 的 MP4 视频。", 413);
   transaction(db, () => {
     const now = clock();
@@ -83,6 +83,7 @@ export function reserveHotVideoUpload(db: DatabaseSync, input: { id: string; byt
     const reservations = Number((db.prepare("SELECT COALESCE(SUM(bytes),0) AS n FROM telegram_hot_video_uploads").get() as { n: number }).n);
     if (available.bavail * available.bsize < reservations + input.bytes + 64 * 1024 * 1024) throw new HotVideoError("服务器视频空间不足，请先删除部分视频。", 413);
     db.prepare("INSERT INTO telegram_hot_video_uploads(id,bytes,created_at) VALUES(?,?,?)").run(input.id, input.bytes, now);
+    onReserved?.(now);
   });
 }
 export function releaseHotVideoUpload(db: DatabaseSync, id: string) { db.prepare("DELETE FROM telegram_hot_video_uploads WHERE id=?").run(id); }

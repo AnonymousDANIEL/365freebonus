@@ -89,7 +89,7 @@ test('v25 join-gate migration preserves every old table, credentials, PIN, sessi
   const before = snapshot(db, tables);
   closeDatabase();
   const migrated = getSqlite();
-  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version, 29);
+  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version, 30);
   assert.deepEqual(snapshot(migrated, tables), before);
   for (const name of gateTables) {
     assert.ok(migrated.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(name));
@@ -112,7 +112,7 @@ test('reopening or replaying the additive migration never clears persisted gate 
   const before = snapshot(db, gateTables);
   closeDatabase();
   const migrated = getSqlite();
-  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version, 29);
+  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version, 30);
   assert.deepEqual(snapshot(migrated, gateTables), before);
   closeDatabase();
   assert.deepEqual(snapshot(getSqlite(), gateTables), before);
