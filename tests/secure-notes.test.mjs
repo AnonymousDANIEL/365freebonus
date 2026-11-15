@@ -11,7 +11,7 @@ import ts from 'typescript';
 const fixture = mkdtempSync(path.join(tmpdir(), 'secure-notes-'));
 const root = new URL('..', import.meta.url);
 writeFileSync(path.join(fixture, 'package.json'), '{"type":"commonjs"}');
-for (const name of ['app/lib/sqlite', 'app/lib/auth-core', 'app/lib/session-store', 'app/lib/admin-credentials', 'app/lib/directory', 'app/lib/secure-notes', 'app/api/admin/_security', 'app/api/admin/notes/_security', 'app/api/admin/notes/route', 'app/api/admin/notes/vault/route', 'app/api/admin/notes/[id]/route', 'app/api/auth/logout/route']) {
+for (const name of ['app/lib/sqlite', 'app/lib/auth-core', 'app/lib/session-store', 'app/lib/origin-guard', 'app/lib/admin-credentials', 'app/lib/directory', 'app/lib/secure-notes', 'app/api/admin/_security', 'app/api/admin/notes/_security', 'app/api/admin/notes/route', 'app/api/admin/notes/vault/route', 'app/api/admin/notes/[id]/route', 'app/api/auth/logout/route']) {
   const target = path.join(fixture, `${name}.js`);
   mkdirSync(path.dirname(target), { recursive: true });
   writeFileSync(target, ts.transpileModule(readFileSync(new URL(`${name}.ts`, root), 'utf8'), { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, esModuleInterop: true } }).outputText);

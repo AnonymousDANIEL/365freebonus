@@ -15,7 +15,7 @@ symlinkSync(new URL('node_modules', root).pathname, path.join(fixture, 'node_mod
 const contextFile = path.join(fixture, 'cookie-context.js');
 writeFileSync(contextFile, 'exports.token = undefined; exports.cookies = async () => ({ get: () => exports.token ? { value: exports.token } : undefined });');
 for (const file of [
-  'app/chatgpt-auth', 'app/lib/auth-core', 'app/lib/admin-credentials', 'app/lib/session-store', 'app/lib/sqlite', 'app/lib/directory',
+  'app/chatgpt-auth', 'app/lib/auth-core', 'app/lib/admin-credentials', 'app/lib/session-store', 'app/lib/origin-guard', 'app/lib/sqlite', 'app/lib/directory',
   'app/api/admin/_security', 'app/api/admin/password/route', 'app/api/auth/login/route',
 ]) {
   const target = path.join(fixture, `${file}.js`);

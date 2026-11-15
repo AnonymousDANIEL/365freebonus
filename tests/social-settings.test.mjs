@@ -16,7 +16,7 @@ writeFileSync(path.join(fixture, 'package.json'), '{"type":"commonjs"}');
 symlinkSync(path.join(project, 'node_modules'), path.join(fixture, 'node_modules'), 'dir');
 for (const source of [
   'app/lib/sqlite.ts', 'app/lib/directory.ts', 'app/lib/server-directory.ts',
-  'app/lib/image-url.ts', 'app/lib/auth-core.ts', 'app/lib/session-store.ts', 'app/lib/admin-credentials.ts',
+  'app/lib/image-url.ts', 'app/lib/auth-core.ts', 'app/lib/session-store.ts', 'app/lib/origin-guard.ts', 'app/lib/admin-credentials.ts',
   'app/chatgpt-auth.ts', 'app/api/admin/_security.ts', 'app/api/admin/_validation.ts',
 ]) {
   const target = path.join(fixture, source.replace(/\.ts$/, '.js'));

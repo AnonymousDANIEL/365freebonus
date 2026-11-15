@@ -13,7 +13,7 @@ import ts from 'typescript';
 // auth checks can run without a Next request context or touching app data.
 const fixture = mkdtempSync(path.join(tmpdir(), 'directory-backend-'));
 writeFileSync(path.join(fixture, 'package.json'), '{"type":"commonjs"}');
-for (const name of ['sqlite', 'directory', 'server-directory', 'auth-core', 'session-store', 'image-url', 'image-media']) {
+for (const name of ['sqlite', 'directory', 'server-directory', 'auth-core', 'session-store', 'origin-guard', 'image-url', 'image-media']) {
   const source = readFileSync(new URL(`../app/lib/${name}.ts`, import.meta.url), 'utf8');
   const { outputText } = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, esModuleInterop: true } });
   writeFileSync(path.join(fixture, `${name}.js`), outputText);

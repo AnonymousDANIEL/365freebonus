@@ -1,6 +1,7 @@
 import { isIP } from "node:net";
 import { getSqlite } from "./sqlite";
 import { sessionIdHash, type SessionPayload } from "./auth-core";
+import { hasVerifiedOrigin } from "./origin-guard";
 
 export function saveSession(payload: SessionPayload) {
   const db = getSqlite();
@@ -20,6 +21,11 @@ export function revokeSession(payload: SessionPayload) {
 }
 
 export function clientIpKey(request: Request): string {
+  // Only the authenticated Cloudflare hop may supply the visitor address.
+  // A direct visitor can forge this header, but cannot supply the origin proof.
+  const cloudflareIp = request.headers.get("cf-connecting-ip") || "";
+  if (hasVerifiedOrigin(request) && isIP(cloudflareIp)) return sessionIdHash(cloudflareIp);
+
   // Railway's edge appends the connecting address. Read the last valid address,
   // rather than trusting a visitor's prepended X-Forwarded-For value.
   const forwarded = (request.headers.get("x-forwarded-for") || "").split(",").map(value => value.trim()).filter(value => isIP(value));
