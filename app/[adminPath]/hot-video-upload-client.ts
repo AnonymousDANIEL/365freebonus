@@ -1,3 +1,4 @@
+import { HOT_VIDEO_MAX_BYTES } from "../lib/telegram-hot-video-limits";
 export type HotVideoUploadSession = {
   id: string; requestId: string; bytes: number; receivedBytes: number; chunkBytes: number;
   state: "uploading" | "complete"; expiresAt: number | null; videoId: string | null;
@@ -22,7 +23,7 @@ export class HotVideoUploadError extends Error {
 
 const endpoint = "/api/admin/telegram/hot-videos/uploads";
 const storageKey = "365freebonus:hot-video-uploads:v1";
-const maxBytes = 50 * 1024 * 1024, maxChunkBytes = 1024 * 1024, uploadTtl = 10 * 60_000;
+const maxBytes = HOT_VIDEO_MAX_BYTES, maxChunkBytes = 1024 * 1024, uploadTtl = 10 * 60_000;
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const record = (value: unknown): Record<string, unknown> | null => value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
 const integer = (value: unknown, minimum = 0): value is number => typeof value === "number" && Number.isSafeInteger(value) && value >= minimum;
@@ -133,7 +134,7 @@ export async function uploadHotVideoFile<Result>(options: {
   const storage = options.storage === undefined ? browserStorage() : options.storage, sleep = options.sleep || wait;
   if (!Number.isSafeInteger(file.size) || file.size < 24 || file.size > maxBytes || !/\.mp4$/i.test(file.name)
     || file.name.length > 255 || /[\u0000-\u001f\u007f]/u.test(file.name) || !integer(file.lastModified))
-    throw new HotVideoUploadError("请选择不超过 50 MB 的 MP4 视频。", 400);
+    throw new HotVideoUploadError("请选择有效的 MP4 视频，Telegram 原画上传上限为 2000 MB。", 400);
   const fallbackTitle = options.title.trim() || file.name.replace(/\.mp4$/i, "").trim() || "Video";
   if (fallbackTitle.length > 160 || /[\u0000-\u001f\u007f]/u.test(fallbackTitle))
     throw new HotVideoUploadError("请使用不超过 160 字的后台视频名称。", 400);

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
@@ -8,8 +8,10 @@ import ts from 'typescript';
 
 const fixture = mkdtempSync(path.join(tmpdir(), 'telegram-hot-upload-client-'));
 writeFileSync(path.join(fixture, 'package.json'), '{"type":"commonjs"}');
+mkdirSync(path.join(fixture,'lib'));
+writeFileSync(path.join(fixture,'lib/telegram-hot-video-limits.js'),ts.transpileModule(readFileSync(new URL('../app/lib/telegram-hot-video-limits.ts',import.meta.url),'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS}}).outputText);
 writeFileSync(path.join(fixture, 'client.js'), ts.transpileModule(
-  readFileSync(new URL('../app/[adminPath]/hot-video-upload-client.ts', import.meta.url), 'utf8'),
+  readFileSync(new URL('../app/[adminPath]/hot-video-upload-client.ts', import.meta.url), 'utf8').replace('../lib/telegram-hot-video-limits','./lib/telegram-hot-video-limits'),
   { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } },
 ).outputText);
 const require = createRequire(import.meta.url);
@@ -107,16 +109,16 @@ const puts = api => api.requests.filter(request => request.method === 'PUT');
 const gets = api => api.requests.filter(request => request.method === 'GET');
 const completes = api => api.requests.filter(request => request.path.endsWith('/complete'));
 
-test('50 MiB uses fifty exact one MiB ArrayBuffers, private offsets, and a separate idempotent completion', async () => {
-  const file = localFile(50 * CHUNK), api = server(file), progress = [];
+test('60 MiB exceeds the old cap and uses sixty exact one MiB ArrayBuffers, private offsets, and a separate idempotent completion', async () => {
+  const file = localFile(60 * CHUNK), api = server(file), progress = [];
   const options = settings(file, api, { onProgress: value => progress.push(value) });
   assert.deepEqual(await uploadHotVideoFile(options), { videos: [] });
   assert.deepEqual(api.requests[0].json, { requestId: ID, title: 'Original title', originalName: file.name, bytes: file.size });
   assert.equal(api.requests[0].method, 'POST'); assert.equal(api.requests[0].path, ENDPOINT);
-  assert.equal(puts(api).length, 50); assert.equal(gets(api).length, 0); assert.equal(completes(api).length, 1);
-  assert.deepEqual(puts(api).map(request => Number(request.headers['X-Video-Offset'])), Array.from({ length: 50 }, (_, index) => index * CHUNK));
+  assert.equal(puts(api).length, 60); assert.equal(gets(api).length, 0); assert.equal(completes(api).length, 1);
+  assert.deepEqual(puts(api).map(request => Number(request.headers['X-Video-Offset'])), Array.from({ length: 60 }, (_, index) => index * CHUNK));
   assert.ok(puts(api).every(request => request.body instanceof ArrayBuffer && request.body.byteLength === CHUNK));
-  assert.deepEqual(file.reads[0], { start: 0, end: 64 }); assert.equal(file.reads.length, 51);
+  assert.deepEqual(file.reads[0], { start: 0, end: 64 }); assert.equal(file.reads.length, 61);
   assert.equal(progress.at(-1).phase, 'verifying'); assert.equal(progress.at(-1).acknowledgedBytes, file.size);
   assert.deepEqual(getHotVideoUploadResumes(options.storage), []); assert.deepEqual(options.delays, []);
 });

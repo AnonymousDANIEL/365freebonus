@@ -13,7 +13,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const maximumBytes = 50 * 1024 * 1024, chunkBytes = 1024 * 1024;
+const maximumBytes = 120 * 1024 * 1024, chunkBytes = 1024 * 1024;
 const fixture = await mkdtemp(path.join(tmpdir(), 'hot-video-next-http-'));
 const data = path.join(fixture, 'private-data');
 let child, serverLog = '', exitCode = null, db;
@@ -40,7 +40,7 @@ try {
     'app/api/admin/telegram/hot-videos/uploads/[id]/route.ts',
     'app/api/admin/telegram/hot-videos/uploads/[id]/complete/route.ts',
     'app/api/admin/_security.ts', 'app/lib/auth-core.ts', 'app/lib/sqlite.ts',
-    'app/lib/telegram-hot-videos.ts', 'app/lib/telegram-hot-video-chunks.ts',
+    'app/lib/telegram-hot-video-limits.ts', 'app/lib/telegram-hot-videos.ts', 'app/lib/telegram-hot-video-chunks.ts',
   ];
   for (const filename of required) await write(filename, await readFile(path.join(root, filename)));
   const { dependencies, devDependencies } = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8'));
@@ -51,6 +51,7 @@ try {
   await write('app/page.tsx', 'export default function Page(){return <main>Isolated upload transport fixture</main>;}');
   await write('app/chatgpt-auth.ts', 'export async function getChatGPTUser(){return {userId:"fixture-admin",displayName:"Fixture",email:"",fullName:null};}');
   await write('app/lib/directory.ts', 'export class PromotionValidationError extends Error{};export class SettingsValidationError extends Error{};');
+  await write('app/lib/telegram-hot-video-native.ts', 'export async function sendLargeHotVideo(){throw new Error("Upload fixture must never send a channel message");}');
   await write('app/lib/telegram-bot.ts', `
 declare global {var __uploadIntegrationTelegramCalls:number|undefined;}
 const disabled=async(..._args:unknown[])=>{globalThis.__uploadIntegrationTelegramCalls=(globalThis.__uploadIntegrationTelegramCalls||0)+1;throw Error('Telegram disabled in isolated upload check');};
@@ -73,7 +74,7 @@ export const updateTelegramHotVideo=disabled;export const deleteTelegramHotVideo
   assert.ok(frame.length < maximumBytes - 8); frame.copy(video);
   video.writeUInt32BE(maximumBytes - frame.length, frame.length); video.write('free', frame.length + 4, 'ascii');
   const wantedHash = createHash('sha256').update(video).digest('hex');
-  phase('Prepared a valid private 50 MiB MP4 fixture.');
+  phase('Prepared a valid private 120 MiB MP4 fixture.');
 
   const port = await freePort(), base = `http://127.0.0.1:${port}`;
   child = spawn(process.execPath, [path.join(root, 'node_modules/next/dist/bin/next'), 'dev', fixture, '--webpack', '--hostname', '127.0.0.1', '--port', String(port)], {
@@ -162,7 +163,7 @@ export const updateTelegramHotVideo=disabled;export const deleteTelegramHotVideo
   assert.equal((await stat(stored)).size, maximumBytes); assert.equal((await stat(stored)).mode & 0o777, 0o600);
   assert.equal(createHash('sha256').update(await readFile(stored)).digest('hex'), wantedHash);
   assert.deepEqual(await readdir(path.dirname(stored)), [rows[0].file_name]);
-  phase('PASS: 50 MiB stored once with exact SHA, private permissions, idempotent completion and zero channel jobs/calls.');
+  phase('PASS: 120 MiB stored once with exact SHA, private permissions, idempotent completion and zero channel jobs/calls.');
 } catch (error) {
   process.stderr.write(`${error instanceof Error ? error.stack : String(error)}\n`);
   if (serverLog) process.stderr.write(`\nIsolated Next log:\n${serverLog.slice(-14000)}\n`);

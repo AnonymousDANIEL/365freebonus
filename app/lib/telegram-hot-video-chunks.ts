@@ -6,7 +6,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { HOT_VIDEO_MAX_BYTES, HotVideoError, hotVideoStorageDirectory, registerHotVideo, reserveHotVideoUpload } from "./telegram-hot-videos";
 
 export const HOT_VIDEO_CHUNK_BYTES = 1024 * 1024;
-const TTL_MS = 10 * 60_000, LEASE_MS = 120_000, READ_MS = 90_000, MAX_CHUNKS = 1024;
+const TTL_MS = 10 * 60_000, LEASE_MS = 120_000, READ_MS = 90_000, MAX_CHUNKS = 2048;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 type Session = { id: string; request_id: string; title: string; original_name: string; bytes: number; received_bytes: number;
   created_at: number; updated_at: number; state: string; lease_id: string; lease_until: number };
@@ -75,7 +75,7 @@ function cleanupExpired(db: DatabaseSync, now: number) {
 }
 export function startHotVideoUpload(db: DatabaseSync, input: StartInput, clock = Date.now) {
   if (!input || typeof input.requestId !== "string" || !UUID.test(input.requestId) || !Number.isSafeInteger(input.bytes) || input.bytes < 24 || input.bytes > HOT_VIDEO_MAX_BYTES)
-    throw new HotVideoError("请选择不超过 50 MiB 的 MP4 视频。", 413);
+    throw new HotVideoError("请选择有效的 MP4 视频，Telegram 原画上传上限为 2000 MB。", 413);
   if (typeof input.title !== "string" || !input.title.trim() || input.title.length > 160 || /[\u0000-\u001f\u007f]/.test(input.title)
     || typeof input.originalName !== "string" || !input.originalName.trim() || input.originalName.length > 255
     || /[\u0000-\u001f\u007f/\\]/.test(input.originalName) || !/\.mp4$/i.test(input.originalName)) throw new HotVideoError("请检查视频名称和 MP4 文件名。", 400);

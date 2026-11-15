@@ -24,7 +24,7 @@ export async function PUT(request: Request, context: Context) {
     const id = await uploadId(context);
     if ((request.headers.get("content-type") || "").toLowerCase().split(";", 1)[0].trim() !== "application/octet-stream") throw new ApiError(415, "请使用视频分段上传。");
     const rawOffset = request.headers.get("x-video-offset") || "";
-    if (!/^(?:0|[1-9]\d{0,7})$/.test(rawOffset)) throw new ApiError(400, "视频分段位置不正确，请重新确认上传进度。");
+    if (!/^(?:0|[1-9]\d{0,9})$/.test(rawOffset)) throw new ApiError(400, "视频分段位置不正确，请重新确认上传进度。");
     return respond(await appendHotVideoChunk(getSqlite(), id, Number(rawOffset), request));
   } catch (error) { return failure(error); }
 }

@@ -19,7 +19,7 @@ function write(relative, content) {
 write('package.json', '{"type":"commonjs"}');
 symlinkSync(fileURLToPath(new URL('../node_modules', import.meta.url)), path.join(fixture, 'node_modules'), 'dir');
 for (const relative of ['app/api/admin/telegram/hot-videos/route', 'app/api/admin/telegram/hot-videos/upload/route',
-  'app/api/admin/_security', 'app/lib/auth-core', 'app/lib/sqlite', 'app/lib/telegram-hot-videos', 'app/lib/telegram-hot-video-upload']) {
+  'app/api/admin/_security', 'app/lib/auth-core', 'app/lib/sqlite', 'app/lib/telegram-hot-video-limits', 'app/lib/telegram-hot-videos', 'app/lib/telegram-hot-video-upload']) {
   write(`${relative}.js`, ts.transpileModule(readFileSync(new URL(`../${relative}.ts`, import.meta.url), 'utf8'), {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, esModuleInterop: true },
   }).outputText);
@@ -180,7 +180,7 @@ test('upload filenames are display-only and paths are stripped before saving pri
 
 test('upload rejects MIME, filename, title and size-header errors before reserving disk', async () => {
   for (const [headers, status] of [[{ 'content-type': 'image/png' }, 415], [{ 'x-video-size': '0' }, 400],
-    [{ 'x-video-size': '1e2' }, 400], [{ 'x-video-size': '23' }, 400], [{ 'x-video-size': String(50 * 1024 * 1024 + 1) }, 413],
+    [{ 'x-video-size': '1e2' }, 400], [{ 'x-video-size': '23' }, 400], [{ 'x-video-size': String(backend.HOT_VIDEO_MAX_BYTES + 1) }, 413],
     [{ 'content-length': '33' }, 400], [{ 'content-length': '-1' }, 400], [{ 'x-video-filename': 'movie.gif' }, 415],
     [{ 'x-video-filename': '%invalid' }, 400], [{ 'x-video-filename': 'bad%00.mp4' }, 400],
     [{ 'x-video-title': encodeURIComponent('x'.repeat(161)) }, 400], [{ 'x-video-title': 'bad%0Aname' }, 400]]) {
@@ -214,8 +214,9 @@ test('an aborted upload cleans its reservation and temporary file without consum
 });
 
 test('full video quota and concurrent-upload reservations reject before reading or creating a file', async () => {
-  const db = getSqlite(); db.prepare(`INSERT INTO telegram_hot_videos(id,title,original_name,file_name,bytes,sha256,sort_order,created_at)
-    VALUES(?,'Existing','old.mp4',?,? ,?,1,?)`).run(videoId, `${videoId}.mp4`, backend.HOT_VIDEO_STORAGE_BYTES, 'a'.repeat(64), Date.now());
+  const db = getSqlite();
+  for(let i=0;i<100;i++) db.prepare(`INSERT INTO telegram_hot_videos(id,title,original_name,file_name,bytes,sha256,sort_order,created_at)
+    VALUES(?,'Existing','old.mp4',?,24,?,1,?)`).run(randomUUID(), `${randomUUID()}.mp4`, 'a'.repeat(64), Date.now());
   let incoming = trackedStream([mp4()]); uncached(await uploadRoute.POST(upload(incoming.stream)), 413);
   assert.equal(incoming.state.reads, 0); assert.deepEqual(uploads(), []); assert.deepEqual(storedFiles(), []);
   db.prepare('DELETE FROM telegram_hot_videos').run();

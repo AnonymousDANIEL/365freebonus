@@ -11,7 +11,7 @@ import ts from 'typescript';
 // used by the upload path and is replaced with a failing transport as proof.
 const fixture=mkdtempSync(path.join(tmpdir(),'telegram-hot-chunks-'));
 writeFileSync(path.join(fixture,'package.json'),'{"type":"commonjs"}');
-for(const name of ['sqlite','telegram-hot-videos','telegram-hot-video-chunks'])writeFileSync(path.join(fixture,name+'.js'),ts.transpileModule(
+for(const name of ['sqlite','telegram-hot-video-limits','telegram-hot-videos','telegram-hot-video-chunks'])writeFileSync(path.join(fixture,name+'.js'),ts.transpileModule(
   readFileSync(new URL('../app/lib/'+name+'.ts',import.meta.url),'utf8'),
   {compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS,esModuleInterop:true}},
 ).outputText);

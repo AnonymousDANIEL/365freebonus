@@ -5,6 +5,7 @@ import { CalendarClock, Check, Clock3, Film, LoaderCircle, Pencil, Play, Refresh
 import { cancelHotVideoUpload, getHotVideoUploadResumes, HotVideoUploadError, uploadHotVideoFile,
   type SavedHotVideoUpload, type UploadProgress } from "./hot-video-upload-client";
 import "./telegram-hot-videos-admin.css";
+import { HOT_VIDEO_MAX_BYTES } from "../lib/telegram-hot-video-limits";
 
 type AdminRequest = <T>(path: string, method?: string, body?: unknown) => Promise<T>;
 type Props = { request: AdminRequest; signInPath: string };
@@ -13,13 +14,13 @@ type HotJob = { id: string; videoId: string; title: string; kind: "manual" | "sc
   status: string; attempts: number; lastError: string; sentAt: number | null; messageId: number | null };
 type HotStatus = { enabled: boolean; targetChatId: string; targetTitle: string; intervalHours: number; nextRunAt: number | null;
   revision: string; ready: boolean; lastError: string; lastCheckedAt: number | null;
-  storage: { bytes: number; maxBytes: number; maxVideoBytes: number };
+  storage: { bytes: number; maxBytes: number; maxVideoBytes: number; availableBytes: number };
   videos: HotVideo[]; jobs: HotJob[]; counts: Record<string, number>; candidates?: { chatId: string; title: string }[] };
 type Draft = { enabled: boolean; targetChatId: string; intervalHours: number; firstRunAt: string; revision?: string };
 type Notice = { message: string; error?: boolean; sessionExpired?: boolean };
 
 const endpoint = "/api/admin/telegram/hot-videos";
-const maxVideoBytes = 50 * 1024 * 1024;
+const maxVideoBytes = HOT_VIDEO_MAX_BYTES;
 const buttons = [
   { text: "🌐 Visit website", url: "https://365freebonus.com/" },
   { text: "🎁 365 Free Bonus Official", url: "https://t.me/join365freebonus" },
@@ -143,7 +144,7 @@ export default function TelegramHotVideos({ request, signInPath }: Props) {
     setNotice(null);
     if (!value) { setFile(null); return; }
     if (!/\.mp4$/i.test(value.name) || value.size <= 0 || value.size > (status?.storage.maxVideoBytes || maxVideoBytes)) {
-      setFile(null); setUploadInputKey(key => key + 1); setNotice({ message: "请选择不超过 50 MB 的 MP4 视频。", error: true }); return;
+      setFile(null); setUploadInputKey(key => key + 1); setNotice({ message: "请选择有效的 MP4 视频，Telegram 原画上传上限为 2000 MB。", error: true }); return;
     }
     setFile(value);
     const cached = getHotVideoUploadResumes().find(item => item.originalName === value.name && item.bytes === value.size && item.lastModified === value.lastModified) || null;
@@ -256,12 +257,12 @@ export default function TelegramHotVideos({ request, signInPath }: Props) {
 
         <form className="cms-hot-videos-upload" onSubmit={upload}>
           <div className="cms-hot-videos-heading"><h3><Upload size={17} />添加视频</h3>
-            {status && <span>{formatSize(status.storage.bytes)} / {formatSize(status.storage.maxBytes)}</span>}</div>
+            {status && <span>已用 {formatSize(status.storage.bytes)} · 可新增 {formatSize(status.storage.availableBytes)}</span>}</div>
           {status && <div className="cms-hot-videos-storage" role="meter" aria-label="视频储存空间" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(usedPercent)}>
             <span style={{ width: `${usedPercent}%` }} /></div>}
           <fieldset disabled={loading || Boolean(busy)}>
             <label>视频文件<input key={uploadInputKey} type="file" accept="video/mp4,.mp4" required onChange={event => chooseFile(event.target.files?.[0] || null)} />
-              <small>MP4，每个最多 {formatSize(status?.storage.maxVideoBytes || maxVideoBytes)}。连接中断后，重新选择同一个文件可继续已保存的上传进度。</small></label>
+              <small>原画 MP4，以可播放视频发布，仅附带固定三个按钮，不添加文案。Telegram 每个上限 {formatSize(status?.storage.maxVideoBytes || maxVideoBytes)}，还需有足够服务器空间。连接中断后，重新选择同一个文件可继续上传。</small></label>
             <label>后台名称<input value={uploadTitle} maxLength={120} readOnly={Boolean(matchingUpload)} placeholder="例如：Hot 视频 01" onChange={event => setUploadTitle(event.target.value)} />
               <small>{matchingUpload ? "继续上传沿用原名称；保存完成后可在视频列表重命名。" : "仅用于后台识别，不会作为文案发到频道。"}</small></label>
             {file && <small className="cms-hot-videos-selected"><Film size={14} />{file.name} · {formatSize(file.size)}</small>}

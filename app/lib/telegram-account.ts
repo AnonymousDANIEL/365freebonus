@@ -1606,3 +1606,11 @@ export function startTelegramAccountWorker() {
 }
 
 export { makeClient as createTelegramAccountClient };
+
+/** Server-only application credentials, never the owner's personal login session. */
+export function hotVideoBotApplication(db = getSqlite()) {
+  const current = row(db);
+  if (!current.config_ciphertext) return null;
+  const credentials = unseal<Credentials>(current.config_ciphertext);
+  return { ...credentials, revision: createHash("sha256").update(current.config_ciphertext).digest("hex") };
+}

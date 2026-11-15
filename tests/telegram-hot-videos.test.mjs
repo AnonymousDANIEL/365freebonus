@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
+import * as fs from 'node:fs';
 import { existsSync, lstatSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -11,7 +12,7 @@ import ts from 'typescript';
 // alone is mocked. Every test uses a private disposable directory and no network.
 const fixture=mkdtempSync(path.join(tmpdir(),'telegram-hot-videos-'));
 writeFileSync(path.join(fixture,'package.json'),'{"type":"commonjs"}');
-for(const name of ['sqlite','telegram-hot-videos'])writeFileSync(path.join(fixture,name+'.js'),ts.transpileModule(
+for(const name of ['sqlite','telegram-hot-video-limits','telegram-hot-videos'])writeFileSync(path.join(fixture,name+'.js'),ts.transpileModule(
   readFileSync(new URL('../app/lib/'+name+'.ts',import.meta.url),'utf8'),
   {compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS,esModuleInterop:true}},
 ).outputText);
@@ -33,9 +34,11 @@ exports.telegramVideoFileRequest=async(token,p,upload)=>{
   return {ok:true,result:{message_id:701,chat:{id:p.chat_id,type:'channel'},video:{file_id:'fixture-video'},reply_markup:p.reply_markup}};
 };
 `);
+writeFileSync(path.join(fixture,'telegram-hot-video-native.js'),`exports.calls=[];exports.onSend=null;exports.sendLargeHotVideo=async input=>{exports.calls.push(input);if(exports.onSend)return exports.onSend(input);input.onDispatch();return {ok:true,result:{message_id:702,chat:{id:input.targetId},video:{width:1280},caption:'',reply_markup:{inline_keyboard:require('./telegram-hot-videos').hotVideoKeyboard()}}};};`);
 const require=createRequire(import.meta.url);
 const hot=require(path.join(fixture,'telegram-hot-videos.js'));
 const telegram=require(path.join(fixture,'telegram-bot.js'));
+const native=require(path.join(fixture,'telegram-hot-video-native.js'));
 const {getSqlite}=require(path.join(fixture,'sqlite.js'));
 const previousData=process.env.DATA_DIR;
 const start=1_800_000_000_000,HOUR=3_600_000,target=-1009000;
@@ -61,6 +64,7 @@ async function queue(videoId,runAt=null,requestId=randomUUID()){return hot.enque
 async function deliver(){await hot.deliverHotVideoOnce(decrypt,clock);}
 test.beforeEach(()=>{
   process.env.DATA_DIR=mkdtempSync(path.join(fixture,'case-'));now=start;
+  native.calls.length=0;native.onSend=null;
   telegram.calls.length=0;telegram.results.length=0;telegram.onRequest=null;telegram.onSend=null;
   telegram.name='FreeBonus365ChatBot';telegram.id=12345678;telegram.role={status:'administrator',can_post_messages:true};telegram.chatType='channel';telegram.chatId=null;
   db().prepare(`INSERT INTO telegram_promotion_settings(id,enabled,chat_id,token_ciphertext,chat_bot_token_ciphertext) VALUES('primary',0,'','',?)`).run(cipher);
@@ -87,7 +91,7 @@ test('a scheduled request remains idempotent after its scheduled time has passed
   await assert.rejects(queue(id,runAt,randomUUID()),error=>error.status===400);
 });
 
-test('upload reservations enforce 50 MiB, two concurrent uploads and durable aggregate capacity',()=>{
+test('upload reservations enforce Telegram platform bounds, two concurrent uploads and durable aggregate capacity',()=>{
   assert.throws(()=>hot.reserveHotVideoUpload(db(),{id:randomUUID(),bytes:hot.HOT_VIDEO_MAX_BYTES+1},clock),error=>error.status===413);
   assert.throws(()=>hot.reserveHotVideoUpload(db(),{id:'../../file',bytes:48},clock),error=>error.status===413);
   const ids=[randomUUID(),randomUUID()];for(const id of ids)hot.reserveHotVideoUpload(db(),{id,bytes:50},clock);
@@ -307,16 +311,49 @@ test('a disabled destination draft does not use the network or inherit old desti
   assert.equal(telegram.calls.length,before);assert.equal(status.targetChatId,String(target-1));assert.equal(status.ready,false);
 });
 
-test('saved video bytes and simultaneous reservations share one aggregate 300 MiB ceiling',()=>{
-  add();db().prepare('UPDATE telegram_hot_videos SET bytes=?').run(hot.HOT_VIDEO_STORAGE_BYTES-80);
-  hot.reserveHotVideoUpload(db(),{id:randomUUID(),bytes:50},clock);
-  assert.equal(hot.hotVideoStatus(db(),clock).storage.bytes,hot.HOT_VIDEO_STORAGE_BYTES-30);
-  assert.throws(()=>hot.reserveHotVideoUpload(db(),{id:randomUUID(),bytes:31},clock),error=>error.status===413);
-  assert.equal(db().prepare('SELECT COUNT(*) AS n FROM telegram_hot_video_uploads').get().n,1);
+test('larger original videos use actual free disk rather than the old 300 MiB quota',t=>{
+  t.mock.method(fs.default,'statfsSync',()=>({bavail:800,bsize:1024*1024}));
+  const id=add();db().prepare('UPDATE telegram_hot_videos SET bytes=? WHERE id=?').run(400*1024*1024,id);
+  hot.reserveHotVideoUpload(db(),{id:randomUUID(),bytes:500*1024*1024},clock);
+  assert.equal(hot.hotVideoStatus(db(),clock).storage.availableBytes,236*1024*1024);
+  assert.throws(()=>hot.reserveHotVideoUpload(db(),{id:randomUUID(),bytes:237*1024*1024},clock),error=>error.status===413);
+  hot.reserveHotVideoUpload(db(),{id:randomUUID(),bytes:236*1024*1024},clock);
+  assert.equal(hot.hotVideoStatus(db(),clock).storage.availableBytes,0);
 });
 
 test('replacing a saved file with a symlink cannot bypass the last pre-dispatch validation',async()=>{
   const id=add();await queue(id);const filename=path.join(hot.hotVideoStorageDirectory(),id+'.mp4');
   const outside=path.join(process.env.DATA_DIR,'outside.mp4');writeFileSync(outside,mp4());rmSync(filename);symlinkSync(outside,filename);
   await deliver();assert.equal(sends().length,0);assert.equal(jobs()[0].status,'failed');
+});
+
+async function addLarge(){
+ const id=add(),filename=path.join(hot.hotVideoStorageDirectory(),id+'.mp4'),bytes=60*1024*1024;
+ fs.default.truncateSync(filename,bytes);
+ const digest=createHash('sha256');for await(const part of fs.default.createReadStream(filename))digest.update(part);
+ db().prepare('UPDATE telegram_hot_videos SET bytes=?,sha256=? WHERE id=?').run(bytes,digest.digest('hex'),id);return id;
+}
+test('large original videos select the native bot path and keep the six-hour schedule unchanged',async()=>{
+ const id=await addLarge();await save();const next=config().next_run_at;await queue(id);await deliver();
+ assert.equal(sends().length,0);assert.equal(native.calls.length,1);assert.equal(jobs()[0].status,'sent');assert.equal(jobs()[0].message_id,702);assert.ok(jobs()[0].dispatch_started_at>0);assert.equal(config().next_run_at,next);
+});
+test('long native preparation renews its own unexpired leases before committing a message attempt',async()=>{
+ const id=await addLarge();await queue(id);
+ native.onSend=async input=>{
+   for(let i=0;i<4;i++){now+=110000;assert.equal(input.valid(),true);input.renew();assert.equal(jobs()[0].dispatch_started_at,0);}
+   input.onDispatch();return {ok:true,result:{message_id:703,chat:{id:target},video:{},reply_markup:{inline_keyboard:hot.hotVideoKeyboard()}}};
+ };
+ await deliver();assert.equal(jobs()[0].status,'sent');assert.equal(jobs()[0].message_id,703);assert.equal(sends().length,0);
+});
+test('native preparation failure is retryable without a committed send attempt',async()=>{
+ const id=await addLarge();await queue(id);native.onSend=async()=>{throw new hot.HotVideoError('Temporary preparation failure',503)};await deliver();
+ assert.equal(jobs()[0].status,'pending');assert.equal(jobs()[0].dispatch_started_at,0);assert.equal(native.calls.length,1);assert.equal(sends().length,0);
+});
+test('a native timeout after dispatch becomes terminal unknown and is never automatically resent',async()=>{
+ const id=await addLarge();await queue(id);native.onSend=async input=>{input.onDispatch();throw new Error('ambiguous transport')};await deliver();
+ assert.equal(jobs()[0].status,'unknown');assert.ok(jobs()[0].dispatch_started_at>0);now+=240000;await deliver();assert.equal(native.calls.length,1);assert.equal(sends().length,0);
+});
+test('expired native preparation cannot renew or submit after another lease could have claimed it',async()=>{
+ const id=await addLarge();await queue(id);native.onSend=async input=>{now+=120001;assert.equal(input.valid(),false);assert.throws(input.renew,e=>e.status===409);input.onDispatch();return null};await deliver();
+ assert.equal(jobs()[0].dispatch_started_at,0);assert.equal(jobs()[0].status,'cancelled');assert.equal(sends().length,0);
 });

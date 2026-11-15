@@ -4,7 +4,7 @@ import path from "node:path";
 import { getSqlite } from "./sqlite";
 import { HotVideoError, hotVideoStorageDirectory, reserveHotVideoUpload, releaseHotVideoUpload, registerHotVideo } from "./telegram-hot-videos";
 
-const MAX_BYTES = 50 * 1024 * 1024;
+import { HOT_VIDEO_MAX_BYTES as MAX_BYTES } from "./telegram-hot-video-limits";
 const FREE_BYTES = 64 * 1024 * 1024;
 function header(request: Request, name: string, max: number) {
   const value = request.headers.get(name) || "";
@@ -24,9 +24,9 @@ export async function storeHotVideoUpload(request: Request) {
   if ((request.headers.get("content-type") || "").toLowerCase().split(";", 1)[0].trim() !== "video/mp4")
     throw new HotVideoError("请上传 MP4 视频。", 415);
   const rawSize = request.headers.get("x-video-size") || "";
-  if (!/^[1-9]\d{0,8}$/.test(rawSize)) throw new HotVideoError("无法确认视频大小，请重新选择视频。", 400);
+  if (!/^[1-9]\d{0,9}$/.test(rawSize)) throw new HotVideoError("无法确认视频大小，请重新选择视频。", 400);
   const expected = Number(rawSize);
-  if (expected > MAX_BYTES) { await request.body?.cancel().catch(() => undefined); throw new HotVideoError("每个视频最多 50 MB。", 413); }
+  if (expected > MAX_BYTES) { await request.body?.cancel().catch(() => undefined); throw new HotVideoError("视频超过 Telegram 原画上传上限（2000 MB）。", 413); }
   if (expected < 24 || !request.body) throw new HotVideoError("视频文件为空或不完整。", 400);
   const length = request.headers.get("content-length");
   if (length !== null && (!/^[1-9]\d*$/.test(length) || Number(length) !== expected)) {
@@ -52,7 +52,7 @@ export async function storeHotVideoUpload(request: Request) {
       })]).finally(() => { if (timer) clearTimeout(timer); });
       if (next.done) break;
       bytes += next.value.byteLength;
-      if (bytes > expected || bytes > MAX_BYTES) throw new HotVideoError("视频超出声明大小或 50 MB 限制。", 413);
+      if (bytes > expected || bytes > MAX_BYTES) throw new HotVideoError("视频超出声明大小或 Telegram 上传上限。", 413);
       if (headerBytes.length < 64) headerBytes = Buffer.concat([headerBytes, Buffer.from(next.value.subarray(0, 64 - headerBytes.length))]);
       hash.update(next.value);
       let written = 0;

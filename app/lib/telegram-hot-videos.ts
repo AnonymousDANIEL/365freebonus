@@ -5,6 +5,8 @@ import path from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { getDataDirectory, getSqlite } from "./sqlite";
 import { telegramRequest, telegramVideoFileRequest } from "./telegram-bot";
+import { HOT_VIDEO_MAX_BYTES, HOT_VIDEO_CLOUD_BYTES, HOT_VIDEO_FREE_BYTES } from "./telegram-hot-video-limits";
+export { HOT_VIDEO_MAX_BYTES } from "./telegram-hot-video-limits";
 
 type DecryptToken = (ciphertext: string) => string;
 type Config = { enabled: number; target_chat_id: number; target_title: string; interval_hours: number; next_run_at: number;
@@ -18,8 +20,6 @@ type Job = { id: string; request_id: string; video_id: string; kind: "manual" | 
   last_error: string; sent_at: number; message_id: number };
 export type HotVideoSettingsInput = { enabled: boolean; targetChatId: string; intervalHours: number; firstRunAt: number | null; revision?: string };
 export type HotVideoRegistration = { id: string; title: string; originalName: string; fileName: string; bytes: number; sha256: string };
-export const HOT_VIDEO_MAX_BYTES = 50 * 1024 * 1024;
-export const HOT_VIDEO_STORAGE_BYTES = 300 * 1024 * 1024;
 const HOUR = 60 * 60_000, LEASE_MS = 120_000, TICK_MS = 5_000, GAP_MS = 3_000, MAX_ATTEMPTS = 5, UPLOAD_MS = 10 * 60_000;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const TOKEN_ERROR = "请先在 Telegram 设置保存 @FreeBonus365ChatBot 的 Token。";
@@ -69,19 +69,23 @@ function storageBytes(db: DatabaseSync, now: number): number {
   const reserved = db.prepare("SELECT COALESCE(SUM(bytes),0) AS n FROM telegram_hot_video_uploads WHERE created_at>?").get(now - UPLOAD_MS) as { n: number };
   return saved.n + reserved.n;
 }
+export function hotVideoAvailableBytes(db: DatabaseSync, now = Date.now()): number {
+  const disk = statfsSync(hotVideoStorageDirectory());
+  const reserved = (db.prepare("SELECT COALESCE(SUM(bytes),0) AS n FROM telegram_hot_video_uploads WHERE created_at>?").get(now - UPLOAD_MS) as { n: number }).n;
+  return Math.max(0, disk.bavail * disk.bsize - HOT_VIDEO_FREE_BYTES - reserved);
+}
 export function reserveHotVideoUpload(db: DatabaseSync, input: { id: string; bytes: number }, clock = Date.now, onReserved?: (now: number) => void) {
-  if (!UUID.test(input.id) || !positive(input.bytes) || input.bytes > HOT_VIDEO_MAX_BYTES) throw new HotVideoError("请上传不超过 50 MiB 的 MP4 视频。", 413);
+  if (!UUID.test(input.id) || !positive(input.bytes) || input.bytes > HOT_VIDEO_MAX_BYTES) throw new HotVideoError("视频超过 Telegram 原画上传上限（2000 MB），请选择较小的 MP4 视频。", 413);
   transaction(db, () => {
     const now = clock();
     db.prepare("DELETE FROM telegram_hot_video_uploads WHERE created_at<=?").run(now - UPLOAD_MS);
     if (db.prepare("SELECT 1 FROM telegram_hot_videos WHERE id=?").get(input.id) || db.prepare("SELECT 1 FROM telegram_hot_video_uploads WHERE id=?").get(input.id))
       throw new HotVideoError("上传编号已使用，请重新选择视频。", 409);
     if (Number((db.prepare("SELECT COUNT(*) AS n FROM telegram_hot_video_uploads").get() as { n: number }).n) >= 2) throw new HotVideoError("已有两个视频正在上传，请稍后再试。", 429);
-    if (Number((db.prepare("SELECT COUNT(*) AS n FROM telegram_hot_videos WHERE deleted_at=0").get() as { n: number }).n) >= 100
-      || storageBytes(db, now) + input.bytes > HOT_VIDEO_STORAGE_BYTES) throw new HotVideoError("视频空间已满，请先删除不再需要的视频。", 413);
+    if (Number((db.prepare("SELECT COUNT(*) AS n FROM telegram_hot_videos WHERE deleted_at=0").get() as { n: number }).n) >= 100) throw new HotVideoError("视频空间已满，请先删除不再需要的视频。", 413);
     const available = statfsSync(hotVideoStorageDirectory());
     const reservations = Number((db.prepare("SELECT COALESCE(SUM(bytes),0) AS n FROM telegram_hot_video_uploads").get() as { n: number }).n);
-    if (available.bavail * available.bsize < reservations + input.bytes + 64 * 1024 * 1024) throw new HotVideoError("服务器视频空间不足，请先删除部分视频。", 413);
+    if (available.bavail * available.bsize < reservations + input.bytes + HOT_VIDEO_FREE_BYTES) throw new HotVideoError("服务器视频空间不足，请先删除部分视频。", 413);
     db.prepare("INSERT INTO telegram_hot_video_uploads(id,bytes,created_at) VALUES(?,?,?)").run(input.id, input.bytes, now);
     onReserved?.(now);
   });
@@ -142,12 +146,12 @@ export function hotVideoStatus(db: DatabaseSync, clock = Date.now) {
   const unresolved = db.prepare(`SELECT last_error FROM telegram_hot_video_jobs WHERE target_chat_id=? AND token_hash=?
     AND status IN ('failed','unknown') AND last_error<>'' ORDER BY created_at DESC,id DESC LIMIT 1`).get(value.target_chat_id, value.token_hash) as { last_error: string } | undefined;
   const candidates = db.prepare("SELECT chat_id,title FROM telegram_join_gate_candidates WHERE token_hash=? ORDER BY verified_at DESC LIMIT 30").all(tokenHash) as { chat_id: number; title: string }[];
-  const target = value.target_chat_id || defaultTarget(db);
+  const target = value.target_chat_id || defaultTarget(db), usedBytes = storageBytes(db, now), availableBytes = hotVideoAvailableBytes(db, now);
   return { enabled: value.enabled === 1, targetChatId: target ? String(target) : "", targetTitle: value.target_title || "🔞365 Free Bonus Hot",
     intervalHours: value.interval_hours, nextRunAt: value.enabled && value.next_run_at ? value.next_run_at : null, revision: value.revision,
     ready: value.target_chat_id < 0 && value.verified_at > 0 && value.token_hash === tokenHash && !!cipher && !value.last_error,
     lastError: value.token_hash && value.token_hash !== tokenHash ? TOKEN_ERROR : value.last_error || unresolved?.last_error || "", lastCheckedAt: value.last_checked_at || null,
-    storage: { bytes: storageBytes(db, now), maxBytes: HOT_VIDEO_STORAGE_BYTES, maxVideoBytes: HOT_VIDEO_MAX_BYTES },
+    storage: { bytes: usedBytes, maxBytes: usedBytes + availableBytes, maxVideoBytes: HOT_VIDEO_MAX_BYTES, availableBytes },
     videos: videos.map(v => ({ id: v.id, title: v.title, originalName: v.original_name, bytes: v.bytes, active: v.active === 1, createdAt: v.created_at, lastSentAt: v.last_sent_at || null })),
     jobs: jobs.map(j => ({ id: j.id, videoId: j.video_id, title: j.title, kind: j.kind, runAt: j.run_at, status: j.status,
       attempts: j.attempts, lastError: j.last_error, sentAt: j.sent_at || null, messageId: j.message_id || null })), counts,
@@ -342,17 +346,32 @@ export async function deliverHotVideoOnce(decryptToken: DecryptToken, clock = Da
     if (verified.botId !== claim.job.bot_id) throw new HotVideoError(TARGET_ERROR, 409);
     const filename = await verifyVideoFile(claim.video);
     if (!allowed()) throw new HotVideoError(TARGET_ERROR, 409);
-    const ready = transaction(db, () => {
-      if (!allowed()) return false;
-      db.prepare("UPDATE telegram_hot_video_jobs SET dispatch_started_at=? WHERE id=? AND lease_id=?").run(clock(), claim.job.id, claim.lease);
-      db.prepare("UPDATE telegram_hot_video_settings SET target_title=?,verified_at=?,last_checked_at=? WHERE id='primary' AND lease_id=?")
-        .run(verified.title, clock(), clock(), claim.lease);
-      return true;
-    });
-    if (!ready) throw new HotVideoError(TARGET_ERROR, 409);
-    dispatched = true;
-    result = await telegramVideoFileRequest(token, { chat_id: claim.job.target_chat_id, supports_streaming: true,
-      reply_markup: { inline_keyboard: hotVideoKeyboard() } }, { path: filename, fileName: "hot-video.mp4", bytes: claim.video.bytes }).catch(() => null);
+    const markDispatch = () => {
+      const ready = transaction(db, () => {
+        if (!allowed()) return false;
+        db.prepare("UPDATE telegram_hot_video_jobs SET dispatch_started_at=? WHERE id=? AND lease_id=?").run(clock(), claim.job.id, claim.lease);
+        db.prepare("UPDATE telegram_hot_video_settings SET target_title=?,verified_at=?,last_checked_at=? WHERE id='primary' AND lease_id=?")
+          .run(verified.title, clock(), clock(), claim.lease);
+        return true;
+      });
+      if (!ready) throw new HotVideoError(TARGET_ERROR, 409);
+      dispatched = true;
+    };
+    if (claim.video.bytes > HOT_VIDEO_CLOUD_BYTES) {
+      const { sendLargeHotVideo } = await import("./telegram-hot-video-native");
+      const renew = () => transaction(db, () => {
+        if (!allowed()) throw new HotVideoError(TARGET_ERROR, 409);
+        const until = clock() + LEASE_MS;
+        db.prepare("UPDATE telegram_hot_video_settings SET lease_until=? WHERE id='primary' AND lease_id=?").run(until, claim.lease);
+        db.prepare("UPDATE telegram_hot_video_jobs SET lease_until=? WHERE id=? AND lease_id=? AND status='sending'").run(until, claim.job.id, claim.lease);
+      });
+      result = await sendLargeHotVideo({ db, token, botId: claim.job.bot_id, targetId: claim.job.target_chat_id,
+        filename, bytes: claim.video.bytes, jobId: claim.job.id, valid: allowed, renew, onDispatch: markDispatch });
+    } else {
+      markDispatch();
+      result = await telegramVideoFileRequest(token, { chat_id: claim.job.target_chat_id, supports_streaming: true,
+        reply_markup: { inline_keyboard: hotVideoKeyboard() } }, { path: filename, fileName: "hot-video.mp4", bytes: claim.video.bytes }).catch(() => null);
+    }
   } catch (error) {
     const safe = error instanceof HotVideoError ? error : new HotVideoError(FILE_ERROR, 409);
     transaction(db, () => {
@@ -387,12 +406,28 @@ const workers = globalThis as typeof globalThis & { telegramHotVideoWorkerStarte
 export function startTelegramHotVideoWorker(decryptToken: DecryptToken) {
   if (workers.telegramHotVideoWorkerStarted) return;
   workers.telegramHotVideoWorkerStarted = true;
-  let running = false, cleanedAt = 0;
+  let running = false, cleanedAt = 0, accessChecked = false;
   const tick = async () => {
     if (running) return;
     running = true;
     try {
       if (Date.now() - cleanedAt > UPLOAD_MS) { cleanupStorage(getSqlite(), Date.now()); cleanedAt = Date.now(); }
+      if (!accessChecked) {
+        accessChecked = true;
+        const db = getSqlite(), current = config(db), cipher = credential(db), now = Date.now();
+        // Check only when no publication is due; this cannot claim/reset jobs or change the six-hour plan.
+        if (current.enabled && current.lease_until <= now && current.next_run_at > now + 90_000 && current.bot_id > 0
+          && !db.prepare("SELECT 1 FROM telegram_hot_video_jobs WHERE status IN ('pending','sending') AND run_at<=? LIMIT 1").get(now + 90_000)) {
+          let ready = false;
+          try {
+            const { checkLargeHotVideoAccess } = await import("./telegram-hot-video-native");
+            ready = await checkLargeHotVideoAccess({ db, token: decryptToken(cipher), botId: current.bot_id, targetId: current.target_chat_id,
+              valid: () => credential(db) === cipher && config(db).revision === current.revision });
+          } catch { /* Only aggregate capability state is logged, never RPC errors or credentials. */ }
+          console.info("Telegram Hot large video capability.", JSON.stringify({ ready, availableMiB: Math.floor(hotVideoAvailableBytes(db) / 1048576),
+            maxVideoMiB: HOT_VIDEO_MAX_BYTES / 1048576, intervalHours: current.interval_hours, nextRunAt: current.next_run_at }));
+        }
+      }
       await deliverHotVideoOnce(decryptToken);
     } catch { /* No credentials, file paths or channel details enter process logs. */ }
     finally { running = false; }

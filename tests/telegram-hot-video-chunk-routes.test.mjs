@@ -13,7 +13,7 @@ function write(p,s){const dest=path.join(fixture,p);mkdirSync(path.dirname(dest)
 write('package.json','{"type":"commonjs"}');
 symlinkSync(fileURLToPath(new URL('../node_modules',import.meta.url)),path.join(fixture,'node_modules'),'dir');
 for(const name of ['app/api/admin/telegram/hot-videos/uploads/route','app/api/admin/telegram/hot-videos/uploads/[id]/route',
-  'app/api/admin/telegram/hot-videos/uploads/[id]/complete/route','app/api/admin/_security','app/lib/auth-core'])
+  'app/api/admin/telegram/hot-videos/uploads/[id]/complete/route','app/api/admin/_security','app/lib/auth-core','app/lib/telegram-hot-video-limits'])
   write(name+'.js',ts.transpileModule(readFileSync(new URL('../'+name+'.ts',import.meta.url),'utf8'),
     {compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS,esModuleInterop:true}}).outputText);
 write('app/chatgpt-auth.js','exports.authenticated=true;exports.getChatGPTUser=async()=>exports.authenticated?{username:"fixture"}:null;');
@@ -54,7 +54,7 @@ test('all chunk mutations reject foreign origins and forged fetch context before
   assert.deepEqual(service.calls,[]);
 });
 test('session start rejects malformed or excessive metadata and credential/caption fields',async()=>{
-  for(const body of ['{bad',new Uint8Array([255]),{...valid(),bytes:50*1024*1024+1},{...valid(),bytes:'24'},
+  for(const body of ['{bad',new Uint8Array([255]),{...valid(),bytes:2000*1024*1024+1},{...valid(),bytes:'24'},
     {...valid(),requestId:'not-a-uuid'},{...valid(),title:''},{...valid(),caption:'never send'}, {...valid(),token:'never accept'}])
     await check(await start.POST(request('POST',body)),400);
   await check(await start.POST(request('POST',valid(),{'content-length':'30001'})),413);
@@ -69,7 +69,7 @@ test('dynamic upload IDs and chunk offsets are validated before reading binary b
   const bad={params:Promise.resolve({id:'../../private'})};
   await check(await chunk.GET(request('GET'),bad),400);await check(await chunk.DELETE(request('DELETE'),bad),400);
   await check(await complete.POST(request('POST'),bad),400);
-  for(const offset of ['', '-1','1.5','01','100000000','NaN']){
+  for(const offset of ['', '-1','1.5','01','10000000000','NaN']){
     const req=request('PUT','bytes',{'content-type':'application/octet-stream','x-video-offset':offset});
     await check(await chunk.PUT(req,context()),400);assert.equal(req.bodyUsed,false);
   }
@@ -88,4 +88,9 @@ test('idempotent completion returns the current library only after storage final
   assert.equal(service.calls[0].name,'finalizeHotVideoUpload');assert.equal(service.calls[0].args[1],id);
   service.failure=new HotVideoError('上传还未完成。',409);
   assert.deepEqual(await check(await complete.POST(request('POST'),context()),409),{error:'上传还未完成。'});
+});
+
+test('chunk offset format supports positions above 100 MB and within the large-video range',async()=>{
+ const req=request('PUT','bytes',{'content-type':'application/octet-stream','x-video-offset':'125829120'});
+ await check(await chunk.PUT(req,context()),200);assert.equal(service.calls[0].args[2],125829120);
 });

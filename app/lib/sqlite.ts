@@ -12,7 +12,7 @@ export function getDataDirectory(): string {
 function migrate(db: DatabaseSync) {
   if (migrated.has(db)) return;
   const readVersion = () => (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
-  if (readVersion() < 30) {
+  if (readVersion() < 31) {
     db.exec("BEGIN IMMEDIATE");
     try {
       // Read again inside the write lock, so concurrent process starts cannot
@@ -548,6 +548,13 @@ function migrate(db: DatabaseSync) {
         );
         CREATE INDEX IF NOT EXISTS telegram_hot_video_upload_sessions_expiry ON telegram_hot_video_upload_sessions(state,updated_at,lease_until);
         PRAGMA user_version=30;
+      `);
+      if (version < 31) db.exec(`
+        CREATE TABLE IF NOT EXISTS telegram_hot_video_bot_sessions (
+          bot_id INTEGER PRIMARY KEY,token_hash TEXT NOT NULL,application_revision TEXT NOT NULL,
+          session_ciphertext TEXT NOT NULL,updated_at INTEGER NOT NULL
+        );
+        PRAGMA user_version=31;
       `);
       db.exec("COMMIT");
     } catch (error) { db.exec("ROLLBACK"); throw error; }
