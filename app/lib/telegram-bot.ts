@@ -103,7 +103,7 @@ export function telegramUpdates(token: string, offset: number) {
 
 /** The promotion bot owns a separate update stream from the private ChatBot. */
 export function telegramRelayUpdates(token: string, offset: number) {
-  return requestTelegram(token, "getUpdates", { offset, timeout: 10, limit: 20, allowed_updates: ["message", "channel_post", "my_chat_member"] }, asUpdates);
+  return requestTelegram(token, "getUpdates", { offset, timeout: 10, limit: 20, allowed_updates: ["message", "channel_post", "edited_message", "edited_channel_post", "my_chat_member"] }, asUpdates);
 }
 
 export async function answerTelegramCallback(token: string, queryId: string): Promise<boolean> {

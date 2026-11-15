@@ -16,7 +16,7 @@ for (const name of ['telegram-relay-content', 'telegram-bot']) {
   ).outputText);
 }
 const require = createRequire(import.meta.url);
-const { prepareRelayMessage, normalizeRelayCaptionEntities, inspectRelayDelivery, isRelayCustomEmojiId, relayKeyboard, RELAY_WEBSITE, RELAY_DEFAULT_TARGET } = require(path.join(fixture, 'telegram-relay-content.js'));
+const { prepareRelayMessage, normalizeRelayCaptionEntities, relayCaptionEntitiesMatch, inspectRelayDelivery, isRelayCustomEmojiId, relayKeyboard, RELAY_WEBSITE, RELAY_DEFAULT_TARGET } = require(path.join(fixture, 'telegram-relay-content.js'));
 const transport = require(path.join(fixture, 'telegram-bot.js'));
 const https = require('node:https');
 const now = 1_800_000_000_123;
@@ -235,11 +235,15 @@ test('delivery inspection verifies exact caption, original custom artwork, safe 
     {type:'url',offset:7,length:RELAY_WEBSITE.length},
   ];
   assert.deepEqual(inspectRelayDelivery(caption, entities, delivery(caption, entities)), {
-    captionMatches:true,customEmojiPreserved:true,linksSafe:true,buttonsMatch:true,
+    captionMatches:true,customEmojiPreserved:true,formattingPreserved:true,linksSafe:true,buttonsMatch:true,
   });
   assert.equal(inspectRelayDelivery(caption, entities, delivery(` ${caption}`, entities)).captionMatches, false);
+  const missingBold = inspectRelayDelivery(caption, entities, delivery(caption, entities.filter(entity => entity.type !== 'bold')));
+  assert.equal(missingBold.captionMatches, true);
+  assert.equal(missingBold.customEmojiPreserved, true);
+  assert.equal(missingBold.formattingPreserved, false);
   assert.deepEqual(inspectRelayDelivery(caption, entities, null), {
-    captionMatches:false,customEmojiPreserved:false,linksSafe:false,buttonsMatch:false,
+    captionMatches:false,customEmojiPreserved:false,formattingPreserved:false,linksSafe:false,buttonsMatch:false,
   });
 });
 
@@ -353,7 +357,7 @@ test('relay long polling stays separate while ChatBot also receives gate members
   const relay = await transport.telegramRelayUpdates('fixture-promotion-token', 17);
   const chat = await transport.telegramUpdates('fixture-chat-token', 23);
   assert.equal(relay.ok, true); assert.equal(chat.ok, true);
-  assert.deepEqual(calls[0].parameters, { offset: 17, timeout: 10, limit: 20, allowed_updates: ['message', 'channel_post', 'my_chat_member'] });
+  assert.deepEqual(calls[0].parameters, { offset: 17, timeout: 10, limit: 20, allowed_updates: ['message', 'channel_post', 'edited_message', 'edited_channel_post', 'my_chat_member'] });
   assert.deepEqual(calls[1].parameters, { offset: 23, timeout: 10, limit: 10, allowed_updates: ['chat_member', 'message', 'callback_query', 'chat_join_request', 'my_chat_member', 'channel_post'] });
   assert.ok(calls[0].path.startsWith('/botfixture-promotion-token/'));
   assert.ok(calls[1].path.startsWith('/botfixture-chat-token/'));
@@ -599,4 +603,33 @@ test('literal URL fallback never consumes an adjacent ordinary or custom emoji',
   const result=prepare(message({caption,caption_entities:[{type:'custom_emoji',offset:party,length:2,custom_emoji_id:'5368324170671202286'}]}));
   assert.equal(result.caption,`${RELAY_WEBSITE}🥳${RELAY_WEBSITE}🇲🇾➡Done`);
   assert.deepEqual(result.captionEntities.find(e=>e.type==='custom_emoji'),{type:'custom_emoji',offset:RELAY_WEBSITE.length,length:2,custom_emoji_id:'5368324170671202286'});
+});
+
+test('source caption comparison checks all formatting and custom emoji without depending on entity order',()=>{
+  const caption='⭐ Bonus now';
+  const entities=[{type:'custom_emoji',offset:0,length:1,custom_emoji_id:'-5368324170671202286'},
+    {type:'bold',offset:2,length:5},{type:'italic',offset:8,length:3}];
+  assert.equal(relayCaptionEntitiesMatch(caption,entities,entities.toReversed()),true);
+  for(const altered of [entities.slice(0,2),[entities[0],{type:'underline',offset:2,length:5},entities[2]],
+    [{...entities[0],custom_emoji_id:'5368324170671202286'},...entities.slice(1)],
+    [...entities,{type:'unknown',offset:2,length:1}], [...entities,entities[1]]]) {
+    assert.equal(relayCaptionEntitiesMatch(caption,entities,altered),false);
+  }
+  assert.equal(relayCaptionEntitiesMatch(caption,entities,entities.slice(1),{allowMissingCustomEmoji:true}),true);
+  assert.equal(relayCaptionEntitiesMatch(caption,entities,entities.slice(1)),false);
+  assert.equal(relayCaptionEntitiesMatch(caption,entities,[{...entities[0],custom_emoji_id:'5368324170671202286'},...entities.slice(1)],{allowMissingCustomEmoji:true}),false);
+});
+
+test('source caption comparison verifies rewritten link targets, pre language and formatted date metadata',()=>{
+  const caption=`code date ${RELAY_WEBSITE}`;
+  const entities=[{type:'pre',offset:0,length:4,language:'js'},
+    {type:'date_time',offset:5,length:4,unix_time:1800000000,date_time_format:'r'},
+    {type:'text_link',offset:10,length:RELAY_WEBSITE.length,url:RELAY_WEBSITE}];
+  assert.equal(relayCaptionEntitiesMatch(caption,entities,entities),true);
+  for(const altered of [
+    [{...entities[0],language:'py'},...entities.slice(1)],
+    [entities[0],{...entities[1],unix_time:1800000001},entities[2]],
+    [...entities.slice(0,2),{...entities[2],url:'https://source.example'}],
+    [...entities.slice(0,2),{...entities[2],length:caption.length}],
+  ]) assert.equal(relayCaptionEntitiesMatch(caption,entities,altered),false);
 });

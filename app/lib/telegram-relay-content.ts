@@ -178,9 +178,26 @@ export function normalizeRelayCaptionEntities(caption: string, values: unknown):
   return safeEntities(caption, normalized);
 }
 
+/** Compare every saved style and entity, independent of Telegram's entity order. */
+export function relayCaptionEntitiesMatch(caption: string, expected: unknown, actual: unknown,
+  options: { allowMissingCustomEmoji?: boolean } = {}): boolean {
+  if (!Array.isArray(expected) || !Array.isArray(actual) || expected.length > 1024 || actual.length > 1024) return false;
+  const wanted = normalizeRelayCaptionEntities(caption, expected), received = normalizeRelayCaptionEntities(caption, actual);
+  if (wanted.length !== expected.length || received.length !== actual.length) return false;
+  const key = (entity: RelayCaptionEntity) => JSON.stringify([entity.type, entity.offset, entity.length,
+    entity.custom_emoji_id ?? null, entity.url ?? null, entity.language || null, entity.unix_time ?? null, entity.date_time_format || null]);
+  const keys = (entities: RelayCaptionEntity[]) => entities.map(key).sort();
+  if (!options.allowMissingCustomEmoji) return JSON.stringify(keys(wanted)) === JSON.stringify(keys(received));
+  const nonCustom = (entities: RelayCaptionEntity[]) => entities.filter(entity => entity.type !== "custom_emoji");
+  if (JSON.stringify(keys(nonCustom(wanted))) !== JSON.stringify(keys(nonCustom(received)))) return false;
+  const custom = new Set(wanted.filter(entity => entity.type === "custom_emoji").map(key));
+  return received.filter(entity => entity.type === "custom_emoji").every(entity => custom.has(key(entity)));
+}
+
 export type RelayDeliveryInspection = {
   captionMatches: boolean;
   customEmojiPreserved: boolean;
+  formattingPreserved: boolean;
   linksSafe: boolean;
   buttonsMatch: boolean;
 };
@@ -227,6 +244,7 @@ export function inspectRelayDelivery(caption: string, expected: RelayCaptionEnti
   return {
     captionMatches: returnedCaption === caption,
     customEmojiPreserved: returnedCaption !== null && expectedCustomValid && actualCustomValid && JSON.stringify(expectedKeys) === JSON.stringify(actualKeys),
+    formattingPreserved: returnedCaption === caption && validList && relayCaptionEntitiesMatch(caption, expected, raw ?? []),
     linksSafe,
     buttonsMatch,
   };

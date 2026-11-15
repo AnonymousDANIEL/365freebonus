@@ -435,14 +435,15 @@ export default function TelegramGroupSettings({ request, signInPath }: AdminProp
                 onChange={event => setDraft({ ...draft, relay: { ...draft.relay, chatId: event.target.value } })} />
               <small>将 @FreeBonus365Bot 加入目标群并允许发送照片、视频和 GIF；频道需要管理员发布权限。此目标独立于上方品牌通知目标。</small>
             </label>
-            <small>仅处理开启后收到的照片／视频／GIF＋文案；纯文字、没有文案的媒体及禁止转发的内容会跳过。原文链接和原按钮会换成以下固定入口：</small>
+            <small>处理开启后识别到的照片／视频／GIF＋文案。来源先发媒体、之后才补文案时，会在后续检查发现后转发；已转发的来源再编辑文案，会更新目标原贴。纯文字及禁止转发的内容会跳过。原文链接和原按钮会换成以下固定入口：</small>
             <small>🌐 Visit website — https://365freebonus.com/</small>
             <small>🎁 365 Free Bonus Official — https://t.me/join365freebonus</small>
             <small>💬 NEED HELP? — https://t.me/FreeBonus365ChatBot</small>
+            <small>个人账号会轮询已追踪的媒体，检测后补或修改的文案；每个来源保留最近 512 条，所有来源合计最多 4,096 条。更新前未被追踪的历史媒体不会自动补发，Telegram 限流或队列忙碌时会延后检查。</small>
             <small>来源群需允许机器人接收普通消息：将机器人设为管理员，或在 BotFather 关闭 Group Privacy。其他机器人发出的消息还可能需要开启 Bot-to-Bot Communication Mode。</small>
             <small>不要同时为此机器人使用其他 Webhook 或轮询接收服务。系统会去重、限速，并忽略自己的消息和目标群消息。</small>
-            <small>按马来西亚日期（UTC+8）每天 00:00 重新计算媒体去重：同一天相同图片身份或内容会跳过，第二天新收到相同媒体可以再转发。文案相同不会单独去重，不同媒体仍可分别发送；纯文字或没有文案的媒体会跳过。当天记录在重新开启和重启后保留，历史消息不会在午夜自动重发；跨午夜仍在发送或结果未确认的请求会保留防重保护。</small>
-            <small>保留原文换行、文字格式和自定义 Emoji 资料；正文链接改为本站，按钮统一为下方三项。发送结果不符时，机器人对同一条消息补正一次。若仍缺少自定义表情，已连接个人账号具备 Premium 及该频道编辑权限时，可再编辑一次，并回读核对原媒体、文案、表情和三个按钮。每个通道最多编辑一次，不会重复转发；不具备权限或核验失败时后台会提示。超长文案或缺少原始格式资料的旧待发消息会停止发送。</small>
+            <small>按马来西亚日期（UTC+8）每天 00:00 重新计算媒体去重：同一天相同图片身份或内容会跳过，第二天新收到相同媒体可以再转发。文案相同不会单独去重，不同媒体仍可分别发送；纯文字不转发，未带文案的媒体暂不发送；后补文案仍须符合当天媒体去重。当天记录在重新开启和重启后保留，历史消息不会在午夜自动重发；跨午夜仍在发送或结果未确认的请求会保留防重保护。</small>
+            <small>保留原文换行、文字格式和自定义 Emoji 资料；正文链接改为本站，按钮统一为上方三项。初次发送不符时仍按原流程补正；来源的新文案版本会另行排队，编辑目标原贴，不会重复发送媒体。已连接个人账号须具备频道编辑权限；带自定义 Emoji 的版本另须 Premium。编辑后回读核对原媒体、文案、格式、表情及三个按钮；权限不足、目标文案或按钮被手动更改或结果无法确认时停止并提示。超长文案、缺少格式资料或未知发送结果不会强行重发。</small>
             <dl className="cms-telegram-counts" aria-label="群图片转发记录">
               {Object.entries(config.relay.counts).map(([key, count]) => <div key={key}><dt>{({ ...deliveryLabels, cancelled: "已取消" } as Record<string, string>)[key] || key}</dt><dd>{count}</dd></div>)}
               <div><dt>最近检查（MYT）</dt><dd>{config.relay.lastPolledAt === null ? "尚未检查" : pollTimeFormat.format(config.relay.lastPolledAt)}</dd></div>

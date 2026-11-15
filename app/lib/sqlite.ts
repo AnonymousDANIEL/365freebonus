@@ -12,7 +12,7 @@ export function getDataDirectory(): string {
 function migrate(db: DatabaseSync) {
   if (migrated.has(db)) return;
   const readVersion = () => (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
-  if (readVersion() < 26) {
+  if (readVersion() < 27) {
     db.exec("BEGIN IMMEDIATE");
     try {
       // Read again inside the write lock, so concurrent process starts cannot
@@ -471,6 +471,35 @@ function migrate(db: DatabaseSync) {
         CREATE INDEX IF NOT EXISTS telegram_join_gate_job_due ON telegram_join_gate_jobs(status,next_attempt_at);
         PRAGMA user_version=26;
       `);
+      if (version < 27) {
+        const columns = db.prepare("PRAGMA table_info(telegram_relay_outbox)").all() as { name: string }[];
+        if (!columns.some(column => column.name === "source_version")) db.exec("ALTER TABLE telegram_relay_outbox ADD COLUMN source_version INTEGER NOT NULL DEFAULT 0");
+        if (!columns.some(column => column.name === "source_content_hash")) db.exec("ALTER TABLE telegram_relay_outbox ADD COLUMN source_content_hash TEXT NOT NULL DEFAULT ''");
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS telegram_personal_source_posts (
+            source_chat_id INTEGER NOT NULL,source_message_id INTEGER NOT NULL,account_generation TEXT NOT NULL,
+            relay_revision TEXT NOT NULL,selected_at INTEGER NOT NULL,source_date INTEGER NOT NULL,
+            media_id_hash TEXT NOT NULL,revision_hash TEXT NOT NULL DEFAULT '',checked_at INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY(source_chat_id,source_message_id)
+          );
+          CREATE INDEX IF NOT EXISTS telegram_personal_source_posts_due ON telegram_personal_source_posts(source_chat_id,checked_at,source_message_id);
+          CREATE TABLE IF NOT EXISTS telegram_personal_source_scopes (
+            source_chat_id INTEGER PRIMARY KEY,account_generation TEXT NOT NULL,relay_revision TEXT NOT NULL,
+            selected_at INTEGER NOT NULL,bootstrapped_at INTEGER NOT NULL
+          );
+          CREATE TABLE IF NOT EXISTS telegram_relay_source_edits (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,outbox_id INTEGER NOT NULL REFERENCES telegram_relay_outbox(id),
+            source_version INTEGER NOT NULL,status TEXT NOT NULL DEFAULT 'pending',
+            caption TEXT NOT NULL,caption_entities TEXT NOT NULL,baseline_caption TEXT NOT NULL,baseline_entities TEXT NOT NULL,
+            attempted_at INTEGER NOT NULL DEFAULT 0,outcome TEXT NOT NULL DEFAULT '',lease_id TEXT NOT NULL DEFAULT '',
+            lease_until INTEGER NOT NULL DEFAULT 0,next_attempt_at INTEGER NOT NULL DEFAULT 0,created_at INTEGER NOT NULL,
+            last_error TEXT NOT NULL DEFAULT '',preflight_waits INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(outbox_id,source_version)
+          );
+          CREATE INDEX IF NOT EXISTS telegram_relay_source_edits_due ON telegram_relay_source_edits(status,next_attempt_at,id);
+          PRAGMA user_version=27;
+        `);
+      }
       db.exec("COMMIT");
     } catch (error) { db.exec("ROLLBACK"); throw error; }
   }

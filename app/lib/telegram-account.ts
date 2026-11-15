@@ -1,10 +1,10 @@
-import { createCipheriv, createDecipheriv, createHmac, randomBytes, randomUUID } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { Api, Logger, TelegramClient, utils } from "teleproto";
 import { StringSession } from "teleproto/sessions";
 import bigInt from "big-integer";
 import { getSqlite } from "./sqlite";
-import { inspectRelayDelivery, isRelayCustomEmojiId, normalizeRelayCaptionEntities, relayKeyboard, type RelayCaptionEntity } from "./telegram-relay-content";
+import { inspectRelayDelivery, isRelayCustomEmojiId, normalizeRelayCaptionEntities, relayCaptionEntitiesMatch, relayKeyboard, type RelayCaptionEntity } from "./telegram-relay-content";
 
 type Stage = "disconnected" | "code" | "password" | "connected";
 type AccountRow = {
@@ -15,6 +15,10 @@ type AccountRow = {
 type SourceRow = {
   chat_id: number; title: string; username: string; peer_ciphertext: string; selected: number;
   joined: number; selected_at: number; last_message_id: number; blocked: number;
+};
+type SourcePostRow = {
+  source_chat_id: number; source_message_id: number; account_generation: string; relay_revision: string;
+  selected_at: number; source_date: number; media_id_hash: string; revision_hash: string; checked_at: number;
 };
 type Credentials = { apiId: number; apiHash: string };
 type PendingLogin = Credentials & { phone: string; phoneCodeHash: string; session: string };
@@ -33,6 +37,8 @@ const REQUEST_MS = 25_000;
 const LOGIN_MS = 10 * 60_000;
 const REFRESH_MS = 5 * 60_000;
 const POLL_MS = 10_000;
+const SOURCE_RECHECK_MS = 30_000;
+const SOURCE_RECHECK_BATCH = 20;
 const RETRY_MS = 60_000;
 const MAX_PHOTO = 10 * 1024 * 1024;
 const MAX_ANIMATION = 20 * 1024 * 1024;
@@ -120,6 +126,11 @@ function cancelSourceQueue(db: DatabaseSync, sourceId?: number) {
   const statement = db.prepare(`UPDATE telegram_relay_outbox SET status='cancelled',lease_id='',lease_until=0,
     last_error='',media_bytes=NULL WHERE origin='account' AND status='pending'${filter}`);
   if (sourceId === undefined) statement.run(); else statement.run(sourceId);
+  const edits = db.prepare(`UPDATE telegram_relay_source_edits SET status='superseded',outcome='source_inactive'
+    WHERE status='pending' AND outbox_id IN(SELECT id FROM telegram_relay_outbox WHERE origin='account'${filter})`);
+  if (sourceId === undefined) edits.run(); else edits.run(sourceId);
+  if (sourceId === undefined) db.prepare("DELETE FROM telegram_personal_source_posts").run();
+  else db.prepare("DELETE FROM telegram_personal_source_posts WHERE source_chat_id=?").run(sourceId);
 }
 
 export function accountStatus() {
@@ -468,8 +479,8 @@ function ownButtons(message: Api.Message) {
   const urls = message.replyMarkup.rows.flatMap(buttonRow => buttonRow.buttons.flatMap(button => button.type instanceof Api.InlineButtonTypeUrl ? [button.type.url.toLowerCase().replace(/\/$/, "")] : []));
   return ["https://365freebonus.com", "https://t.me/join365freebonus", "https://t.me/freebonus365chatbot"].every(url => urls.includes(url));
 }
-function eligibleMedia(message: Api.Message, protectedChannel: boolean, botId: number) {
-  if (protectedChannel || message.noforwards || !message.message?.trim() || message.message.length > 16_384 || ownButtons(message)) return null;
+function eligibleMedia(message: Api.Message, protectedChannel: boolean, botId: number, requireCaption = true) {
+  if (protectedChannel || message.noforwards || requireCaption && !message.message?.trim() || (message.message || "").length > 16_384 || ownButtons(message)) return null;
   if (message.viaBotId?.toString() === String(botId) || message.senderId?.toString() === String(botId)) return null;
   // Getter message.photo/document also exposes web-page preview media. Only
   // actual attached photo/video/GIF posts qualify for this relay.
@@ -486,6 +497,56 @@ function eligibleMedia(message: Api.Message, protectedChannel: boolean, botId: n
     return { mediaKind: "video" as const, mediaId: `video-${document.id}`, max: MAX_VIDEO, mimeType: document.mimeType.toLowerCase() };
   }
   return null;
+}
+
+function sourceMediaHash(mediaId: string) { return createHash("sha256").update(mediaId).digest("hex"); }
+function sourcePostHash(message: Api.Message, mediaId: string) {
+  // editDate has second precision and Telegram may change entities without
+  // changing its value. Compare complete content snapshots instead.
+  return createHash("sha256").update(JSON.stringify([message.message || "", captionEntities(message.entities, true),
+    (message.entities || []).map(entity => entity.className), mediaId, message.groupedId?.toString() || "",
+    (message.media instanceof Api.MessageMediaPhoto || message.media instanceof Api.MessageMediaDocument) && message.media.spoiler === true])).digest("hex");
+}
+function pruneSourcePosts(db: DatabaseSync, generation: string, revision: string) {
+  db.prepare(`DELETE FROM telegram_personal_source_posts WHERE account_generation<>? OR relay_revision<>?
+    OR NOT EXISTS(SELECT 1 FROM telegram_personal_sources s WHERE s.chat_id=source_chat_id
+      AND s.selected=1 AND s.joined=1 AND s.blocked=0 AND s.selected_at=telegram_personal_source_posts.selected_at)`).run(generation, revision);
+  db.exec(`DELETE FROM telegram_personal_source_posts WHERE rowid IN (
+    SELECT rowid FROM (SELECT rowid,ROW_NUMBER() OVER(PARTITION BY source_chat_id ORDER BY source_message_id DESC) AS position
+      FROM telegram_personal_source_posts) WHERE position>512);
+    DELETE FROM telegram_personal_source_posts WHERE rowid IN (
+      SELECT rowid FROM telegram_personal_source_posts ORDER BY source_date DESC,source_chat_id,source_message_id DESC LIMIT -1 OFFSET 4096);`);
+}
+function rememberSourcePost(db: DatabaseSync, source: SourceRow, message: Api.Message, mediaId: string,
+  generation: string, revision: string, acceptedHash = "") {
+  db.prepare(`INSERT INTO telegram_personal_source_posts(source_chat_id,source_message_id,account_generation,relay_revision,
+    selected_at,source_date,media_id_hash,revision_hash,checked_at) VALUES(?,?,?,?,?,?,?,?,?)
+    ON CONFLICT(source_chat_id,source_message_id) DO NOTHING`).run(source.chat_id, message.id, generation, revision,
+    source.selected_at, message.date, sourceMediaHash(mediaId), acceptedHash, Date.now());
+  pruneSourcePosts(db, generation, revision);
+}
+function bootstrapSourcePosts(db: DatabaseSync, source: SourceRow, generation: string, revision: string) {
+  const previous = db.prepare("SELECT account_generation,relay_revision,selected_at FROM telegram_personal_source_scopes WHERE source_chat_id=?")
+    .get(source.chat_id) as { account_generation: string; relay_revision: string; selected_at: number } | undefined;
+  if (previous?.account_generation === generation && previous.relay_revision === revision && previous.selected_at === source.selected_at) return;
+  // Upgrade only already delivered, positively identified account posts. Never
+  // discover arbitrary historical IDs or rearm a removed/protected watch.
+  transaction(db, () => {
+    db.prepare(`INSERT INTO telegram_personal_source_scopes(source_chat_id,account_generation,relay_revision,selected_at,bootstrapped_at)
+      VALUES(?,?,?,?,?) ON CONFLICT(source_chat_id) DO UPDATE SET account_generation=excluded.account_generation,
+      relay_revision=excluded.relay_revision,selected_at=excluded.selected_at,bootstrapped_at=excluded.bootstrapped_at`)
+      .run(source.chat_id, generation, revision, source.selected_at, Date.now());
+    const posts = db.prepare(`SELECT source_message_id,file_unique_id FROM telegram_relay_outbox WHERE source_chat_id=?
+      AND origin='account' AND account_generation=? AND revision=? AND queued_at>=? AND status='sent'
+      AND typeof(message_id)='integer' AND message_id BETWEEN 1 AND 2147483647
+      AND media_kind IN ('photo','video','animation') ORDER BY source_message_id DESC LIMIT 512`)
+      .all(source.chat_id, generation, revision, source.selected_at) as { source_message_id: number; file_unique_id: string }[];
+    const insert = db.prepare(`INSERT OR IGNORE INTO telegram_personal_source_posts(source_chat_id,source_message_id,
+      account_generation,relay_revision,selected_at,source_date,media_id_hash,revision_hash,checked_at) VALUES(?,?,?,?,?,0,?,'',0)`);
+    for (const post of posts) if (Number.isSafeInteger(post.source_message_id) && post.source_message_id > 0 && /^[a-f0-9]{64}$/.test(post.file_unique_id))
+      insert.run(source.chat_id, post.source_message_id, generation, revision, source.selected_at, post.file_unique_id);
+    pruneSourcePosts(db, generation, revision);
+  });
 }
 
 type SourceEmojiSample = {
@@ -757,6 +818,7 @@ export async function inspectBlockedRelayCaptionPreflights(): Promise<{
 
 type VerifiedCaptionInput = {
   targetChatId: number; relayRevision: string; messageId: number; caption: string; captionEntities: RelayCaptionEntity[];
+  sourceEdit?: { id: number; version: number; leaseId: string; expectedCaption: string; expectedCaptionEntities: RelayCaptionEntity[] };
 };
 type AccountCaptionRecheck = Omit<AccountCaptionEdit, "outcome" | "attempted"> & {
   attempted: false; outcome: "ready" | "preserved" | "invalid" | "unavailable" | "rejected";
@@ -785,6 +847,14 @@ async function runVerifiedRelayCaptionWithAccount(input: VerifiedCaptionInput,
     || typeof input.caption !== "string" || !input.caption.trim() || input.caption.length > 1024
     || !Array.isArray(input.captionEntities) || input.captionEntities.length > 1024) return invalid("input_invalid");
   const expected = normalizeRelayCaptionEntities(input.caption, input.captionEntities);
+  const sourceEdit = input.sourceEdit;
+  const baselineCaption = sourceEdit?.expectedCaption ?? input.caption;
+  const baselineEntities = sourceEdit?.expectedCaptionEntities ?? expected;
+  if (sourceEdit && (!Number.isSafeInteger(sourceEdit.id) || sourceEdit.id <= 0
+    || !Number.isSafeInteger(sourceEdit.version) || sourceEdit.version <= 0 || !sourceEdit.leaseId
+    || typeof baselineCaption !== "string" || !baselineCaption.trim() || baselineCaption.length > 1024
+    || !relayCaptionEntitiesMatch(baselineCaption, baselineEntities, baselineEntities))) return invalid("input_invalid");
+  const requiresPremium = !sourceEdit || [...expected, ...baselineEntities].some(entity => entity.type === "custom_emoji");
   const entities = expected.length === input.captionEntities.length ? editableCaptionEntities(expected) : null;
   const prepared = inspectRelayDelivery(input.caption, expected,
     { caption: input.caption, caption_entities: expected, reply_markup: { inline_keyboard: relayKeyboard() } });
@@ -805,28 +875,64 @@ async function runVerifiedRelayCaptionWithAccount(input: VerifiedCaptionInput,
       send_lease_id: string; send_lease_until: number;
     } | undefined;
   type EditReference = { id: number; caption: string; caption_entities: string; lease_id: string; lease_until: number; caption_edit_outcome: string;
-    origin: string; account_generation: string; queued_at: number; source_chat_id: number };
-  const references = () => db.prepare(`SELECT id,caption,caption_entities,lease_id,lease_until,caption_edit_outcome,origin,account_generation,queued_at,source_chat_id
+    origin: string; account_generation: string; queued_at: number; source_chat_id: number; source_message_id: number; source_version: number; last_error: string; caption_edit_attempted_at: number };
+  const references = () => db.prepare(`SELECT id,caption,caption_entities,lease_id,lease_until,caption_edit_outcome,origin,account_generation,queued_at,source_chat_id,source_message_id,source_version,last_error,caption_edit_attempted_at
     FROM telegram_relay_outbox WHERE status='sent' AND revision=? AND message_id=? LIMIT 2`)
     .all(input.relayRevision, input.messageId) as EditReference[];
   const settings = configuration(), target = runtime(), storedReferences = references();
   const reference = storedReferences.length === 1 ? storedReferences[0] : undefined;
+  type SourceEditReference = { id: number; outbox_id: number; source_version: number; status: string; outcome: string;
+    caption: string; caption_entities: string; baseline_caption: string; baseline_entities: string;
+    attempted_at: number; lease_id: string; lease_until: number };
+  const sourceReference = () => sourceEdit ? db.prepare(`SELECT id,outbox_id,source_version,status,outcome,caption,caption_entities,
+    baseline_caption,baseline_entities,attempted_at,lease_id,lease_until FROM telegram_relay_source_edits WHERE id=?`).get(sourceEdit.id) as SourceEditReference | undefined : undefined;
+  const originalSourceEdit = sourceReference();
+  const sourceEditMatches = (value: SourceEditReference | undefined) => {
+    if (!sourceEdit) return true;
+    try { return !!value && !!reference && !!originalSourceEdit
+      && value.outbox_id === reference.id && value.source_version === sourceEdit.version && value.status === "attempting"
+      && value.outcome === "account_attempting" && value.attempted_at > 0 && value.attempted_at <= Date.now()
+      && value.attempted_at === originalSourceEdit.attempted_at && value.caption_entities === originalSourceEdit.caption_entities
+      && value.baseline_entities === originalSourceEdit.baseline_entities
+      && value.lease_id === sourceEdit.leaseId && value.lease_until > Date.now()
+      && value.caption === input.caption && value.baseline_caption === baselineCaption
+      && relayCaptionEntitiesMatch(input.caption, expected, JSON.parse(value.caption_entities))
+      && relayCaptionEntitiesMatch(baselineCaption, baselineEntities, JSON.parse(value.baseline_entities));
+    } catch { return false; }
+  };
+  const activeLeaseId = sourceEdit?.leaseId ?? reference?.lease_id;
   const sourceAllowed = (value: EditReference) => value.origin !== "account" || value.account_generation === current.generation
     && Boolean(db.prepare(`SELECT 1 FROM telegram_personal_sources WHERE chat_id=? AND selected=1 AND joined=1
-      AND blocked=0 AND selected_at<=?`).get(value.source_chat_id, value.queued_at));
+      AND blocked=0 AND selected_at<=?`).get(value.source_chat_id, value.queued_at))
+    && (!sourceEdit || Boolean(db.prepare(`SELECT 1 FROM telegram_personal_source_posts w,telegram_personal_sources s
+      WHERE w.source_chat_id=? AND w.source_message_id=? AND w.account_generation=? AND w.relay_revision=?
+      AND s.chat_id=w.source_chat_id AND s.selected_at=w.selected_at`).get(value.source_chat_id, value.source_message_id, current.generation, input.relayRevision)));
+  // A known delivery/repair failure can have stripped custom entities. This
+  // exception permits only a subset of the exact expected custom IDs; all text,
+  // styles, links and buttons must still match the immutable baseline.
+  const allowMissingBaselineCustom = !sourceEdit || reference?.last_error === "Telegram 未保留部分原始自定义 Emoji，请检查机器人的自定义 Emoji 使用权限。该消息不会自动重发。"
+    || Number(reference?.caption_edit_attempted_at) > 0 && [
+      "Telegram 拒绝补正文案或按钮，请检查机器人权限及原消息格式；不会重复发送媒体。",
+      "个人账号备用补正当前不可用，请检查本人账号连接和编辑权限；原媒体不会重复发送。",
+      "个人账号未能补正原始自定义 Emoji，请检查本人账号权限；不会重新发送媒体。",
+      "个人账号备用补正结果未能确认，已停止自动重试；不会重新发送媒体。",
+    ].includes(reference?.last_error || "");
   const publicTarget = settings?.relay_chat_id.match(/^(?:@([A-Za-z][A-Za-z0-9_]{3,31})|https:\/\/t\.me\/([A-Za-z][A-Za-z0-9_]{3,31})\/?)$/);
   const username = publicTarget?.[1] || publicTarget?.[2];
   if (!settings || settings.relay_enabled !== 1 || settings.relay_revision !== input.relayRevision || !settings.token_ciphertext || !username
     || !target || target.target_chat_id !== input.targetChatId || target.revision !== input.relayRevision
     || !Number.isSafeInteger(target.bot_id) || target.bot_id <= 0 || target.target_verified_at <= 0 || target.target_verified_at > now
-    || target.ready_until <= now || !reference || reference.caption !== input.caption || reference.caption_edit_outcome !== phase
-    || !reference.lease_id || reference.lease_until <= now || target.send_lease_id !== reference.lease_id || target.send_lease_until <= now
+    || target.ready_until <= now || !reference || reference.caption !== baselineCaption
+    || !sourceEdit && (reference.caption_edit_outcome !== phase || !reference.lease_id || reference.lease_until <= now)
+    || sourceEdit && (phase !== "account_attempting" || reference.source_version !== sourceEdit.version || !sourceEditMatches(originalSourceEdit))
+    || !activeLeaseId || target.send_lease_id !== activeLeaseId || target.send_lease_until <= now
     || !sourceAllowed(reference)) return unavailable();
   try {
     const storedEntities: unknown = JSON.parse(reference.caption_entities);
     const normalized = normalizeRelayCaptionEntities(reference.caption, storedEntities);
     if (!Array.isArray(storedEntities) || normalized.length !== storedEntities.length) return invalid("stored_entities_invalid");
-    if (JSON.stringify(normalized) !== JSON.stringify(expected)) return invalid("stored_entities_mismatch");
+    if (sourceEdit ? !relayCaptionEntitiesMatch(baselineCaption, baselineEntities, normalized)
+      : JSON.stringify(normalized) !== JSON.stringify(expected)) return invalid("stored_entities_mismatch");
   } catch { return invalid("stored_entities_invalid"); }
   let claim: Claim;
   try { claim = claimAccount(db, Date.now(), { connected: true, respectBackoff: true }); }
@@ -848,9 +954,12 @@ async function runVerifiedRelayCaptionWithAccount(input: VerifiedCaptionInput,
       && latest.relay_revision === settings.relay_revision && latest.token_ciphertext === settings.token_ciphertext
       && latestTarget?.target_chat_id === input.targetChatId && latestTarget.bot_id === target.bot_id
       && latestTarget.revision === input.relayRevision && latestTarget.target_verified_at > 0 && latestTarget.target_verified_at <= Date.now()
-      && latestTarget.ready_until > Date.now() && latestTarget.send_lease_id === reference.lease_id && latestTarget.send_lease_until > Date.now()
-      && latestReference?.id === reference.id && latestReference.caption === input.caption && latestReference.caption_entities === reference.caption_entities
-      && latestReference.caption_edit_outcome === phase && latestReference.lease_id === reference.lease_id && latestReference.lease_until > Date.now()
+      && latestTarget.ready_until > Date.now() && latestTarget.send_lease_id === activeLeaseId && latestTarget.send_lease_until > Date.now()
+      && latestReference?.id === reference.id && latestReference.caption === baselineCaption && latestReference.caption_entities === reference.caption_entities
+      && (sourceEdit ? sourceEditMatches(sourceReference())
+        && (attempted || latestReference.source_version === sourceEdit.version)
+        : latestReference.caption_edit_outcome === phase && latestReference.lease_id === reference.lease_id
+          && latestReference.lease_until > Date.now() && latestReference.source_version === reference.source_version)
       && latestReference.origin === reference.origin && latestReference.account_generation === reference.account_generation
       && latestReference.queued_at === reference.queued_at && latestReference.source_chat_id === reference.source_chat_id && sourceAllowed(latestReference);
   };
@@ -878,7 +987,7 @@ async function runVerifiedRelayCaptionWithAccount(input: VerifiedCaptionInput,
     renew(db, claim);
     const me = await bounded(client, client.getMe(), remaining());
     if (!allowed()) return unavailable();
-    if (!(me instanceof Api.User) || me.bot || me.deleted || me.min || me.premium !== true) return { state: "ok", attempted: false, outcome: "rejected", reason: "account_unqualified" };
+    if (!(me instanceof Api.User) || me.bot || me.deleted || me.min || requiresPremium && me.premium !== true) return { state: "ok", attempted: false, outcome: "rejected", reason: "account_unqualified" };
     renew(db, claim);
     let originalMedia: string | null = null;
     let failure: RelayCaptionPreflightReason = "message_not_found";
@@ -897,7 +1006,7 @@ async function runVerifiedRelayCaptionWithAccount(input: VerifiedCaptionInput,
         renew(db, claim);
         const owner = await bounded(client, client.getMe(), remaining());
         if (!allowed()) return unavailable();
-        if (!(owner instanceof Api.User) || owner.bot || owner.deleted || owner.min || owner.premium !== true) return { state: "ok", attempted: false, outcome: "rejected", reason: "account_unqualified" };
+        if (!(owner instanceof Api.User) || owner.bot || owner.deleted || owner.min || requiresPremium && owner.premium !== true) return { state: "ok", attempted: false, outcome: "rejected", reason: "account_unqualified" };
         renew(db, claim);
       }
       const before = await bounded(client, client.getMessages(entity, { ids: [input.messageId], limit: 1 }), remaining());
@@ -911,12 +1020,19 @@ async function runVerifiedRelayCaptionWithAccount(input: VerifiedCaptionInput,
         if (!media) failure = "media_invalid";
         else if (!original) failure = "actual_entities_unsupported";
         else {
-          const verified = inspectRelayDelivery(input.caption, expected, original);
+          if (sourceEdit) {
+            const desired = inspectRelayDelivery(input.caption, expected, original);
+            if (desired.captionMatches && desired.customEmojiPreserved && desired.linksSafe && desired.buttonsMatch
+              && relayCaptionEntitiesMatch(input.caption, expected, original.caption_entities)) return { state: "ok", attempted: false, outcome: "preserved" };
+          }
+          const verified = inspectRelayDelivery(baselineCaption, baselineEntities, original);
           if (!verified.captionMatches) failure = "caption_mismatch";
           else if (!verified.linksSafe) failure = "actual_links_unsafe";
           else if (!verified.buttonsMatch) failure = "buttons_mismatch";
+          else if (!relayCaptionEntitiesMatch(baselineCaption, baselineEntities, original.caption_entities,
+            { allowMissingCustomEmoji: allowMissingBaselineCustom })) failure = "stored_entities_mismatch";
           else {
-            if (verified.customEmojiPreserved) return { state: "ok", attempted: false, outcome: "preserved" };
+            if (!sourceEdit && verified.customEmojiPreserved && verified.formattingPreserved) return { state: "ok", attempted: false, outcome: "preserved" };
             originalMedia = media;
             break;
           }
@@ -955,7 +1071,7 @@ async function runVerifiedRelayCaptionWithAccount(input: VerifiedCaptionInput,
         renew(db, claim);
         const owner = await bounded(client, client.getMe(), remaining());
         if (!allowed()) return unavailable();
-        if (!(owner instanceof Api.User) || owner.bot || owner.deleted || owner.min || owner.premium !== true) return { state: "ok", attempted: true, outcome: "uncertain" };
+        if (!(owner instanceof Api.User) || owner.bot || owner.deleted || owner.min || requiresPremium && owner.premium !== true) return { state: "ok", attempted: true, outcome: "uncertain" };
         renew(db, claim);
         const after = await bounded(client, client.getMessages(entity, { ids: [input.messageId], limit: 1 }), remaining());
         if (!allowed()) return unavailable();
@@ -966,7 +1082,8 @@ async function runVerifiedRelayCaptionWithAccount(input: VerifiedCaptionInput,
         const actual = relayDeliveryMessage(after[0]);
         if (actual) {
           const inspected = inspectRelayDelivery(input.caption, expected, actual);
-          if (inspected.captionMatches && inspected.customEmojiPreserved && inspected.linksSafe && inspected.buttonsMatch)
+          if (inspected.captionMatches && inspected.customEmojiPreserved && inspected.formattingPreserved && inspected.linksSafe && inspected.buttonsMatch
+            && (!sourceEdit || relayCaptionEntitiesMatch(input.caption, expected, actual.caption_entities)))
             return { state: "ok", attempted: true, outcome: "preserved" };
         }
         readOutcome = "changed";
@@ -1256,6 +1373,11 @@ export async function pollTelegramAccountOnce() {
   const target = db.prepare("SELECT target_chat_id,ready_until,bot_id,revision FROM telegram_relay_state WHERE id='primary'").get() as { target_chat_id: number; ready_until: number; bot_id: number; revision: string } | undefined;
   const ready = relay?.relay_enabled === 1 && target && target.ready_until > Date.now() && target.revision === relay.relay_revision && target.target_chat_id < 0;
   const repairNow = Date.now();
+  // The source-caption worker also needs this account. Yield only to a due,
+  // actionable version so regular receive polling cannot consume its retries.
+  if (ready && db.prepare(`SELECT 1 FROM telegram_relay_source_edits e JOIN telegram_relay_outbox o ON o.id=e.outbox_id
+    WHERE e.status='pending' AND e.next_attempt_at<=? AND e.source_version=o.source_version
+    AND o.status='sent' AND o.message_id>0 AND o.revision=? LIMIT 1`).get(repairNow, relay.relay_revision)) return;
   // Give a due caption repair the account lease first. No current poll is
   // interrupted, and future/backed-off or terminal repairs cannot starve receive.
   if (ready && db.prepare(`SELECT 1 FROM telegram_relay_outbox WHERE status='sent' AND revision=? AND message_id>0
@@ -1289,52 +1411,120 @@ export async function pollTelegramAccountOnce() {
     if (!(entity instanceof Api.Channel) || !entity.broadcast || entity.left) throw Object.assign(new Error(), { errorMessage: "CHANNEL_PRIVATE" });
     transaction(db, () => {
       db.prepare("UPDATE telegram_personal_sources SET blocked=? WHERE chat_id=?").run(Number(entity.noforwards === true), selected.chat_id);
-      if (entity.noforwards) cancelSourceQueue(db, selected.chat_id);
+      if (entity.noforwards || peer.protected) {
+        cancelSourceQueue(db, selected.chat_id);
+        db.prepare("DELETE FROM telegram_personal_source_posts WHERE source_chat_id=?").run(selected.chat_id);
+      }
+      pruneSourcePosts(db, claim.row.generation, relay.relay_revision);
+      if (!entity.noforwards && !peer.protected) bootstrapSourcePosts(db, selected, claim.row.generation, relay.relay_revision);
     });
-    const iterator = client.iterMessages(peer.input, { minId: selected.last_message_id, reverse: true, limit: 20 })[Symbol.asyncIterator]();
     const pollDeadline = Date.now() + 40_000;
+    const remaining = () => Math.max(1, Math.min(REQUEST_MS, pollDeadline - Date.now()));
+    const sourceActive = () => Date.now() < pollDeadline && owns(db, claim)
+      && Boolean(db.prepare(`SELECT 1 FROM telegram_personal_sources s,telegram_promotion_settings p
+        WHERE s.chat_id=? AND s.selected=1 AND s.joined=1 AND s.blocked=0 AND s.selected_at=?
+        AND p.id='primary' AND p.relay_enabled=1 AND p.relay_revision=?`).get(selected.chat_id, selected.selected_at, relay.relay_revision));
+    let recheckDownloads = 0;
+    const consume = async (message: Api.Message, media: NonNullable<ReturnType<typeof eligibleMedia>>, rechecking = false) => {
+      if (!sourceActive()) return false;
+      if (!message.message?.trim()) return true;
+      const { enqueuePersonalRelayMedia, observeRelaySourceCaption } = await import("./telegram-relay");
+      const known = db.prepare("SELECT 1 FROM telegram_relay_outbox WHERE source_chat_id=? AND source_message_id=?")
+        .get(selected.chat_id, message.id);
+      if (known) return observeRelaySourceCaption({ sourceChatId: selected.chat_id, sourceMessageId: message.id,
+        sourceDate: message.date, mediaKind: media.mediaKind, sourceMediaId: media.mediaId,
+        caption: message.message, captionEntities: captionEntities(message.entities),
+        expectedCustomEmojiCount: (message.entities || []).filter(entity => entity.className === "MessageEntityCustomEmoji").length,
+        origin: "account", accountGeneration: claim.row.generation, relayRevision: relay.relay_revision });
+      if (rechecking && recheckDownloads++ >= 1) return false;
+      renew(db, claim);
+      let bytes: string | Buffer | undefined;
+      try {
+        bytes = await bounded(client!, client!.downloadMedia(message, {
+          signal: AbortSignal.timeout(remaining()), requestTimeout: remaining(),
+          progressCallback: (downloaded, total) => {
+            if (Number(downloaded.toString()) > media.max || Number(total.toString()) > media.max) throw new OversizeMediaError();
+          },
+        }), remaining());
+      } catch (error) { if (error instanceof OversizeMediaError) return true; throw error; }
+      renew(db, claim);
+      if (Buffer.isBuffer(bytes) && bytes.length > media.max) return true;
+      if (!Buffer.isBuffer(bytes) || bytes.length === 0) throw new TelegramAccountError(TEMP_ERROR, 502);
+      if (!sourceActive()) return false;
+      const consumed = await enqueuePersonalRelayMedia({ sourceChatId: selected.chat_id, sourceMessageId: message.id,
+        sourceDate: message.date, relayRevision: relay.relay_revision,
+        mediaGroupId: message.groupedId?.toString() || "", caption: message.message, captionEntities: captionEntities(message.entities),
+        expectedCustomEmojiCount: (message.entities || []).filter(entity => entity.className === "MessageEntityCustomEmoji").length,
+        mediaKind: media.mediaKind, bytes, hasSpoiler: (message.media instanceof Api.MessageMediaPhoto || message.media instanceof Api.MessageMediaDocument) && message.media.spoiler === true,
+        sourceMediaId: media.mediaId, accountGeneration: claim.row.generation,
+        ...(media.mediaKind === "video" ? { mimeType: media.mimeType } : {}) });
+      renew(db, claim);
+      return consumed;
+    };
+    const acceptSnapshot = (message: Api.Message, mediaId: string) => db.prepare(`UPDATE telegram_personal_source_posts
+      SET revision_hash=?,checked_at=? WHERE source_chat_id=? AND source_message_id=? AND account_generation=? AND relay_revision=? AND selected_at=?`)
+      .run(sourcePostHash(message, mediaId), Date.now(), selected.chat_id, message.id, claim.row.generation, relay.relay_revision, selected.selected_at);
+    // Re-read only posts already observed after this source was selected. A
+    // bounded oldest-checked rotation also finds late captions and same-second
+    // caption/entity edits, without scanning channel history or replaying media.
+    if (sourceActive()) {
+      const watched = db.prepare(`SELECT * FROM telegram_personal_source_posts WHERE source_chat_id=?
+        AND account_generation=? AND relay_revision=? AND selected_at=? AND checked_at<=?
+        ORDER BY checked_at,source_message_id LIMIT ?`).all(selected.chat_id, claim.row.generation, relay.relay_revision,
+        selected.selected_at, Date.now() - SOURCE_RECHECK_MS, SOURCE_RECHECK_BATCH) as SourcePostRow[];
+      if (watched.length) {
+        renew(db, claim);
+        const snapshots = await bounded(client, client.getMessages(peer.input, { ids: watched.map(post => post.source_message_id), limit: SOURCE_RECHECK_BATCH }), remaining());
+        renew(db, claim);
+        for (const post of watched) {
+          if (!sourceActive()) break;
+          db.prepare("UPDATE telegram_personal_source_posts SET checked_at=? WHERE source_chat_id=? AND source_message_id=?")
+            .run(Date.now(), post.source_chat_id, post.source_message_id);
+          const matches = snapshots.filter(message => message instanceof Api.Message && message.id === post.source_message_id);
+          const message = matches.length === 1 ? matches[0] : undefined;
+          const media = message && eligibleMedia(message, entity.noforwards === true || peer.protected, target.bot_id, false);
+          if (!message || !message.peerId || Number(utils.getPeerId(message.peerId)) !== selected.chat_id
+            || !Number.isSafeInteger(message.date) || message.date * 1000 > Date.now() + 1000
+            || message.date * 1000 < Math.floor(Math.max(selected.selected_at, relay.relay_started_at) / 1000) * 1000
+            || post.source_date !== 0 && message.date !== post.source_date || !media || sourceMediaHash(media.mediaId) !== post.media_id_hash) {
+            transaction(db, () => {
+              db.prepare(`UPDATE telegram_relay_source_edits SET status='superseded',outcome='source_inactive'
+                WHERE status='pending' AND outbox_id IN(SELECT id FROM telegram_relay_outbox WHERE origin='account'
+                  AND source_chat_id=? AND source_message_id=?)`).run(post.source_chat_id, post.source_message_id);
+              db.prepare(`UPDATE telegram_relay_outbox SET status='cancelled',media_bytes=NULL,last_error=''
+                WHERE origin='account' AND status='pending' AND source_chat_id=? AND source_message_id=?`)
+                .run(post.source_chat_id, post.source_message_id);
+              db.prepare("DELETE FROM telegram_personal_source_posts WHERE source_chat_id=? AND source_message_id=?")
+                .run(post.source_chat_id, post.source_message_id);
+            });
+            continue;
+          }
+          if (post.source_date === 0) db.prepare(`UPDATE telegram_personal_source_posts SET source_date=?
+            WHERE source_chat_id=? AND source_message_id=? AND source_date=0`).run(message.date, post.source_chat_id, post.source_message_id);
+          if (sourcePostHash(message, media.mediaId) === post.revision_hash) continue;
+          if (await consume(message, media, true)) acceptSnapshot(message, media.mediaId);
+        }
+      }
+    }
+    const iterator = client.iterMessages(peer.input, { minId: selected.last_message_id, reverse: true, limit: 20 })[Symbol.asyncIterator]();
     let last = selected.last_message_id;
     for (;;) {
       if (Date.now() >= pollDeadline) break;
       renew(db, claim);
-      const next = await bounded(client, iterator.next());
+      const next = await bounded(client, iterator.next(), remaining());
       if (next.done) break;
       const message = next.value;
       if (!Number.isSafeInteger(message.id) || message.id <= last) continue;
       if (!(message instanceof Api.Message) || message.date * 1000 < Math.floor(Math.max(selected.selected_at, relay.relay_started_at) / 1000) * 1000) {
         last = message.id;
       } else {
-        const media = eligibleMedia(message, entity.noforwards === true || peer.protected, target.bot_id);
+        const media = eligibleMedia(message, entity.noforwards === true || peer.protected, target.bot_id, false);
         if (!media) last = message.id;
         else {
-          renew(db, claim);
-          let bytes: string | Buffer | undefined;
-          let oversized = false;
-          try {
-            bytes = await bounded(client, client.downloadMedia(message, {
-              signal: AbortSignal.timeout(REQUEST_MS), requestTimeout: REQUEST_MS,
-              progressCallback: (downloaded, total) => {
-                if (Number(downloaded.toString()) > media.max || Number(total.toString()) > media.max) throw new OversizeMediaError();
-              },
-            }));
-          } catch (error) { if (!(error instanceof OversizeMediaError)) throw error; oversized = true; }
-          renew(db, claim);
-          if (oversized || (Buffer.isBuffer(bytes) && bytes.length > media.max)) {
-            last = message.id;
-          } else {
-            if (!Buffer.isBuffer(bytes) || bytes.length === 0) throw new TelegramAccountError(TEMP_ERROR, 502);
-            const { enqueuePersonalRelayMedia } = await import("./telegram-relay");
-            const consumed = await enqueuePersonalRelayMedia({ sourceChatId: selected.chat_id, sourceMessageId: message.id,
-              sourceDate: message.date, relayRevision: relay.relay_revision,
-              mediaGroupId: message.groupedId?.toString() || "", caption: message.message, captionEntities: captionEntities(message.entities),
-              expectedCustomEmojiCount: (message.entities || []).filter(entity => entity.className === "MessageEntityCustomEmoji").length,
-              mediaKind: media.mediaKind, bytes, hasSpoiler: (message.media instanceof Api.MessageMediaPhoto || message.media instanceof Api.MessageMediaDocument) && message.media.spoiler === true,
-              sourceMediaId: media.mediaId, accountGeneration: claim.row.generation,
-              ...(media.mediaKind === "video" ? { mimeType: media.mimeType } : {}) });
-            renew(db, claim);
-            if (!consumed) break;
-            last = message.id;
-          }
+          rememberSourcePost(db, selected, message, media.mediaId, claim.row.generation, relay.relay_revision);
+          if (!await consume(message, media)) break;
+          acceptSnapshot(message, media.mediaId);
+          last = message.id;
         }
       }
       if (last > selected.last_message_id) db.prepare(`UPDATE telegram_personal_sources SET last_message_id=MAX(last_message_id,?)
