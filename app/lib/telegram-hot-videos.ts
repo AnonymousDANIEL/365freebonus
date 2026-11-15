@@ -118,6 +118,41 @@ function sourceAllowed(db: DatabaseSync, video: Video, target: number) {
 function occupied(db: DatabaseSync, id: string, except = "") {
   return !!db.prepare("SELECT 1 FROM telegram_hot_video_jobs WHERE video_id=? AND id<>? AND status IN ('pending','sending','sent','unknown') LIMIT 1").get(id, except);
 }
+const AUTO_VIDEO_WHERE = `v.deleted_at=0 AND v.active=1
+  AND ((v.origin='upload' AND NOT EXISTS(SELECT 1 FROM telegram_hot_video_sources selected_source WHERE selected_source.selected=1))
+    OR (v.origin='channel' AND v.last_sent_at=0 AND v.source_chat_id<>?
+      AND EXISTS(SELECT 1 FROM telegram_hot_video_sources s WHERE s.chat_id=v.source_chat_id AND s.selected=1)
+      AND NOT EXISTS(SELECT 1 FROM telegram_hot_video_jobs j WHERE j.video_id=v.id AND j.status IN ('pending','sending','sent','unknown','failed'))))`;
+type Runtime = { heartbeat_at:number;last_tick_at:number;last_completed_at:number;scan_started_at:number;last_scan_at:number;phase:string;scan_phase:string;last_error:string };
+function schedulerStatus(db:DatabaseSync,value:Config,now:number,tokenHash:string) {
+  const runtime=db.prepare("SELECT * FROM telegram_hot_video_runtime WHERE id='primary'").get() as Runtime|undefined;
+  const target=value.target_chat_id || defaultTarget(db);
+  const eligibleCount=(db.prepare(`SELECT COUNT(*) AS n FROM telegram_hot_videos v WHERE ${AUTO_VIDEO_WHERE}`).get(target) as {n:number}).n;
+  const sourceCount=(db.prepare("SELECT COUNT(*) AS n FROM telegram_hot_video_sources WHERE selected=1").get() as {n:number}).n;
+  const unusedCount=(db.prepare(`SELECT COUNT(*) AS n FROM telegram_hot_videos v WHERE v.deleted_at=0 AND v.origin='channel' AND v.last_sent_at=0
+    AND EXISTS(SELECT 1 FROM telegram_hot_video_sources s WHERE s.selected=1 AND s.chat_id=v.source_chat_id)
+    AND NOT EXISTS(SELECT 1 FROM telegram_hot_video_jobs j WHERE j.video_id=v.id AND j.status IN ('sent','unknown'))`).get() as {n:number}).n;
+  const nextJobs=(db.prepare(`SELECT j.id,j.video_id,v.title,j.run_at,j.kind,j.status FROM telegram_hot_video_jobs j
+    JOIN telegram_hot_videos v ON v.id=j.video_id WHERE j.status='pending' AND j.target_chat_id=? AND j.token_hash=? ORDER BY j.run_at,j.created_at,j.id LIMIT 20`).all(target,tokenHash) as {id:string;video_id:string;title:string;run_at:number;kind:string;status:string}[])
+    .map(j=>({id:j.id,videoId:j.video_id,title:j.title,runAt:j.run_at,kind:j.kind,status:j.status}));
+  const queuedCount=(db.prepare("SELECT COUNT(*) AS n FROM telegram_hot_video_jobs WHERE status='pending' AND target_chat_id=? AND token_hash=?").get(target,tokenHash) as {n:number}).n;
+  const activeJob=db.prepare("SELECT status,marker_status FROM telegram_hot_video_jobs WHERE lease_until>? AND (status='sending' OR (status='sent' AND marker_status='sending')) LIMIT 1").get(now) as {status:string;marker_status:string}|undefined;
+  const workerHealthy=!!runtime?.heartbeat_at && runtime.heartbeat_at>now-20000;
+  const sourceError=db.prepare("SELECT last_error FROM telegram_hot_video_sources WHERE selected=1 AND last_error<>'' ORDER BY last_synced_at LIMIT 1").get() as {last_error:string}|undefined;
+  let blockedReason='';
+  if (!value.enabled) blockedReason='自动队列已暂停；已保存的单次定时任务仍会按时间执行。';
+  else if (!target || !value.verified_at || value.token_hash!==tokenHash) blockedReason='请先保存并验证目标频道。';
+  else if (runtime?.last_error) blockedReason=runtime.last_error;
+  else if (!sourceCount && !eligibleCount) blockedReason='请先选择来源频道并保存。';
+  else if (!eligibleCount) blockedReason=queuedCount?'视频已安排单次任务，自动队列等待其他未使用视频。'
+    :sourceError?.last_error || (runtime?.scan_phase==='error'?'来源同步暂时未完成，正在自动重试。':runtime?.scan_phase==='running'?'正在同步来源视频，识别后会进入队列。'
+      :unusedCount?'当前视频需要检查发送状态，请查看视频队列。':'没有可发送的视频；系统会继续同步来源频道。');
+  else if (!workerHealthy) blockedReason='发送服务正在启动或恢复，请留意服务状态。';
+  return {now,heartbeatAt:runtime?.heartbeat_at || null,lastTickAt:runtime?.last_tick_at || null,lastCompletedAt:runtime?.last_completed_at || null,
+    workerHealthy,phase:activeJob?.status==='sending'?'sending':activeJob?.marker_status==='sending'?'marker':runtime?.phase || 'starting',
+    scanPhase:runtime?.scan_phase || 'idle',scanStartedAt:runtime?.scan_started_at || null,lastScanAt:runtime?.last_scan_at || null,
+    nextRunAt:value.enabled && value.next_run_at?value.next_run_at:null,eligibleCount,unusedCount,queuedCount,sourceCount,blockedReason,nextJobs,lastError:runtime?.last_error || ''};
+}
 function sourceUrl(chatId: number, messageId: number) {
   return chatId < -1000000000000 && positive(messageId) ? `https://t.me/c/${-BigInt(chatId) - BigInt("1000000000000")}/${messageId}` : "";
 }
@@ -195,7 +230,7 @@ export function hotVideoStatus(db: DatabaseSync, clock = Date.now) {
       ORDER BY CASE status WHEN 'sent' THEN 0 WHEN 'unknown' THEN 1 WHEN 'sending' THEN 2 WHEN 'pending' THEN 3 ELSE 4 END LIMIT 1`).get(video.id) as { status: string } | undefined;
     return locked?.status || "unused";
   };
-  return { markSourceUsed: value.mark_source_used === 1, sourceChannels: sources.map(s => ({ chatId: String(s.chat_id),title:s.title,username:s.username,selected:true,
+  return { scheduler:schedulerStatus(db,value,now,tokenHash), markSourceUsed: value.mark_source_used === 1, sourceChannels: sources.map(s => ({ chatId: String(s.chat_id),title:s.title,username:s.username,selected:true,
     ready:s.verified_at > 0 && s.token_hash === tokenHash && !s.last_error,lastError:s.last_error,lastSyncedAt:s.last_synced_at || null,
     historyComplete:s.backfill_done === 1 })), sourceCandidates,
     videoCount: (db.prepare("SELECT COUNT(*) AS n FROM telegram_hot_videos WHERE deleted_at=0").get() as {n:number}).n,
@@ -233,12 +268,18 @@ export async function saveHotVideoSettings(db: DatabaseSync, input: HotVideoSett
     let token = ""; try { token = decryptToken(cipher); } catch { /* credentials stay private */ }
     if (!cipher || !token) throw new HotVideoError(TOKEN_ERROR);
     const valid = () => credential(db) === cipher && config(db).revision === previous.revision && config(db).lease_until <= clock();
-    checked = await verifyTarget(token, target, valid);
-    if (requested.length) {
+    const cachedTarget=previous.target_chat_id===target && previous.token_hash===hash(cipher) && previous.verified_at>0 && previous.bot_id>0;
+    // Changing only a saved time is a local operation; the sender rechecks current Telegram rights before dispatch.
+    if (!cachedTarget) checked = await verifyTarget(token, target, valid);
+    const verifySources=requested.filter(id=>{
+      const saved=sourceRow(db,Number(id));
+      return !saved?.selected || !saved.verified_at || saved.token_hash!==hash(cipher) || markSourceUsed && previous.mark_source_used!==1;
+    });
+    if (verifySources.length) {
       const { checkHotVideoSourceAccess } = await import("./telegram-hot-video-native");
-      // A few connections at a time keep permission checking bounded without one long sequential request.
-      for (let at=0;at<requested.length;at+=4) await Promise.all(requested.slice(at,at+4).map(async id => {
-        const info = await checkHotVideoSourceAccess({db,token,botId:checked!.botId,sourceChatId:Number(id),requireSourcePost:markSourceUsed,valid});
+      // Check new source grants only; unchanged source checks cannot stall a time-only save.
+      for (let at=0;at<verifySources.length;at+=4) await Promise.all(verifySources.slice(at,at+4).map(async id => {
+        const info = await checkHotVideoSourceAccess({db,token,botId:checked?.botId || previous.bot_id,sourceChatId:Number(id),requireSourcePost:markSourceUsed,valid});
         verifiedSources.set(Number(id),info);
       }));
     }
@@ -263,6 +304,7 @@ export async function saveHotVideoSettings(db: DatabaseSync, input: HotVideoSett
     }
     for (const id of keep) {
       const verified = verifiedSources.get(id), old = sourceRow(db,id);
+      if (old?.selected && !verified) continue;
       db.prepare(`INSERT INTO telegram_hot_video_sources(chat_id,title,username,selected,revision,token_hash,verified_at) VALUES(?,?,?,1,?,?,?)
         ON CONFLICT(chat_id) DO UPDATE SET title=excluded.title,username=excluded.username,selected=1,
           revision=CASE WHEN telegram_hot_video_sources.selected=0 THEN excluded.revision ELSE telegram_hot_video_sources.revision END,
@@ -392,9 +434,7 @@ export async function deliverHotVideoOnce(decryptToken: DecryptToken, clock = Da
       // to publish beside the new slot. Preserve all actual/unknown attempts.
       db.prepare(`UPDATE telegram_hot_video_jobs SET status='cancelled',last_error='错过的自动发送时段已跳过。'
         WHERE kind='automatic' AND status='pending' AND run_at<?`).run(slot);
-      const video = db.prepare(`SELECT v.* FROM telegram_hot_videos v WHERE v.deleted_at=0 AND v.active=1
-        AND ((v.origin='upload' AND NOT EXISTS(SELECT 1 FROM telegram_hot_video_sources selected_source WHERE selected_source.selected=1)) OR (v.origin='channel' AND v.last_sent_at=0 AND v.source_chat_id<>? AND EXISTS(SELECT 1 FROM telegram_hot_video_sources s WHERE s.chat_id=v.source_chat_id AND s.selected=1)
-          AND NOT EXISTS(SELECT 1 FROM telegram_hot_video_jobs j WHERE j.video_id=v.id AND j.status IN ('pending','sending','sent','unknown','failed'))))
+      const video = db.prepare(`SELECT v.* FROM telegram_hot_videos v WHERE ${AUTO_VIDEO_WHERE}
         ORDER BY CASE WHEN v.sort_order>? THEN 0 ELSE 1 END,v.sort_order,v.id LIMIT 1`).get(current.target_chat_id,current.last_auto_order) as Video | undefined;
       const room = Number((db.prepare("SELECT COUNT(*) AS n FROM telegram_hot_video_jobs WHERE status IN ('pending','sending')").get() as { n: number }).n) < 500;
       if (video && room && cipher && current.target_chat_id < 0 && current.token_hash === tokenHash) {
@@ -403,7 +443,9 @@ export async function deliverHotVideoOnce(decryptToken: DecryptToken, clock = Da
             current.target_chat_id, tokenHash, current.bot_id, now, video.origin === "channel" ? video.id : "");
         db.prepare("UPDATE telegram_hot_video_settings SET last_auto_order=? WHERE id='primary'").run(video.sort_order);
       }
-      db.prepare(`UPDATE telegram_hot_video_settings SET next_run_at=?,last_error=CASE
+      const waitingForSource=!video && now<slot+60000 && !!db.prepare("SELECT 1 FROM telegram_hot_video_sources WHERE selected=1 LIMIT 1").get();
+      if (waitingForSource) db.prepare("UPDATE telegram_hot_video_settings SET last_error='正在同步来源，等待视频进入本次发送队列。' WHERE id='primary'").run();
+      else db.prepare(`UPDATE telegram_hot_video_settings SET next_run_at=?,last_error=CASE
         WHEN ?=0 THEN '没有可发送的未使用来源视频，本次时段已跳过；有新视频后按原计划继续。' WHEN ?=0 THEN '待发送任务已满，本次自动时段已跳过。' ELSE last_error END WHERE id='primary'`)
         .run(slot + interval, Number(!!video), Number(room));
     }
@@ -574,43 +616,50 @@ export async function deliverHotVideoMarkerOnce(decryptToken: DecryptToken, cloc
 const workers = globalThis as typeof globalThis & { telegramHotVideoWorkerStarted?: boolean };
 export function startTelegramHotVideoWorker(decryptToken: DecryptToken) {
   if (workers.telegramHotVideoWorkerStarted) return;
-  workers.telegramHotVideoWorkerStarted = true;
-  let running = false, cleanedAt = 0, accessChecked = false, scannedAt = 0;
-  const tick = async () => {
-    if (running) return;
-    running = true;
-    try {
-      if (Date.now() - cleanedAt > UPLOAD_MS) { cleanupStorage(getSqlite(), Date.now()); cleanedAt = Date.now(); }
-      if (!accessChecked) {
-        accessChecked = true;
-        const db = getSqlite(), current = config(db), cipher = credential(db), now = Date.now();
-        // Check only when no publication is due; this cannot claim/reset jobs or change the six-hour plan.
-        if (current.enabled && current.lease_until <= now && current.next_run_at > now + 90_000 && current.bot_id > 0
-          && !db.prepare("SELECT 1 FROM telegram_hot_video_jobs WHERE status IN ('pending','sending') AND run_at<=? LIMIT 1").get(now + 90_000)) {
-          let ready = false;
-          try {
-            const { checkLargeHotVideoAccess } = await import("./telegram-hot-video-native");
-            ready = await checkLargeHotVideoAccess({ db, token: decryptToken(cipher), botId: current.bot_id, targetId: current.target_chat_id,
-              valid: () => credential(db) === cipher && config(db).revision === current.revision });
-          } catch { /* Only aggregate capability state is logged, never RPC errors or credentials. */ }
-          console.info("Telegram Hot large video capability.", JSON.stringify({ ready, availableMiB: Math.floor(hotVideoAvailableBytes(db) / 1048576),
-            maxVideoMiB: HOT_VIDEO_MAX_BYTES / 1048576,
-            selectedSources: (db.prepare("SELECT COUNT(*) AS n FROM telegram_hot_video_sources WHERE selected=1").get() as {n:number}).n,
-            channelVideos: (db.prepare("SELECT COUNT(*) AS n FROM telegram_hot_videos WHERE origin='channel' AND deleted_at=0").get() as {n:number}).n,
-            intervalHours: current.interval_hours, nextRunAt: current.next_run_at }));
-        }
-      }
+  workers.telegramHotVideoWorkerStarted=true;
+  const owner=randomUUID(),db=getSqlite();
+  db.prepare(`INSERT INTO telegram_hot_video_runtime(id,owner_id) VALUES('primary',?) ON CONFLICT(id) DO UPDATE SET owner_id=excluded.owner_id,
+    phase='starting',scan_phase='idle',last_error=''`).run(owner);
+  let running=false,scanning=false,cleanedAt=0,lastHeartbeat=0,lastScanTick=0,scanAudited=false;
+  const tick=async()=>{
+    const at=Date.now();
+    if(at-lastHeartbeat>=5000){lastHeartbeat=at;db.prepare("UPDATE telegram_hot_video_runtime SET heartbeat_at=? WHERE id='primary' AND owner_id=?").run(at,owner);}
+    if(running)return;
+    running=true;
+    try{
+      db.prepare("UPDATE telegram_hot_video_runtime SET last_tick_at=?,phase='checking' WHERE id='primary' AND owner_id=?").run(at,owner);
+      if(at-cleanedAt>UPLOAD_MS){cleanupStorage(db,at);cleanedAt=at;}
       await deliverHotVideoOnce(decryptToken);
       await deliverHotVideoMarkerOnce(decryptToken);
-      const db=getSqlite(),current=config(db),at=Date.now();
-      if (at-scannedAt>=35000 && current.lease_until<=at && (!current.enabled || current.next_run_at>at+90000)
-        && !db.prepare("SELECT 1 FROM telegram_hot_video_jobs WHERE (status='pending' AND run_at<=?) OR (status='sent' AND marker_status IN ('pending','sending')) LIMIT 1").get(at+90000)) {
-        scannedAt=at;
-        const {syncHotVideoSources}=await import("./telegram-hot-video-sources");
-        await syncHotVideoSources(db);
-      }
-    } catch { /* No credentials, file paths or channel details enter process logs. */ }
-    finally { running = false; }
+      db.prepare("UPDATE telegram_hot_video_runtime SET last_completed_at=?,phase='idle',last_error='' WHERE id='primary' AND owner_id=?").run(Date.now(),owner);
+    }catch{
+      db.prepare("UPDATE telegram_hot_video_runtime SET last_completed_at=?,phase='error',last_error='发送服务暂时未完成检查，将自动继续。' WHERE id='primary' AND owner_id=?").run(Date.now(),owner);
+    }finally{running=false;}
   };
-  void tick(); setInterval(() => void tick(), TICK_MS).unref();
+  const scanTick=async()=>{
+    const at=Date.now();
+    db.prepare("UPDATE telegram_hot_video_runtime SET scan_heartbeat_at=? WHERE id='primary' AND owner_id=?").run(at,owner);
+    if(scanning || at-lastScanTick<5000 || !db.prepare("SELECT 1 FROM telegram_hot_video_sources WHERE selected=1 AND next_attempt_at<=? LIMIT 1").get(at))return;
+    scanning=true;lastScanTick=at;
+    try{
+      db.prepare("UPDATE telegram_hot_video_runtime SET scan_started_at=?,scan_phase='running' WHERE id='primary' AND owner_id=?").run(at,owner);
+      const {syncHotVideoSources}=await import("./telegram-hot-video-sources");
+      const result=await syncHotVideoSources(db);
+      db.prepare("UPDATE telegram_hot_video_runtime SET last_scan_at=?,scan_phase='idle' WHERE id='primary' AND owner_id=?").run(Date.now(),owner);
+      if(!scanAudited || result.discovered>0){
+        scanAudited=true;
+        const current=config(db),status=schedulerStatus(db,current,Date.now(),hash(credential(db)));
+        console.info("Telegram Hot scheduler status.",JSON.stringify({enabled:current.enabled===1,sourceCount:status.sourceCount,
+          eligibleCount:status.eligibleCount,queuedCount:status.queuedCount,workerHealthy:status.workerHealthy,heartbeatAt:status.heartbeatAt,
+          nextRunAt:status.nextRunAt,scanPhase:status.scanPhase}));
+      }
+    }catch{
+      db.prepare("UPDATE telegram_hot_video_runtime SET last_scan_at=?,scan_phase='error' WHERE id='primary' AND owner_id=?").run(Date.now(),owner);
+    }finally{scanning=false;}
+  };
+  void tick().catch(()=>undefined);void scanTick().catch(()=>undefined);
+  setInterval(()=>void tick().catch(()=>undefined),TICK_MS).unref();
+  setInterval(()=>void scanTick().catch(()=>undefined),TICK_MS).unref();
+  console.info("Telegram Hot scheduler started.",JSON.stringify({schemaVersion:33,sourceCount:(db.prepare("SELECT COUNT(*) AS n FROM telegram_hot_video_sources WHERE selected=1").get() as {n:number}).n,
+    enabled:config(db).enabled===1,intervalHours:config(db).interval_hours,nextRunAt:config(db).next_run_at,independentSourceWorker:true}));
 }

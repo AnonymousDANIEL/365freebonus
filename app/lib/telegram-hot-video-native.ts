@@ -105,7 +105,7 @@ async function nativeHotVideoOperation(input: NativeOperation): Promise<Reply> {
   const revision = application.revision, tokenHash = createHash("sha256").update(input.token).digest("hex"), aad = `${CONTEXT}:${input.botId}:${tokenHash}:${revision}`;
   const previous = db.prepare("SELECT token_hash,application_revision,session_ciphertext FROM telegram_hot_video_bot_sessions WHERE bot_id=?").get(input.botId) as Session | undefined;
   const session = previous?.token_hash === tokenHash && previous.application_revision === revision ? reveal(previous.session_ciphertext, aad) : "";
-  const client = createTelegramAccountClient(application, session), deadline = Date.now() + (input.checkOnly || mode === "source_check" ? 60_000 : mode === "upload" ? 15 * 60_000 : 120_000);
+  const client = createTelegramAccountClient(application, session), deadline = Date.now() + (input.checkOnly ? 60_000 : mode === "upload" ? 15 * 60_000 : 90_000);
   let timer: ReturnType<typeof setTimeout> | undefined;
   const check = () => {
     if (Date.now() >= deadline || !input.valid()) throw new HotVideoError("视频发送设置已改变或处理时间已过期，本次发送已停止。", 409);

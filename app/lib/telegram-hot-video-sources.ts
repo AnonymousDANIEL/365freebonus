@@ -4,7 +4,8 @@ import { readHotVideoSourcePages, type HotVideoSourceHistory } from "./telegram-
 import { registerHotChannelVideo } from "./telegram-hot-videos";
 
 type Source = { chat_id: number; title: string; username: string; selected: number; revision: string;
-  backfill_before_id: number; last_message_id: number; backfill_done: number; last_synced_at: number; last_error: string; next_attempt_at: number };
+  scan_version: number; backfill_before_id: number; last_message_id: number; backfill_done: number; last_synced_at: number; last_error: string; next_attempt_at: number };
+const SOURCE_SCAN_VERSION = 1;
 const messages: Record<HotVideoSourceHistory["state"], string> = {
   ok: "", busy: "", changed: "来源或账号设置已改变，请刷新频道列表，并确认个人账号仍已加入来源频道。", backoff: "Telegram 正在限制读取频率，系统稍后继续同步。",
   disconnected: "请先在后台连接个人 Telegram 账号，以读取来源频道已有的视频。",
@@ -26,8 +27,9 @@ export async function syncHotVideoSources(db = getSqlite(), options: { all?: boo
     // One in-flight account read can take 40 seconds; do not begin enough slow
     // sources to push an explicit refresh beyond the HTTP proxy time budget.
     if (Date.now() >= startDeadline) break;
+    const recheck = source.scan_version < SOURCE_SCAN_VERSION;
     const result = await readHotVideoSourcePages(db, { chatId: source.chat_id, revision: source.revision,
-      beforeId: source.backfill_before_id, afterId: source.last_message_id, backfillDone: source.backfill_done === 1 });
+      beforeId: recheck ? 0 : source.backfill_before_id, afterId: recheck ? 0 : source.last_message_id, backfillDone: !recheck && source.backfill_done === 1 });
     const valid = () => Boolean(db.prepare("SELECT 1 FROM telegram_hot_video_sources WHERE chat_id=? AND selected=1 AND revision=?").get(source.chat_id, source.revision));
     if (!valid()) { skipped++; continue; }
     if (result.state !== "ok") {
@@ -42,17 +44,21 @@ export async function syncHotVideoSources(db = getSqlite(), options: { all?: boo
       if (!valid()) { skipped++; return; }
       const account = db.prepare("SELECT generation,stage FROM telegram_personal_account WHERE id='primary'").get() as { generation: string; stage: string } | undefined;
       if (!account || account.stage !== "connected" || account.generation !== result.accountGeneration) { skipped++; return; }
+      let imported = 0;
       for (const video of result.videos) {
         const known = db.prepare("SELECT 1 FROM telegram_hot_videos WHERE origin='channel' AND source_chat_id=? AND source_message_id=?").get(source.chat_id, video.sourceMessageId);
         const registered = registerHotChannelVideo(db, { sourceChatId: source.chat_id, sourceMessageId: video.sourceMessageId,
           sourceTitle: result.sourceTitle || source.title, documentId: video.documentId, bytes: video.bytes, createdAt: video.createdAt });
-        if (registered && !known) discovered++;
+        if (registered && !known) { discovered++; imported++; }
       }
       db.prepare(`UPDATE telegram_hot_video_sources SET title=?,username=?,last_message_id=?,backfill_before_id=?,backfill_done=?,
-        last_synced_at=?,last_error='',next_attempt_at=? WHERE chat_id=? AND selected=1 AND revision=?`)
+        last_synced_at=?,last_error='',next_attempt_at=?,scan_version=? WHERE chat_id=? AND selected=1 AND revision=?`)
         .run(result.sourceTitle || source.title, result.sourceUsername, result.lastMessageId, result.backfillBeforeId, Number(result.backfillDone),
-          Date.now(), Date.now() + 30_000, source.chat_id, source.revision);
+          Date.now(), Date.now() + 30_000, SOURCE_SCAN_VERSION, source.chat_id, source.revision);
       scanned++;
+      if (result.inspection && (recheck || imported > 0)) console.info("Telegram Hot source scan.", JSON.stringify({
+        state: result.state, scanVersion: SOURCE_SCAN_VERSION, rescan: recheck, imported, ...result.inspection,
+      }));
     });
   }
   return { scanned, discovered, skipped };

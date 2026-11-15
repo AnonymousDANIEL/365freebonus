@@ -12,7 +12,7 @@ export function getDataDirectory(): string {
 function migrate(db: DatabaseSync) {
   if (migrated.has(db)) return;
   const readVersion = () => (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
-  if (readVersion() < 32) {
+  if (readVersion() < 33) {
     db.exec("BEGIN IMMEDIATE");
     try {
       // Read again inside the write lock, so concurrent process starts cannot
@@ -587,6 +587,18 @@ function migrate(db: DatabaseSync) {
           CREATE INDEX IF NOT EXISTS telegram_hot_video_marker_due ON telegram_hot_video_jobs(status,marker_status,marker_next_attempt_at);
           PRAGMA user_version=32;
         `);
+      }
+      if (version < 33) {
+        const columns = db.prepare("PRAGMA table_info(telegram_hot_video_sources)").all() as {name:string}[];
+        if (!columns.some(column=>column.name==="scan_version")) db.exec("ALTER TABLE telegram_hot_video_sources ADD COLUMN scan_version INTEGER NOT NULL DEFAULT 0");
+        db.exec(`CREATE TABLE IF NOT EXISTS telegram_hot_video_runtime (
+          id TEXT PRIMARY KEY,owner_id TEXT NOT NULL DEFAULT '',heartbeat_at INTEGER NOT NULL DEFAULT 0,
+          last_tick_at INTEGER NOT NULL DEFAULT 0,last_completed_at INTEGER NOT NULL DEFAULT 0,
+          scan_heartbeat_at INTEGER NOT NULL DEFAULT 0,scan_started_at INTEGER NOT NULL DEFAULT 0,last_scan_at INTEGER NOT NULL DEFAULT 0,
+          phase TEXT NOT NULL DEFAULT 'starting',scan_phase TEXT NOT NULL DEFAULT 'idle',last_error TEXT NOT NULL DEFAULT ''
+        );
+        INSERT OR IGNORE INTO telegram_hot_video_runtime(id) VALUES('primary');
+        PRAGMA user_version=33;`);
       }
       db.exec("COMMIT");
     } catch (error) { db.exec("ROLLBACK"); throw error; }

@@ -24,6 +24,7 @@ test.beforeEach(()=>{
  CREATE TABLE telegram_personal_account(id TEXT PRIMARY KEY,generation TEXT,stage TEXT);
  INSERT INTO telegram_personal_account VALUES('primary','account-generation','connected');
  CREATE TABLE fixture_references(id TEXT PRIMARY KEY,source_message_id INTEGER,document_id TEXT,used INTEGER);`);
+ if(!db.prepare('PRAGMA table_info(telegram_hot_video_sources)').all().some(c=>c.name==='scan_version'))db.exec('ALTER TABLE telegram_hot_video_sources ADD COLUMN scan_version INTEGER NOT NULL DEFAULT 0');
  reader.calls=[];reader.onRead=null;hot.calls=[];hot.failAt=0;
  reader.result={state:'ok',accountGeneration:'account-generation',sourceTitle:'Private library',sourceUsername:'library',lastMessageId:99,backfillBeforeId:50,backfillDone:false,retryAfterMs:30000,videos:[reference(99),reference(50)]};
 });
@@ -70,4 +71,21 @@ test('an explicit multi-source refresh stops starting new reads after its wall-c
  let now=Date.now();t.mock.method(Date,'now',()=>now);reader.onRead=()=>{now+=16000};
  const r=await syncHotVideoSources(db,{all:true});assert.equal(r.scanned,1);assert.equal(reader.calls.length,1);
  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM telegram_hot_video_sources WHERE last_synced_at=0').get().n,4);
+});
+
+test('parser recovery rechecks an already advanced empty source and checkpoints the new parser version atomically',async()=>{
+ source();db.prepare('UPDATE telegram_hot_video_sources SET last_message_id=999,backfill_before_id=1,backfill_done=1,scan_version=0').run();
+ const r=await syncHotVideoSources(db);assert.equal(r.discovered,2);assert.deepEqual(reader.calls,[{chatId:chat,revision,beforeId:0,afterId:0,backfillDone:false}]);assert.equal(selected().scan_version,1);assert.equal(selected().last_message_id,99);assert.equal(selected().backfill_before_id,50);assert.equal(selected().backfill_done,0);
+ db.prepare('UPDATE telegram_hot_video_sources SET next_attempt_at=0').run();reader.calls=[];await syncHotVideoSources(db);assert.deepEqual(reader.calls,[{chatId:chat,revision,beforeId:50,afterId:99,backfillDone:false}]);
+});
+test('failed parser recovery keeps the previous cursor and recovery budget until an import commits',async()=>{
+ source();db.prepare('UPDATE telegram_hot_video_sources SET last_message_id=999,backfill_before_id=1,backfill_done=1,scan_version=0').run();hot.failAt=2;
+ await assert.rejects(syncHotVideoSources(db),/registration/);assert.equal(selected().scan_version,0);assert.equal(selected().last_message_id,999);assert.equal(selected().backfill_before_id,1);assert.equal(selected().backfill_done,1);assert.equal(db.prepare('SELECT COUNT(*) AS n FROM fixture_references').get().n,0);
+});
+test('parser recovery preserves previously used references and terminal unknown publication records',async()=>{
+ source();await syncHotVideoSources(db);db.prepare('UPDATE fixture_references SET used=1').run();db.prepare('UPDATE telegram_hot_videos SET last_sent_at=?').run(Date.now());
+ const first=db.prepare('SELECT id FROM telegram_hot_videos LIMIT 1').get().id;
+ db.prepare(`INSERT INTO telegram_hot_video_jobs(id,request_id,video_id,kind,status,run_at,created_at,settings_revision,target_chat_id,token_hash,bot_id,dispatch_started_at,last_error) VALUES('existing-unknown','existing-request',?,'manual','unknown',1,1,'saved-revision',-1009999,'private-token-hash',123,1,'unconfirmed')`).run(first);
+ const jobs=db.prepare('SELECT * FROM telegram_hot_video_jobs').all(),videos=db.prepare('SELECT id,last_sent_at FROM telegram_hot_videos ORDER BY id').all();db.prepare('UPDATE telegram_hot_video_sources SET scan_version=0,next_attempt_at=0').run();
+ const r=await syncHotVideoSources(db);assert.equal(r.discovered,0);assert.equal(selected().scan_version,1);assert.equal(db.prepare('SELECT COUNT(*) AS n FROM fixture_references WHERE used=1').get().n,2);assert.deepEqual(db.prepare('SELECT id,last_sent_at FROM telegram_hot_videos ORDER BY id').all(),videos);assert.deepEqual(db.prepare('SELECT * FROM telegram_hot_video_jobs').all(),jobs);
 });

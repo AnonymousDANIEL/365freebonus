@@ -1623,13 +1623,15 @@ export type HotVideoSourceHistory = {
   accountGeneration: string; sourceTitle: string; sourceUsername: string; lastMessageId: number;
   backfillBeforeId: number; backfillDone: boolean; retryAfterMs: number;
   videos: { sourceMessageId: number; documentId: string; bytes: number; createdAt: number }[];
+  inspection: { messages: number; documents: number; regularVideos: number; eligibleVideos: number; absentTtlNull: number; ephemeralVideos: number; unsupportedVideos: number; invalidMetadata: number; dateObjects: number };
 };
 
 /** Metadata-only history reader sharing the existing account lease. No media, captions, access hashes or sessions leave this helper. */
 export async function readHotVideoSourcePages(db: DatabaseSync, input: HotVideoSourcePageInput): Promise<HotVideoSourceHistory> {
   const current = row(db), limit = Math.max(1, Math.min(50, Math.floor(input.limit || 50)));
   const result: HotVideoSourceHistory = { state: "unavailable", accountGeneration: current.generation, sourceTitle: "", sourceUsername: "",
-    lastMessageId: input.afterId, backfillBeforeId: input.beforeId, backfillDone: input.backfillDone, retryAfterMs: RETRY_MS, videos: [] };
+    lastMessageId: input.afterId, backfillBeforeId: input.beforeId, backfillDone: input.backfillDone, retryAfterMs: RETRY_MS, videos: [],
+    inspection: { messages: 0, documents: 0, regularVideos: 0, eligibleVideos: 0, absentTtlNull: 0, ephemeralVideos: 0, unsupportedVideos: 0, invalidMetadata: 0, dateObjects: 0 } };
   if (!Number.isSafeInteger(input.chatId) || input.chatId >= 0 || !input.revision || ![input.beforeId, input.afterId].every(value => Number.isSafeInteger(value) && value >= 0)) return result;
   if (current.stage !== "connected" || !current.session_ciphertext) return { ...result, state: "disconnected" };
   if (current.next_attempt_at > Date.now()) return { ...result, state: "backoff", retryAfterMs: Math.max(1000, current.next_attempt_at - Date.now()) };
@@ -1671,17 +1673,25 @@ export async function readHotVideoSourcePages(db: DatabaseSync, input: HotVideoS
           const message = next.value, id = Number(message.id);
           if (!Number.isSafeInteger(id) || id <= 0 || (mode === "new" ? id <= last : id >= last) || boundary > 0 && (mode === "new" ? id <= boundary : id >= boundary))
             throw new TelegramAccountError("Telegram 来源列表暂时未能完整读取，请稍后再试。", 502);
-          last = id; minimum = Math.min(minimum, id); maximum = Math.max(maximum, id);
+          last = id; minimum = Math.min(minimum, id); maximum = Math.max(maximum, id); result.inspection.messages++;
           if (!(message instanceof Api.Message)) continue;
           if (!message.peerId || Number(utils.getPeerId(message.peerId)) !== input.chatId) throw new TelegramAccountError("Telegram 来源身份不一致，本次读取已停止。", 409);
-          if (message.noforwards || !(message.media instanceof Api.MessageMediaDocument) || message.media.ttlSeconds !== undefined || !(message.media.document instanceof Api.Document)) continue;
+          if (message.noforwards || !(message.media instanceof Api.MessageMediaDocument) || !(message.media.document instanceof Api.Document)) continue;
+          result.inspection.documents++;
+          // The pinned SDK decodes an absent optional TL integer as null, while
+          // constructor-created objects use undefined. Explicit zero has no TTL.
+          if (message.media.ttlSeconds === null) result.inspection.absentTtlNull++;
+          if (message.media.ttlSeconds != null && message.media.ttlSeconds !== 0) { result.inspection.ephemeralVideos++; continue; }
           const document = message.media.document;
           if (document.mimeType !== "video/mp4" || !document.attributes?.some(attribute => attribute instanceof Api.DocumentAttributeVideo && !attribute.roundMessage)
-            || document.attributes.some(attribute => attribute instanceof Api.DocumentAttributeAnimated)) continue;
+            || document.attributes.some(attribute => attribute instanceof Api.DocumentAttributeAnimated)) { result.inspection.unsupportedVideos++; continue; }
+          result.inspection.regularVideos++;
           let documentId = ""; try { documentId = document.id.toString(); } catch { /* malformed metadata is skipped */ }
-          const bytes = Number(document.size?.toString()), createdAt = Number(message.date) * 1000;
-          if (!/^-?[1-9]\d{0,19}$/.test(documentId) || !Number.isSafeInteger(bytes) || bytes <= 0 || !Number.isSafeInteger(createdAt) || createdAt <= 0 || createdAt > Date.now() + 1000) continue;
-          result.videos.push({ sourceMessageId: id, documentId, bytes, createdAt });
+          const sourceDate: unknown = message.date, bytes = Number(document.size?.toString());
+          if (sourceDate instanceof Date) result.inspection.dateObjects++;
+          const createdAt = sourceDate instanceof Date ? sourceDate.getTime() : typeof sourceDate === "number" ? sourceDate * 1000 : NaN;
+          if (!/^-?[1-9]\d{0,19}$/.test(documentId) || !Number.isSafeInteger(bytes) || bytes <= 0 || !Number.isSafeInteger(createdAt) || createdAt <= 0 || createdAt > Date.now() + 1000) { result.inspection.invalidMetadata++; continue; }
+          result.videos.push({ sourceMessageId: id, documentId, bytes, createdAt }); result.inspection.eligibleVideos++;
         }
       } finally { if (iterator.return) await bounded(client!, iterator.return(undefined), Math.max(1, Math.min(1000, remaining()))).catch(() => undefined); }
       return { fetched, minimum: Number.isFinite(minimum) ? minimum : 0, maximum };

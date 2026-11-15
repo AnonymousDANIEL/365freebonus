@@ -183,3 +183,72 @@ test('explicit CHANNEL_PRIVATE rejection on actual source marker stays a known p
  installCloud();sendError=Object.assign(new Error('PRIVATE_RPC_TEXT'),{code:406,errorMessage:'CHANNEL_PRIVATE'});
  assert.deepEqual(await markHotChannelVideoUsed({...cloudInput(),targetMessageId:99,markerId:'marker-1'}),{ok:false,code:403,retryAfter:0});assert.equal(dispatches,1);assert.equal(calls.filter(c=>c==='messages.SendMessage').length,1);
 });
+
+// Exercise the SDK's real TL serializer/decoder. Missing wire optionals are null,
+// which differs from hand-constructed API fixtures and previously broke discovery.
+const {BinaryReader}=require('teleproto/compat/extensions/BinaryReader');
+function wire(value){return new BinaryReader(value.getBytes()).tgReadObject();}
+function installWireCloud(){
+ installCloud();const oldEntity=client.getEntity,oldInvoke=client.invoke;let wireSources=0;
+ client.getMe=async()=>{
+   const me=wire(new Api.User({id:bigInt(botId),bot:true,botInfoVersion:1,username:'FreeBonus365ChatBot',firstName:'ChatBot'}));
+   assert.equal(me.lastName,null);assert.equal(me.usernames,null);return me;
+ };
+ client.getEntity=async peer=>{
+   const channel=wire(await oldEntity(peer));assert.equal(channel.usernames,null);
+   if(peer.channelId.toString()===channelId.toString())assert.equal(channel.username,null);
+   return channel;
+ };
+ client.invoke=async(...args)=>{
+   const result=wire(await oldInvoke(...args)),request=args[0];
+   if(request instanceof Api.channels.GetMessages){
+     assert.equal(result.messages[0].media.ttlSeconds,null);assert.equal(result.messages[0].fwdFrom,null);
+     assert.equal(result.messages[0].media.altDocuments,null);wireSources++;
+   }
+   if(request instanceof Api.messages.SendMessage){
+     const m=result.updates.find(u=>u instanceof Api.UpdateNewChannelMessage).message;
+     assert.equal(m.media,null);assert.equal(m.fwdFrom,null);assert.equal(m.replyTo.replyToPeerId,null);
+   }
+   return result;
+ };
+ return ()=>wireSources;
+}
+test('real TL-decoded null optional fields preserve a normal MP4 cloud copy with empty caption and three exact buttons',async()=>{
+ metadata.failure=new Error('No local video must be read');const reads=installWireCloud();
+ const result=await sendHotChannelVideo(cloudInput());
+ assert.equal(reads(),1);assert.equal(result.ok,true);assert.equal(result.result.caption,'');assert.ok(result.result.video);
+ assert.deepEqual(result.result.reply_markup.inline_keyboard,hotVideoKeyboard());assert.equal(dispatches,1);
+ assert.equal(calls.filter(c=>c==='messages.SendMedia').length,1);
+});
+test('real TL-decoded null peer optionals preserve read-only private/public source checks',async()=>{
+ installWireCloud();assert.deepEqual(await checkHotVideoSourceAccess(cloudInput()),{title:'Source videos',username:'source_videos'});
+ assert.equal(dispatches,0);assert.equal(calls.includes('channels.GetMessages'),false);
+});
+test('real TL-decoded null media and reply-peer optionals preserve exact source used-marker confirmation',async()=>{
+ const reads=installWireCloud();const result=await markHotChannelVideoUsed({...cloudInput(),targetMessageId:99,markerId:'wire-marker'});
+ assert.equal(reads(),2);assert.deepEqual(result,{ok:true,result:{message_id:144,chat:{id:sourceId},text:'✅ Sent · Used',reply_to_message:{message_id:sourceMessageId}}});
+ assert.equal(dispatches,1);assert.equal(calls.includes('messages.SendMedia'),false);
+});
+for(const operation of ['channel','marker','source_check'])test('stalled '+operation+' metadata/authorization stops at the overall 90-second deadline without dispatch',async t=>{
+ installCloud();client.start=async()=>new Promise(()=>{});
+ t.mock.timers.enable({apis:['setTimeout','Date'],now:1800000000000});
+ const promise=operation==='channel'?sendHotChannelVideo(cloudInput()):operation==='marker'
+   ?markHotChannelVideoUsed({...cloudInput(),targetMessageId:99,markerId:'bounded-marker'}):checkHotVideoSourceAccess(cloudInput());
+ let settled=false;const checked=assert.rejects(promise,e=>e.status===503);void checked.then(()=>{settled=true});
+ t.mock.timers.tick(89999);await Promise.resolve();assert.equal(settled,false);
+ t.mock.timers.tick(1);await checked;assert.equal(dispatches,0);assert.equal(calls.includes('channels.GetMessages'),false);
+});
+test('stalled actual cloud publication becomes unknown at 90 seconds and never retries the media request',async t=>{
+ installCloud();const oldInvoke=client.invoke;client.invoke=async(...args)=>{
+   if(args[0] instanceof Api.messages.SendMedia){calls.push('messages.SendMedia');return new Promise(()=>{})}return oldInvoke(...args);
+ };
+ t.mock.timers.enable({apis:['setTimeout','Date'],now:1800000000000});const promise=sendHotChannelVideo(cloudInput());
+ await new Promise(resolve=>setImmediate(resolve));assert.equal(dispatches,1);
+ t.mock.timers.tick(90000);assert.equal(await promise,null);assert.equal(calls.filter(c=>c==='messages.SendMedia').length,1);
+});
+test('original local-file large upload retains its separate 15-minute overall deadline',async t=>{
+ client.start=async()=>new Promise(()=>{});t.mock.timers.enable({apis:['setTimeout','Date'],now:1800000000000});
+ const promise=sendLargeHotVideo(input()),checked=assert.rejects(promise,e=>e.status===503);let settled=false;void checked.then(()=>{settled=true});
+ await Promise.resolve();t.mock.timers.tick(90000);await Promise.resolve();assert.equal(settled,false);
+ t.mock.timers.tick(810000);await checked;assert.equal(dispatches,0);
+});
