@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { CalendarClock, Check, Clock3, Film, LoaderCircle, Pencil, Play, RefreshCw, Trash2, Upload, X } from "lucide-react";
+import { CalendarClock, Check, Clock3, ExternalLink, Film, LoaderCircle, Pencil, Play, RefreshCw, Trash2, Upload, X } from "lucide-react";
 import { cancelHotVideoUpload, getHotVideoUploadResumes, HotVideoUploadError, uploadHotVideoFile,
   type SavedHotVideoUpload, type UploadProgress } from "./hot-video-upload-client";
 import "./telegram-hot-videos-admin.css";
@@ -9,14 +9,19 @@ import { HOT_VIDEO_MAX_BYTES } from "../lib/telegram-hot-video-limits";
 
 type AdminRequest = <T>(path: string, method?: string, body?: unknown) => Promise<T>;
 type Props = { request: AdminRequest; signInPath: string };
-type HotVideo = { id: string; title: string; originalName: string; bytes: number; active: boolean; createdAt: number; lastSentAt: number | null };
+type HotVideo = { id: string; title: string; originalName: string; bytes: number; active: boolean; createdAt: number; lastSentAt: number | null;
+  origin?: "channel" | "upload"; sourceChatId?: string; sourceMessageId?: number; sourceUrl?: string; used?: boolean;
+  sourceMarkerStatus?: string; sourceMarkerError?: string; usageState?: "unused" | "pending" | "sending" | "sent" | "unknown" | "failed"; sourceTitle?: string };
+type SourceChannel = { chatId: string; title: string; selected: boolean; ready: boolean; lastError: string; lastSyncedAt: number | null };
+type SourceCandidate = { chatId: string; title: string; username?: string | null };
 type HotJob = { id: string; videoId: string; title: string; kind: "manual" | "scheduled" | "automatic"; runAt: number;
-  status: string; attempts: number; lastError: string; sentAt: number | null; messageId: number | null };
+  status: string; attempts: number; lastError: string; sentAt: number | null; messageId: number | null; markerStatus?: string; markerError?: string };
 type HotStatus = { enabled: boolean; targetChatId: string; targetTitle: string; intervalHours: number; nextRunAt: number | null;
-  revision: string; ready: boolean; lastError: string; lastCheckedAt: number | null;
+  revision: string; ready: boolean; lastError: string; lastCheckedAt: number | null; markSourceUsed?: boolean;
+  sourceChannels?: SourceChannel[]; sourceCandidates?: SourceCandidate[]; videoCount?: number;
   storage: { bytes: number; maxBytes: number; maxVideoBytes: number; availableBytes: number };
   videos: HotVideo[]; jobs: HotJob[]; counts: Record<string, number>; candidates?: { chatId: string; title: string }[] };
-type Draft = { enabled: boolean; targetChatId: string; intervalHours: number; firstRunAt: string; revision?: string };
+type Draft = { enabled: boolean; targetChatId: string; intervalHours: number; firstRunAt: string; revision?: string; sources: string[]; markSourceUsed: boolean };
 type Notice = { message: string; error?: boolean; sessionExpired?: boolean };
 
 const endpoint = "/api/admin/telegram/hot-videos";
@@ -29,7 +34,7 @@ const buttons = [
 const timeFormat = new Intl.DateTimeFormat("zh-CN", { timeZone: "Asia/Kuala_Lumpur", year: "numeric", month: "2-digit", day: "2-digit",
   hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" });
 const statusLabels: Record<string, string> = { pending: "待发送", sending: "发送中", sent: "已发送", failed: "发送失败", unknown: "待确认", cancelled: "已取消", skipped: "已跳过" };
-const kindLabels = { manual: "立即发送", scheduled: "指定时间", automatic: "自动轮播" } as const;
+const kindLabels = { manual: "立即发送", scheduled: "指定时间", automatic: "自动队列" } as const;
 const formatTime = (value: number | null | undefined) => typeof value === "number" && Number.isFinite(value) ? timeFormat.format(value) : "—";
 const formatSize = (bytes: number) => `${(bytes / (1024 * 1024)).toFixed(bytes >= 10 * 1024 * 1024 ? 0 : 1)} MB`;
 function dateValue(value: string): number | null {
@@ -41,7 +46,8 @@ function shortTitle(value: string): string {
   return result;
 }
 function draftFromStatus(status: HotStatus): Draft {
-  return { enabled: status.enabled, targetChatId: status.targetChatId || "", intervalHours: status.intervalHours || 6, firstRunAt: "", revision: status.revision };
+  return { enabled: status.enabled, targetChatId: status.targetChatId || "", intervalHours: status.intervalHours || 6, firstRunAt: "", revision: status.revision,
+    sources: (status.sourceChannels || []).filter(source => source.selected).map(source => source.chatId), markSourceUsed: status.markSourceUsed !== false };
 }
 function failed(error: unknown): Notice {
   return { message: error instanceof Error ? error.message : "暂时无法完成操作，请稍后重试。", error: true,
@@ -50,7 +56,7 @@ function failed(error: unknown): Notice {
 
 export default function TelegramHotVideos({ request, signInPath }: Props) {
   const [status, setStatus] = useState<HotStatus | null>(null);
-  const [draft, setDraft] = useState<Draft>({ enabled: false, targetChatId: "", intervalHours: 6, firstRunAt: "" });
+  const [draft, setDraft] = useState<Draft>({ enabled: false, targetChatId: "", intervalHours: 6, firstRunAt: "", sources: [], markSourceUsed: true });
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState("");
   const [dirty, setDirty] = useState(false);
@@ -63,6 +69,8 @@ export default function TelegramHotVideos({ request, signInPath }: Props) {
   const [savedUpload, setSavedUpload] = useState<SavedHotVideoUpload | null>(null);
   const [uploadInputKey, setUploadInputKey] = useState(0);
   const [scheduledTimes, setScheduledTimes] = useState<Record<string, string>>({});
+  const [videoFilter, setVideoFilter] = useState<"all" | "unused" | "used">("unused");
+  const [sourceSearch, setSourceSearch] = useState("");
   const [renaming, setRenaming] = useState<{ id: string; title: string } | null>(null);
   const dirtyRef = useRef(false);
   const busyRef = useRef("");
@@ -116,9 +124,9 @@ export default function TelegramHotVideos({ request, signInPath }: Props) {
     setWorking("save"); setNotice(null);
     try {
       const value = await request<HotStatus>(endpoint, "PUT", { enabled: draft.enabled, targetChatId: draft.targetChatId.trim(),
-        intervalHours: draft.intervalHours, firstRunAt, revision: draft.revision });
+        intervalHours: draft.intervalHours, firstRunAt, revision: draft.revision, sources: draft.sources, markSourceUsed: draft.markSourceUsed });
       accept(value, true);
-      setNotice({ message: value.enabled ? `自动发布已保存，下次发送：${formatTime(value.nextRunAt)}（MYT）。` : "设置已保存，自动轮播已暂停。仍可立即发送或安排单次任务。" });
+      setNotice({ message: value.enabled ? `自动发布已保存，下次发送：${formatTime(value.nextRunAt)}（MYT）。` : "设置已保存，自动队列已暂停。仍可立即发送或安排单次任务。" });
     } catch (error) { setNotice(failed(error)); }
     finally { setWorking(""); }
   }
@@ -170,7 +178,7 @@ export default function TelegramHotVideos({ request, signInPath }: Props) {
       if (!mounted.current) return;
       accept(value); setFile(null); setUploadTitle(""); setUploadInputKey(key => key + 1);
       uploadSession.current = null; setSavedUpload(null);
-      setNotice({ message: "视频已保存。可立即发送、指定时间发送，或加入自动轮播。" });
+      setNotice({ message: "视频已保存。可立即发送、指定时间发送，或加入自动队列。" });
     } catch (error) {
       if (cancelRequested.current && uploadSession.current) {
         try {
@@ -200,6 +208,20 @@ export default function TelegramHotVideos({ request, signInPath }: Props) {
     if (!renaming || !renaming.title.trim()) return;
     if (await action(`rename:${renaming.id}`, { action: "update", id: renaming.id, title: renaming.title.trim() }, "视频名称已保存。")) setRenaming(null);
   }
+  function videoState(video: HotVideo): string {
+    if (video.lastSentAt || video.usageState === "sent") return "used";
+    if (video.usageState && ["unknown", "sending", "pending", "failed"].includes(video.usageState)) return video.usageState;
+    const outstanding = status?.jobs.find(job => job.videoId === video.id && ["unknown", "sending", "pending"].includes(job.status));
+    if (outstanding) return outstanding.status;
+    return video.used ? "unknown" : "unused";
+  }
+  function toggleSource(chatId: string, checked: boolean) {
+    change({ sources: checked ? [...new Set([...draft.sources, chatId])] : draft.sources.filter(id => id !== chatId) });
+  }
+  const sourceChoices = new Map<string, SourceCandidate>((status?.sourceCandidates || []).map(candidate => [candidate.chatId, candidate]));
+  for (const source of status?.sourceChannels || []) if (!sourceChoices.has(source.chatId)) sourceChoices.set(source.chatId, source);
+  const matchingSources = [...sourceChoices.values()].filter(source => !sourceSearch.trim() || `${source.title} ${source.username || ""} ${source.chatId}`.toLowerCase().includes(sourceSearch.trim().toLowerCase()));
+  const visibleVideos = (status?.videos || []).filter(video => videoFilter === "all" || (videoFilter === "used") === (videoState(video) === "used"));
   const targetKnown = status?.candidates?.some(candidate => candidate.chatId === draft.targetChatId) ? draft.targetChatId : "";
   const savedTarget = status?.targetTitle || "🔞365 Free Bonus Hot";
   const usedPercent = status && status.storage.maxBytes > 0 ? Math.min(100, status.storage.bytes / status.storage.maxBytes * 100) : 0;
@@ -210,7 +232,7 @@ export default function TelegramHotVideos({ request, signInPath }: Props) {
     <div className="cms-settings-panel">
       <div>
         <h2 id="hot-videos-title">Hot 视频发布</h2>
-        <p>上传视频后发送到 🔞365 Free Bonus Hot。可立即发布、指定时间，或全天按固定间隔自动轮播。</p>
+        <p>从其他 Telegram 频道收集视频，先放入后台队列，再按设定时间逐条发布到 🔞365 Free Bonus Hot。</p>
         <span className={`cms-telegram-status${status?.enabled && status.ready ? " cms-telegram-enabled" : ""}`}>
           {loading && !status ? "读取中" : status?.enabled ? status.ready ? "自动发布已开启" : "需要检查" : "自动发布未开启"}
         </span>
@@ -223,8 +245,27 @@ export default function TelegramHotVideos({ request, signInPath }: Props) {
         <form onSubmit={save} className="cms-hot-videos-config">
           <fieldset disabled={loading || Boolean(busy)}>
             <label className="cms-telegram-switch"><input type="checkbox" role="switch" checked={draft.enabled}
-              onChange={event => change({ enabled: event.target.checked })} />启用 Hot 视频自动发布</label>
-            <small>仅发送视频和下方三个按钮，不添加文案。使用已保存的 @FreeBonus365ChatBot；机器人需为目标频道管理员并具备发布消息权限。</small>
+              onChange={event => change({ enabled: event.target.checked })} />启用 Hot 视频定时队列</label>
+            <small>仅发送视频和下方三个按钮，不添加原文案。使用已保存的 @FreeBonus365ChatBot；机器人需有目标频道发布权限。</small>
+            <div className="cms-hot-video-sources">
+              <div className="cms-hot-videos-heading"><h3>来源频道 <span>已选 {draft.sources.length}</span></h3>
+                <button className="cms-secondary" type="button" disabled={dirty || !draft.sources.length}
+                  onClick={() => void action("sync_sources", { action: "sync_sources" }, "已检查来源频道。识别的视频进入后台队列，按设定时间逐条发送。")}>{busy === "sync_sources" ? <LoaderCircle size={14} className="cms-spin" /> : <RefreshCw size={14} />}同步频道视频</button></div>
+              <small>选择已连接个人账号加入的来源频道，与其他自动转发功能的来源设置分开保存。同步只收集视频，不会一次发完；频道里的旧视频和后续新视频都会逐步收集。</small>
+              <small>只收集可播放的 MP4 视频；来源频道不能限制转发。已使用标记需要 ChatBot 在来源频道的发布权限。</small>
+              {sourceChoices.size > 6 && <label>查找来源频道<input type="search" value={sourceSearch} placeholder="频道名称、用户名或 ID" onChange={event => setSourceSearch(event.target.value)} /></label>}
+              {matchingSources.length ? <div className="cms-hot-video-source-choices">{matchingSources.map(source => <label key={source.chatId} className="cms-hot-video-source-choice">
+                <input type="checkbox" checked={draft.sources.includes(source.chatId)} disabled={!draft.sources.includes(source.chatId) && (source.chatId === draft.targetChatId.trim() || draft.sources.length >= 20)}
+                  onChange={event => toggleSource(source.chatId, event.target.checked)} />
+                <span><strong>{source.title || source.chatId}</strong><small>{source.username ? `@${source.username} · ` : ""}{source.chatId}{source.chatId === draft.targetChatId.trim() ? " · 当前目标频道" : ""}</small></span>
+              </label>)}</div> : <p className="cms-hot-videos-empty">{sourceSearch ? "没有符合的来源频道。" : "还没有可选来源。请先连接个人 Telegram 账号并加入来源频道，再刷新列表。"}</p>}
+              {(status?.sourceChannels || []).filter(source => source.selected).map(source => <div className={`cms-hot-video-source-status${source.lastError ? " cms-hot-video-source-error" : ""}`} key={source.chatId}>
+                <div><strong>{source.title || source.chatId}</strong><span>{source.ready ? "已连接" : "需要检查"} · 最近同步：{formatTime(source.lastSyncedAt)}</span></div>
+                {source.lastError && <p role="alert">{source.lastError}</p>}
+              </div>)}
+              <label className="cms-telegram-switch"><input type="checkbox" checked={draft.markSourceUsed} onChange={event => change({ markSourceUsed: event.target.checked })} />发送成功后在来源频道标记“已发送 · 已使用”</label>
+              <small>确认目标频道发送成功后，@FreeBonus365ChatBot 才会在来源视频下回复“✅ Sent · Used”。机器人需有来源频道发布权限；待确认的发送不会标记为已使用。来源标记失败不会重发目标视频。</small>
+            </div>
             {(status?.candidates?.length || 0) > 0 && <label>选择已识别频道<select value={targetKnown}
               onChange={event => change({ targetChatId: event.target.value })}>
               <option value="">选择频道，或在下方填写 ID</option>
@@ -243,7 +284,7 @@ export default function TelegramHotVideos({ request, signInPath }: Props) {
             </div>
             <div className="cms-hot-videos-next"><CalendarClock size={17} /><div><strong>下次自动发送</strong>
               <span>{status?.enabled ? formatTime(status.nextRunAt) : "尚未启用"}</span></div></div>
-            <small>按上传顺序轮流发送已启用的视频，发完一轮后继续循环。刷新页面或重启不会重置时间；停机期间错过的时段不会集中补发。立即发送和单次定时不改变自动轮播时间。</small>
+            <small>按队列顺序，每个设定时段只发一条未使用视频。已使用的视频不会自动重复发送，队列发完后等待新视频。刷新或重启保留计划；错过的时段不会集中补发。立即发送和单次定时不改变原有间隔。</small>
             <div className="cms-hot-videos-actions">
               <button className="cms-primary" type="submit">{busy === "save" ? <LoaderCircle size={16} className="cms-spin" /> : <Check size={16} />}保存发布设置</button>
               {dirty && <span className="cms-hot-videos-unsaved">有未保存的设置</span>}
@@ -255,6 +296,8 @@ export default function TelegramHotVideos({ request, signInPath }: Props) {
           {buttons.map(button => <a key={button.url} href={button.url} target="_blank" rel="noopener noreferrer">{button.text}<span>{button.url}</span></a>)}
         </div>
 
+        <div className="cms-hot-video-cloud-note"><Film size={17} /><div><strong>频道视频保存在 Telegram</strong><small>后台只保存来源和发送状态，无需把来源视频上传到网站储存空间。</small></div></div>
+        <details className="cms-hot-video-local-upload"><summary>原有本地视频上传（可选）</summary>
         <form className="cms-hot-videos-upload" onSubmit={upload}>
           <div className="cms-hot-videos-heading"><h3><Upload size={17} />添加视频</h3>
             {status && <span>已用 {formatSize(status.storage.bytes)} · 可新增 {formatSize(status.storage.availableBytes)}</span>}</div>
@@ -277,15 +320,22 @@ export default function TelegramHotVideos({ request, signInPath }: Props) {
             <button type="button" className="cms-secondary" onClick={() => { cancelRequested.current = true; uploadRef.current?.abort(); }}>取消上传</button>
           </div>}
         </form>
+        </details>
 
         <div className="cms-hot-videos-library">
-          <div className="cms-hot-videos-heading"><h3><Film size={17} />视频列表 <span>{status?.videos.length || 0}</span></h3>
+          <div className="cms-hot-videos-heading"><h3><Film size={17} />视频列表 <span>{status?.videoCount ?? status?.videos.length ?? 0}</span></h3>
             <button type="button" className="cms-secondary" disabled={Boolean(busy) || loading} onClick={() => setReload(value => value + 1)}><RefreshCw size={14} />刷新状态</button></div>
+          {status && (status.videoCount || 0) > status.videos.length && <small>本页显示前 {status.videos.length} 条 / 共 {status.videoCount} 条。筛选仅作用于本页，完整队列会按计划持续处理。</small>}
+          <div className="cms-hot-video-filter" role="group" aria-label="视频使用状态筛选">
+            {([['unused', '未使用'], ['used', '已发送 · 已使用'], ['all', '全部']] as const).map(([value, label]) => <button key={value} type="button" className={`cms-secondary${videoFilter === value ? " cms-hot-video-filter-active" : ""}`} aria-pressed={videoFilter === value} onClick={() => setVideoFilter(value)}>{label}</button>)}
+          </div>
           {loading && !status ? <p className="cms-loading"><LoaderCircle size={16} className="cms-spin" /> 正在读取视频…</p>
-            : !status?.videos.length ? <p className="cms-hot-videos-empty">还没有视频。上传后可立即发送、指定时间或开启自动轮播。</p>
-              : status.videos.map((video, index) => <article className="cms-hot-video-card" key={video.id}>
+            : !status?.videos.length ? <p className="cms-hot-videos-empty">还没有视频。请保存来源频道并点击“同步频道视频”，识别的视频会进入定时队列。</p>
+              : !visibleVideos.length ? <p className="cms-hot-videos-empty">本页没有此状态的视频。</p>
+              : visibleVideos.map((video, index) => <article className="cms-hot-video-card" key={video.id}>
                 <div className="cms-hot-video-card-header"><div className="cms-hot-video-identity"><span className="cms-hot-video-order">{index + 1}</span><div>
-                  <strong>{video.title || video.originalName}</strong><small>{video.originalName} · {formatSize(video.bytes)}</small>
+                  <strong>{video.title || video.originalName}</strong><small>{video.origin === "channel" ? video.sourceTitle || "来源频道视频" : video.originalName} · {formatSize(video.bytes)}</small>
+                  <span className={`cms-hot-video-use-state cms-hot-video-use-${videoState(video)}`}>{videoState(video) === "used" ? "✅ 已发送 · 已使用" : videoState(video) === "unused" ? "待发送 · 未使用" : videoState(video) === "failed" ? "发送失败，可检查后重试" : statusLabels[videoState(video)]}</span>
                 </div></div><div className="cms-hot-video-tools">
                   <button className="cms-icon-button" type="button" disabled={Boolean(busy)} aria-label={`重命名 ${video.title || video.originalName}`}
                     onClick={() => setRenaming({ id: video.id, title: video.title })}><Pencil size={15} /></button>
@@ -296,14 +346,16 @@ export default function TelegramHotVideos({ request, signInPath }: Props) {
                   onChange={event => setRenaming({ id: video.id, title: event.target.value })} disabled={Boolean(busy)} />
                   <button type="submit" className="cms-secondary" disabled={Boolean(busy)}><Check size={14} />保存</button>
                   <button type="button" className="cms-icon-button" aria-label="取消重命名" disabled={Boolean(busy)} onClick={() => setRenaming(null)}><X size={14} /></button></form>}
-                <div className="cms-hot-video-meta"><span>上传：{formatTime(video.createdAt)}</span><span>最近发送：{formatTime(video.lastSentAt)}</span></div>
-                <label className="cms-telegram-switch"><input type="checkbox" checked={video.active} disabled={Boolean(busy)}
-                  onChange={event => void action(`active:${video.id}`, { action: "update", id: video.id, active: event.target.checked }, event.target.checked ? "视频已加入自动轮播。" : "视频已退出自动轮播，仍可手动或定时发送。")} />加入自动轮播</label>
-                <div className="cms-hot-video-send"><button className="cms-primary" type="button" disabled={Boolean(busy) || !status.targetChatId || dirty}
+                <div className="cms-hot-video-meta"><span>收集：{formatTime(video.createdAt)}</span><span>最近发送：{formatTime(video.lastSentAt)}</span>
+                  {video.sourceUrl && <a href={video.sourceUrl} target="_blank" rel="noopener noreferrer"><ExternalLink size={12} />查看来源视频</a>}</div>
+                {video.sourceMarkerStatus && video.sourceMarkerStatus !== "none" && <small className={video.sourceMarkerError ? "cms-hot-video-marker-error" : "cms-hot-video-marker-state"}>来源标记：{({ sent: "已标记", pending: "等待标记", unknown: "标记结果待确认", failed: "标记失败", skipped: "未启用" } as Record<string, string>)[video.sourceMarkerStatus] || video.sourceMarkerStatus}{video.sourceMarkerError ? ` · ${video.sourceMarkerError}` : ""}</small>}
+                <label className="cms-telegram-switch"><input type="checkbox" checked={video.active && !["used", "failed"].includes(videoState(video))} disabled={Boolean(busy) || ["used", "failed"].includes(videoState(video))}
+                  onChange={event => void action(`active:${video.id}`, { action: "update", id: video.id, active: event.target.checked }, event.target.checked ? "视频已加入自动队列。" : "视频已退出自动队列，仍可手动或定时发送。")} />{videoState(video) === "used" ? "已使用，自动跳过" : videoState(video) === "failed" ? "自动队列已跳过，请检查后手动重试" : "加入自动队列"}</label>
+                <div className="cms-hot-video-send"><button className="cms-primary" type="button" disabled={Boolean(busy) || !status?.targetChatId || dirty || !["unused", "failed"].includes(videoState(video))}
                   onClick={() => void send(video, false)}>{busy === `send:${video.id}` ? <LoaderCircle size={15} className="cms-spin" /> : <Play size={15} />}立即发送</button>
                   <div className="cms-hot-video-schedule"><label>指定发送时间（MYT）<input type="datetime-local" step="60" value={scheduledTimes[video.id] || ""} disabled={Boolean(busy)}
                     onChange={event => setScheduledTimes(current => ({ ...current, [video.id]: event.target.value }))} /></label>
-                    <button className="cms-secondary" type="button" disabled={Boolean(busy) || !scheduledTimes[video.id] || !status.targetChatId || dirty}
+                    <button className="cms-secondary" type="button" disabled={Boolean(busy) || !scheduledTimes[video.id] || !status?.targetChatId || dirty || !["unused", "failed"].includes(videoState(video))}
                       onClick={() => void send(video, true)}><CalendarClock size={15} />安排发送</button></div>
                 </div>
               </article>)}
@@ -315,7 +367,8 @@ export default function TelegramHotVideos({ request, signInPath }: Props) {
           <dl className="cms-telegram-counts">{Object.entries(status?.counts || {}).map(([key, count]) => <div key={key}><dt>{statusLabels[key] || key}</dt><dd>{count}</dd></div>)}</dl>
           {!status?.jobs.length ? <p className="cms-hot-videos-empty">尚无发送任务。</p> : <ol className="cms-hot-video-jobs">
             {status.jobs.map(job => <li key={job.id}><div className="cms-hot-video-job-main"><strong>{job.title || "视频"}</strong>
-              <small>{kindLabels[job.kind]} · {formatTime(job.sentAt || job.runAt)}（MYT）</small>{job.lastError && <p>{job.lastError}</p>}</div>
+              <small>{kindLabels[job.kind]} · {formatTime(job.sentAt || job.runAt)}（MYT）</small>{job.lastError && <p>{job.lastError}</p>}
+              {job.markerStatus && job.markerStatus !== "none" && <small className={job.markerError ? "cms-hot-video-marker-error" : "cms-hot-video-marker-state"}>来源标记：{({ sent: "已标记", pending: "等待标记", unknown: "标记结果待确认", failed: "标记失败", skipped: "未启用" } as Record<string, string>)[job.markerStatus] || job.markerStatus}{job.markerError ? ` · ${job.markerError}` : ""}</small>}</div>
               <span className={`cms-hot-video-job-status cms-hot-video-job-${job.status}`}>{statusLabels[job.status] || job.status}</span>
               {job.status === "pending" && <button className="cms-secondary" type="button" disabled={Boolean(busy)} onClick={() => void action(`cancel:${job.id}`, { action: "cancel", id: job.id }, "该发送任务已取消。")}>取消任务</button>}
             </li>)}

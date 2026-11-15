@@ -51,7 +51,9 @@ try {
   await write('app/page.tsx', 'export default function Page(){return <main>Isolated upload transport fixture</main>;}');
   await write('app/chatgpt-auth.ts', 'export async function getChatGPTUser(){return {userId:"fixture-admin",displayName:"Fixture",email:"",fullName:null};}');
   await write('app/lib/directory.ts', 'export class PromotionValidationError extends Error{};export class SettingsValidationError extends Error{};');
-  await write('app/lib/telegram-hot-video-native.ts', 'export async function sendLargeHotVideo(){throw new Error("Upload fixture must never send a channel message");}');
+  await write('app/lib/telegram-hot-video-sources.ts', 'export async function syncHotVideoSources(){return {scanned:0,discovered:0,skipped:0};}');
+  await write('app/lib/telegram-hot-video-native.ts', `const unexpected=async(..._args:unknown[])=>{throw new Error("Upload fixture must never send a channel message");};
+export {unexpected as sendLargeHotVideo,unexpected as sendHotChannelVideo,unexpected as markHotChannelVideoUsed,unexpected as checkLargeHotVideoAccess,unexpected as checkHotVideoSourceAccess};`);
   await write('app/lib/telegram-bot.ts', `
 declare global {var __uploadIntegrationTelegramCalls:number|undefined;}
 const disabled=async(..._args:unknown[])=>{globalThis.__uploadIntegrationTelegramCalls=(globalThis.__uploadIntegrationTelegramCalls||0)+1;throw Error('Telegram disabled in isolated upload check');};

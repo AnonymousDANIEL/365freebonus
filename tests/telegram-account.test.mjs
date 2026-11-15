@@ -61,7 +61,7 @@ exports.TelegramClient=class {
   async getEntity(peer){exports.state.calls.push({method:'entity',peer});fail('entity');if(exports.state.onEntity)await exports.state.onEntity();return typeof peer==='string'?exports.state.resolvedTarget:exports.state.dialogs.find(d=>String(d.entity.id)===peer.channelId.toString())?.entity;}
   async getMessages(peer,params){exports.state.calls.push({method:'getMessages',peer,params});fail('getMessages');if(exports.state.onGetMessages)await exports.state.onGetMessages();return exports.state.messages.filter(message=>params.ids.includes(message.id));}
   iterMessages(peer,params){exports.state.calls.push({method:'history',peer:peer.channelId.toString(),params});fail('history');
-    return {async *[Symbol.asyncIterator](){let messages=exports.state.messages.filter(m=>m.id>(params.minId||0));
+    return {async *[Symbol.asyncIterator](){let messages=exports.state.messages.filter(m=>m.id>(params.minId||0)&&(!params.maxId||m.id<params.maxId));
       if(!params.reverse)messages=messages.toSorted((a,b)=>b.id-a.id);
       for(const m of messages.slice(0,params.limit||messages.length))yield m;}};}
   async downloadMedia(message,params){exports.state.calls.push({method:'download',id:message.id});fail('download');if(exports.state.onDownload)await exports.state.onDownload(message,params);return exports.state.media;}
@@ -1716,4 +1716,57 @@ test('readonly caption metadata audit includes the current final preflight row w
   assert.deepEqual(post.entityCoverage.find(coverage=>coverage.type==='bold'),{type:'bold',expectedCount:1,actualCount:0,expectedCoveredUtf16:5,actualCoveredUtf16:0});
   assert.deepEqual(db().prepare('SELECT * FROM telegram_relay_outbox').get(),before);
   assert.equal(telegram.state.calls.filter(call=>call.method==='EditMessage').length,0);
+});
+
+function hotSource(revision='hot-source-revision'){
+ db().exec(`CREATE TABLE IF NOT EXISTS telegram_hot_video_sources(chat_id INTEGER PRIMARY KEY,title TEXT NOT NULL DEFAULT '',username TEXT NOT NULL DEFAULT '',selected INTEGER NOT NULL DEFAULT 1,revision TEXT NOT NULL,backfill_before_id INTEGER NOT NULL DEFAULT 0,last_message_id INTEGER NOT NULL DEFAULT 0,backfill_done INTEGER NOT NULL DEFAULT 0,last_synced_at INTEGER NOT NULL DEFAULT 0,last_error TEXT NOT NULL DEFAULT '',next_attempt_at INTEGER NOT NULL DEFAULT 0)`);
+ db().prepare("INSERT INTO telegram_hot_video_sources(chat_id,title,selected,revision) VALUES(?,'Hot library source',1,?)").run(source,revision);
+ return {chatId:source,revision,beforeId:0,afterId:0,backfillDone:false,limit:2};
+}
+function hotSourceVideo(id,extra={}){const message=video(id,{caption:'',size:1702*1024*1024,...extra});message.media.document.id={toString:()=>String(700000+id)};return message;}
+test('Hot history imports captionless large-video metadata without downloading or changing relay source selection/cursor',async()=>{
+ await login();const input=hotSource();const before=db().prepare('SELECT selected,last_message_id FROM telegram_personal_sources WHERE chat_id=?').get(source);
+ telegram.state.messages=[hotSourceVideo(11),hotSourceVideo(12)];telegram.state.calls=[];
+ const result=await account.readHotVideoSourcePages(db(),input);
+ assert.equal(result.state,'ok');assert.deepEqual(result.videos.map(v=>[v.sourceMessageId,v.documentId,v.bytes]),[[12,'700012',1702*1024*1024],[11,'700011',1702*1024*1024]]);
+ assert.equal(result.lastMessageId,12);assert.equal(result.backfillBeforeId,11);assert.equal(result.backfillDone,false);
+ assert.deepEqual(db().prepare('SELECT selected,last_message_id FROM telegram_personal_sources WHERE chat_id=?').get(source),before);
+ assert.equal(telegram.state.calls.some(c=>['download','EditMessage','sendMessage','sendVideo'].includes(c.method)),false);
+ assert.equal(JSON.stringify(result).includes('Caption'),false);assert.equal(JSON.stringify(result).includes('secret-access-hash'),false);assert.equal(JSON.stringify(result).includes('fixture-session'),false);assert.equal(stored().lease_id,'');
+});
+test('Hot history uses independent ascending fresh and descending backwards cursors until history is exhausted',async()=>{
+ await login();const input=hotSource();telegram.state.messages=[hotSourceVideo(40),hotSourceVideo(41),hotSourceVideo(42)];
+ const first=await account.readHotVideoSourcePages(db(),input);assert.equal(first.lastMessageId,42);assert.equal(first.backfillBeforeId,41);
+ telegram.state.messages=[photo(39),hotSourceVideo(40),hotSourceVideo(43),hotSourceVideo(44)];telegram.state.calls=[];
+ const next=await account.readHotVideoSourcePages(db(),{...input,beforeId:first.backfillBeforeId,afterId:first.lastMessageId});
+ assert.equal(next.state,'ok');assert.equal(next.lastMessageId,44);assert.equal(next.backfillBeforeId,39);assert.equal(next.backfillDone,false);assert.deepEqual(next.videos.map(v=>v.sourceMessageId),[43,44,40]);
+ assert.deepEqual(telegram.state.calls.filter(c=>c.method==='history').map(c=>c.params),[{limit:2,minId:42,reverse:true},{limit:2,maxId:41}]);
+ telegram.state.messages=[];const last=await account.readHotVideoSourcePages(db(),{...input,beforeId:39,afterId:44});assert.equal(last.backfillDone,true);assert.equal(last.lastMessageId,44);
+});
+test('Hot history skips GIF, round video, text, photo and individually protected posts while advancing the source cursors',async()=>{
+ await login();const input=hotSource();telegram.state.messages=[hotSourceVideo(10),hotSourceVideo(11,{roundMessage:true}),hotSourceVideo(12,{animated:true}),photo(13),hotSourceVideo(14,{noforwards:true}),new Api.Message({id:15,date:Math.floor(Date.now()/1000),peerId:new Api.PeerChannel({channelId:'1001'}),message:'marker text'})];
+ const r=await account.readHotVideoSourcePages(db(),{...input,limit:50});assert.equal(r.state,'ok');assert.deepEqual(r.videos.map(v=>v.sourceMessageId),[10]);assert.equal(r.lastMessageId,15);assert.equal(r.backfillBeforeId,10);assert.equal(r.backfillDone,true);
+});
+test('Hot history refuses a protected source before any history/media request',async()=>{
+ await login();const input=hotSource();telegram.state.dialogs=[channel(1001,{protectedChannel:true})];telegram.state.calls=[];
+ const r=await account.readHotVideoSourcePages(db(),input);assert.equal(r.state,'protected');assert.deepEqual(r.videos,[]);assert.equal(telegram.state.calls.some(c=>c.method==='history'||c.method==='download'),false);
+});
+test('Hot source deselection during recipient lookup discards the snapshot and never requests history',async()=>{
+ await login();const input=hotSource();telegram.state.onEntity=()=>db().prepare('UPDATE telegram_hot_video_sources SET selected=0').run();telegram.state.calls=[];
+ const r=await account.readHotVideoSourcePages(db(),input);assert.equal(r.state,'changed');assert.deepEqual(r.videos,[]);assert.equal(telegram.state.calls.some(c=>c.method==='history'),false);assert.equal(stored().lease_id,'');
+});
+test('Hot history respects the existing personal-account lease and connection backoff',async()=>{
+ await login();const input=hotSource();db().prepare("UPDATE telegram_personal_account SET lease_id='other-work',lease_until=?").run(Date.now()+60000);telegram.state.calls=[];
+ let r=await account.readHotVideoSourcePages(db(),input);assert.equal(r.state,'busy');assert.equal(stored().lease_id,'other-work');assert.equal(telegram.state.calls.length,0);
+ db().prepare("UPDATE telegram_personal_account SET lease_id='',lease_until=0,next_attempt_at=?").run(Date.now()+90000);r=await account.readHotVideoSourcePages(db(),input);assert.equal(r.state,'backoff');assert.ok(r.retryAfterMs>80000);assert.equal(telegram.state.calls.length,0);
+});
+
+test('Hot history accepts only regular non-ephemeral MP4 videos and skips other video containers',async()=>{
+ await login();const input=hotSource();const ephemeral=hotSourceVideo(14);ephemeral.media.ttlSeconds=30;
+ telegram.state.messages=[hotSourceVideo(10),hotSourceVideo(11,{mimeType:'video/webm'}),hotSourceVideo(12,{mimeType:'video/x-matroska'}),hotSourceVideo(13,{mimeType:'video/quicktime'}),ephemeral];
+ const r=await account.readHotVideoSourcePages(db(),{...input,limit:50});assert.equal(r.state,'ok');assert.deepEqual(r.videos.map(v=>v.sourceMessageId),[10]);assert.equal(r.lastMessageId,14);assert.equal(r.backfillBeforeId,10);assert.equal(r.backfillDone,true);
+});
+test('Hot history reports changed when the saved personal account no longer has a joined source peer',async()=>{
+ await login();const input=hotSource();db().prepare('UPDATE telegram_personal_sources SET joined=0 WHERE chat_id=?').run(source);telegram.state.calls=[];
+ const r=await account.readHotVideoSourcePages(db(),input);assert.equal(r.state,'changed');assert.deepEqual(r.videos,[]);assert.equal(telegram.state.calls.length,0);
 });

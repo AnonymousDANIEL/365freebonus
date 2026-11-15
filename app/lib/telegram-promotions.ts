@@ -121,6 +121,12 @@ export function saveTelegramHotVideoSettings(input: Parameters<typeof saveHotVid
 export function queueTelegramHotVideo(input: Parameters<typeof enqueueHotVideo>[1]) {
   return enqueueHotVideo(getSqlite(), input, decryptToken);
 }
+export async function syncTelegramHotVideoSources() {
+  const { syncHotVideoSources } = await import("./telegram-hot-video-sources");
+  const db = getSqlite();
+  await syncHotVideoSources(db, { all: true });
+  return hotVideoStatus(db);
+}
 export function updateTelegramHotVideo(input: Parameters<typeof updateHotVideo>[1]) { return updateHotVideo(getSqlite(), input); }
 export function deleteTelegramHotVideo(id: string) { return deleteHotVideo(getSqlite(), id); }
 export function cancelTelegramHotVideoJob(id: string) { return cancelHotVideoJob(getSqlite(), id); }

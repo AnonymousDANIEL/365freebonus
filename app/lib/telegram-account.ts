@@ -1614,3 +1614,102 @@ export function hotVideoBotApplication(db = getSqlite()) {
   const credentials = unseal<Credentials>(current.config_ciphertext);
   return { ...credentials, revision: createHash("sha256").update(current.config_ciphertext).digest("hex") };
 }
+
+export type HotVideoSourcePageInput = {
+  chatId: number; revision: string; beforeId: number; afterId: number; backfillDone: boolean; limit?: number;
+};
+export type HotVideoSourceHistory = {
+  state: "ok" | "busy" | "backoff" | "disconnected" | "protected" | "unavailable" | "changed";
+  accountGeneration: string; sourceTitle: string; sourceUsername: string; lastMessageId: number;
+  backfillBeforeId: number; backfillDone: boolean; retryAfterMs: number;
+  videos: { sourceMessageId: number; documentId: string; bytes: number; createdAt: number }[];
+};
+
+/** Metadata-only history reader sharing the existing account lease. No media, captions, access hashes or sessions leave this helper. */
+export async function readHotVideoSourcePages(db: DatabaseSync, input: HotVideoSourcePageInput): Promise<HotVideoSourceHistory> {
+  const current = row(db), limit = Math.max(1, Math.min(50, Math.floor(input.limit || 50)));
+  const result: HotVideoSourceHistory = { state: "unavailable", accountGeneration: current.generation, sourceTitle: "", sourceUsername: "",
+    lastMessageId: input.afterId, backfillBeforeId: input.beforeId, backfillDone: input.backfillDone, retryAfterMs: RETRY_MS, videos: [] };
+  if (!Number.isSafeInteger(input.chatId) || input.chatId >= 0 || !input.revision || ![input.beforeId, input.afterId].every(value => Number.isSafeInteger(value) && value >= 0)) return result;
+  if (current.stage !== "connected" || !current.session_ciphertext) return { ...result, state: "disconnected" };
+  if (current.next_attempt_at > Date.now()) return { ...result, state: "backoff", retryAfterMs: Math.max(1000, current.next_attempt_at - Date.now()) };
+  if (current.lease_until > Date.now()) return { ...result, state: "busy", retryAfterMs: 15_000 };
+  const selected = db.prepare("SELECT * FROM telegram_personal_sources WHERE chat_id=? AND joined=1").get(input.chatId) as SourceRow | undefined;
+  const selectedHot = () => Boolean(db.prepare("SELECT 1 FROM telegram_hot_video_sources WHERE chat_id=? AND selected=1 AND revision=?").get(input.chatId, input.revision));
+  if (!selected || !selectedHot()) return { ...result, state: "changed" };
+  if (selected.blocked) return { ...result, state: "protected" };
+  let claim: Claim;
+  try { claim = claimAccount(db, Date.now(), { connected: true, respectBackoff: true }); }
+  catch { return { ...result, state: "busy", retryAfterMs: 15_000 }; }
+  let client: TelegramClient | undefined;
+  const deadline = Date.now() + 40_000;
+  const remaining = () => Math.max(1, Math.min(REQUEST_MS, deadline - Date.now()));
+  const active = () => Date.now() < deadline && owns(db, claim) && selectedHot()
+    && Boolean(db.prepare("SELECT 1 FROM telegram_personal_sources WHERE chat_id=? AND joined=1 AND peer_ciphertext=?").get(selected.chat_id, selected.peer_ciphertext));
+  const assertActive = () => {
+    if (!active()) throw new TelegramAccountError("来源或账号设置已改变，本次读取已停止。", 409);
+    renew(db, claim);
+  };
+  try {
+    client = makeClient(unseal<Credentials>(claim.row.config_ciphertext), unseal<string>(claim.row.session_ciphertext));
+    assertActive(); await bounded(client, client.connect(), remaining()); assertActive();
+    const peer = inputPeer(selected);
+    if (peer.protected) return { ...result, state: "protected" };
+    const entity = await bounded(client, client.getEntity(peer.input), remaining()); assertActive();
+    if (!(entity instanceof Api.Channel) || Number(utils.getPeerId(entity)) !== input.chatId || !entity.broadcast || entity.left) return result;
+    if (entity.noforwards) return { ...result, state: "protected" };
+    result.sourceTitle = String(entity.title || selected.title).slice(0, 300);
+    result.sourceUsername = String(entity.username || "").slice(0, 64);
+    const readPage = async (mode: "new" | "backfill" | "initial", boundary: number) => {
+      assertActive();
+      const iterator = client!.iterMessages(peer.input, { limit, ...(mode === "new" ? { minId: boundary, reverse: true } : boundary > 0 ? { maxId: boundary } : {}) })[Symbol.asyncIterator]();
+      let fetched = 0, last = mode === "new" ? boundary : Infinity, minimum = Infinity, maximum = 0;
+      try {
+        for (; fetched < limit; fetched++) {
+          assertActive(); const next = await bounded(client!, iterator.next(), remaining()); assertActive();
+          if (next.done) break;
+          const message = next.value, id = Number(message.id);
+          if (!Number.isSafeInteger(id) || id <= 0 || (mode === "new" ? id <= last : id >= last) || boundary > 0 && (mode === "new" ? id <= boundary : id >= boundary))
+            throw new TelegramAccountError("Telegram 来源列表暂时未能完整读取，请稍后再试。", 502);
+          last = id; minimum = Math.min(minimum, id); maximum = Math.max(maximum, id);
+          if (!(message instanceof Api.Message)) continue;
+          if (!message.peerId || Number(utils.getPeerId(message.peerId)) !== input.chatId) throw new TelegramAccountError("Telegram 来源身份不一致，本次读取已停止。", 409);
+          if (message.noforwards || !(message.media instanceof Api.MessageMediaDocument) || message.media.ttlSeconds !== undefined || !(message.media.document instanceof Api.Document)) continue;
+          const document = message.media.document;
+          if (document.mimeType !== "video/mp4" || !document.attributes?.some(attribute => attribute instanceof Api.DocumentAttributeVideo && !attribute.roundMessage)
+            || document.attributes.some(attribute => attribute instanceof Api.DocumentAttributeAnimated)) continue;
+          let documentId = ""; try { documentId = document.id.toString(); } catch { /* malformed metadata is skipped */ }
+          const bytes = Number(document.size?.toString()), createdAt = Number(message.date) * 1000;
+          if (!/^-?[1-9]\d{0,19}$/.test(documentId) || !Number.isSafeInteger(bytes) || bytes <= 0 || !Number.isSafeInteger(createdAt) || createdAt <= 0 || createdAt > Date.now() + 1000) continue;
+          result.videos.push({ sourceMessageId: id, documentId, bytes, createdAt });
+        }
+      } finally { if (iterator.return) await bounded(client!, iterator.return(undefined), Math.max(1, Math.min(1000, remaining()))).catch(() => undefined); }
+      return { fetched, minimum: Number.isFinite(minimum) ? minimum : 0, maximum };
+    };
+    if (!input.beforeId && !input.afterId && !input.backfillDone) {
+      const page = await readPage("initial", 0);
+      result.lastMessageId = page.maximum;
+      result.backfillBeforeId = page.minimum;
+      result.backfillDone = page.fetched < limit || page.minimum <= 1;
+    } else {
+      const fresh = await readPage("new", input.afterId);
+      result.lastMessageId = Math.max(input.afterId, fresh.maximum);
+      if (!input.backfillDone) {
+        const older = await readPage("backfill", input.beforeId);
+        result.backfillBeforeId = older.minimum || input.beforeId;
+        result.backfillDone = older.fetched < limit || older.minimum <= 1;
+      }
+    }
+    assertActive();
+    // Persist only this transport's renewed encrypted session. Relay source cursors and selections are never edited.
+    saveSession(db, claim, client);
+    return { ...result, state: "ok", retryAfterMs: 30_000 };
+  } catch (error) {
+    if (!active()) return { ...result, state: "changed", videos: [] };
+    const raw = error as { errorMessage?: string };
+    if (/CHANNEL_PRIVATE|CHANNEL_INVALID|USER_BANNED_IN_CHANNEL|CHAT_FORBIDDEN/.test(raw?.errorMessage || "")) return { ...result, state: "unavailable", videos: [] };
+    const safe = safeError(error);
+    if (safe.status === 429 || safe.revoked) recordFailure(db, claim, error, "hot-video-source-history");
+    return { ...result, state: safe.status === 429 ? "backoff" : safe.revoked ? "disconnected" : "unavailable", retryAfterMs: Math.max(15_000, safe.delay), videos: [] };
+  } finally { release(db, claim); await closeClient(client); }
+}

@@ -30,6 +30,7 @@ write('app/lib/telegram-bot.js', `exports.calls=[];const unexpected=async(...arg
 exports.telegramRequest=unexpected;exports.telegramVideoFileRequest=unexpected;`);
 write('app/lib/telegram-promotions.js', `
 exports.calls=[];exports.failure=null;exports.actualStatus=false;
+exports.syncTelegramHotVideoSources=async()=>{exports.calls.push(["sync_sources"]);if(exports.failure)throw exports.failure;return exports.status;};
 exports.status={enabled:false,targetChatId:'',revision:'fixture-revision',videos:[],jobs:[]};
 exports.telegramHotVideoStatus=()=>{exports.calls.push(['status']);if(exports.failure)throw exports.failure;
  return exports.actualStatus?require('./telegram-hot-videos').hotVideoStatus(require('./sqlite').getSqlite()):exports.status;};
@@ -94,6 +95,7 @@ test('Hot video API requires administrator authentication before reading body or
   uncached(await route.GET(request('GET')), 401);
   uncached(await route.PUT(request('PUT', validSettings())), 401);
   uncached(await route.POST(request('POST', validSend())), 401);
+  const sync = request('POST', { action: 'sync_sources' }); uncached(await route.POST(sync), 401); assert.equal(sync.bodyUsed, false);
   const incoming = trackedStream([mp4()]); uncached(await uploadRoute.POST(upload(incoming.stream)), 401);
   assert.equal(incoming.state.reads, 0); assert.deepEqual(facade.calls, []); assert.deepEqual(storedFiles(), []);
 });
@@ -102,6 +104,7 @@ test('Hot video mutation and upload reject cross-origin or forged fetch context 
   for (const headers of [{ origin: 'https://other.example' }, { origin: '' }, { 'sec-fetch-site': 'cross-site' }]) {
     uncached(await route.PUT(request('PUT', validSettings(), headers)), 403);
     uncached(await route.POST(request('POST', validSend(), headers)), 403);
+    const sync = request('POST', { action: 'sync_sources' }, headers); uncached(await route.POST(sync), 403); assert.equal(sync.bodyUsed, false);
     const incoming = trackedStream([mp4()]); uncached(await uploadRoute.POST(upload(incoming.stream, headers)), 403);
     assert.equal(incoming.state.reads, 0);
   }
@@ -125,12 +128,41 @@ test('Hot video strict settings reject credentials, unsafe targets and invalid s
   assert.deepEqual(facade.calls, []);
 });
 
+test('Hot video channel settings accept canonical unique source IDs and preserve optional-field omission', async () => {
+  const twentySources = Array.from({ length: 20 }, (_, index) => String(-1_000_000_000_001 - index));
+  const accepted = [
+    validSettings(),
+    { ...validSettings(), sources: [], markSourceUsed: false },
+    { ...validSettings(), sources: twentySources, markSourceUsed: true },
+    // Recipient/source equality is a backend permission check, not a route schema decision.
+    { ...validSettings(), sources: [validSettings().targetChatId], markSourceUsed: true },
+  ];
+  for (const body of accepted) {
+    const response = await route.PUT(request('PUT', body)); uncached(response, 200);
+    assert.deepEqual(facade.calls, [['settings', body]]); facade.calls.length = 0;
+  }
+});
+
+test('Hot video channel settings reject unsafe, duplicate or excessive sources and non-boolean markers before dispatch', async () => {
+  const good = '-1001234567891';
+  for (const sources of [null, good, [1], ['@public_source'], ['https://t.me/example'], ['https://t.me/+invite'],
+    ['-12345'], ['-1000000000000'], ['-01001234567891'], [' ' + good], [good + ' '], ['-9007199254740992'],
+    [good, good], Array.from({ length: 21 }, (_, index) => String(-1_000_000_000_001 - index))]) {
+    uncached(await route.PUT(request('PUT', { ...validSettings(), sources })), 400);
+  }
+  for (const markSourceUsed of [null, 'true', 'false', 0, 1, {}, []])
+    uncached(await route.PUT(request('PUT', { ...validSettings(), sources: [good], markSourceUsed })), 400);
+  assert.deepEqual(facade.calls, []);
+});
+
 test('Hot video strict actions reject unknown fields, malformed IDs and empty updates', async () => {
   for (const body of [{ ...validSend(), caption: 'must not accept a caption' }, { ...validSend(), button: 'external' },
     { ...validSend(), videoId: '../video.mp4' }, { ...validSend(), requestId: 'retry-with-no-id' },
     { ...validSend(), runAt: 1.5 }, { action: 'update', id: videoId }, { action: 'update', id: videoId, title: ' ' },
     { action: 'update', id: videoId, active: 1 }, { action: 'delete', id: videoId, path: '/data/private' },
-    { action: 'cancel', id: 'invalid' }, { action: 'send', videoId, runAt: null }, { action: 'other', id: videoId }]) uncached(await route.POST(request('POST', body)), 400);
+    { action: 'cancel', id: 'invalid' }, { action: 'send', videoId, runAt: null }, { action: 'other', id: videoId },
+    { action: 'sync_sources', send: true }, { action: 'sync_sources', sourceChatId: '-1001234567891' },
+    { action: 'sync_sources', caption: 'must not publish' }, { action: 'sync_sources', token: 'private' }]) uncached(await route.POST(request('POST', body)), 400);
   assert.deepEqual(facade.calls, []);
 });
 
@@ -147,6 +179,31 @@ test('Hot video routes dispatch only validated settings and action contracts wit
     assert.deepEqual(facade.calls, [expected, ['status']]); assert.deepEqual(await response.json(), facade.status); facade.calls.length = 0;
   }
   const response = await route.GET(request('GET')); uncached(response, 200); assert.deepEqual(await response.json(), facade.status);
+});
+
+test('explicit source synchronization is administrator-only and returns status without any publication action', async () => {
+  const response = await route.POST(request('POST', { action: 'sync_sources' })); uncached(response, 200);
+  assert.deepEqual(facade.calls, [['sync_sources'], ['status']]);
+  assert.deepEqual(await response.json(), facade.status);
+  assert.deepEqual(transport.calls, []); assert.deepEqual(videos(), []); assert.deepEqual(uploads(), []); assert.deepEqual(storedFiles(), []);
+});
+
+test('read-only status requests cannot trigger source synchronization through query parameters', async () => {
+  const req = new Request(`${origin}/api/admin/telegram/hot-videos?action=sync_sources`, { headers: { origin } });
+  uncached(await route.GET(req), 200); assert.deepEqual(facade.calls, [['status']]);
+});
+
+test('source synchronization applies normal JSON origin and safe-error boundaries', async t => {
+  const wrongType = request('POST', { action: 'sync_sources' }, { 'content-type': 'text/plain' });
+  uncached(await route.POST(wrongType), 415); assert.equal(wrongType.bodyUsed, false); assert.deepEqual(facade.calls, []);
+  facade.failure = new backend.HotVideoError('来源检查暂时不可用，请稍后重试。', 503);
+  const unavailable = await route.POST(request('POST', { action: 'sync_sources' })); uncached(unavailable, 503);
+  assert.deepEqual(await unavailable.json(), { error: '来源检查暂时不可用，请稍后重试。' });
+  facade.calls.length = 0; facade.failure = new Error('PRIVATE_SOURCE_ACCESS_HASH');
+  const logs = []; t.mock.method(console, 'error', (...args) => logs.push(args.join(' ')));
+  const failed = await route.POST(request('POST', { action: 'sync_sources' })); uncached(failed, 500);
+  assert.doesNotMatch(JSON.stringify(await failed.json()) + logs.join(' '), /PRIVATE_SOURCE_ACCESS_HASH/);
+  assert.deepEqual(facade.calls, [['sync_sources']]);
 });
 
 test('Hot video failures preserve safe known errors while unexpected failures redact raw details', async t => {

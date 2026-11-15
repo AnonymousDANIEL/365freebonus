@@ -63,3 +63,30 @@
 .cms-shell .cms-hot-videos-empty { margin: 0; max-width: none; padding: 1rem; border: 1px dashed var(--cms-line); border-radius: .6rem; font-size: .8rem; }
 @media (max-width: 760px) { .cms-hot-videos-config-grid { grid-template-columns: minmax(0, 1fr); } .cms-hot-video-send { align-items: stretch; } .cms-hot-video-send > button, .cms-hot-video-schedule { flex: 1 1 100%; } }
 @media (max-width: 480px) { .cms-hot-videos-heading { align-items: flex-start; } .cms-hot-videos-button-preview a { display: grid; gap: .25rem; } .cms-hot-videos-upload-progress { grid-template-columns: 1fr; } .cms-hot-video-schedule > button { flex: 1 1 100%; } .cms-hot-video-rename { flex-wrap: wrap; } .cms-hot-video-rename input { flex-basis: 100%; } }
+.cms-hot-video-sources { display: grid; gap: .8rem; padding: 1rem; border: 1px solid var(--cms-line); border-radius: .75rem; background: var(--cms-inset); min-width: 0; }
+.cms-hot-video-sources > small, .cms-hot-video-cloud-note small { color: var(--cms-muted); font-size: .75rem; line-height: 1.8; }
+.cms-hot-video-source-choices { display: grid; gap: .4rem; max-height: 320px; overflow: auto; padding: .15rem; }
+.cms-hot-videos label.cms-hot-video-source-choice { display: flex; align-items: center; gap: .65rem; padding: .7rem; border: 1px solid var(--cms-line); border-radius: .45rem; background: var(--cms-input); cursor: pointer; }
+.cms-shell .cms-hot-videos .cms-hot-video-source-choice > input { width: auto; flex-shrink: 0; }
+.cms-hot-video-source-choice > span { display: grid; gap: .2rem; min-width: 0; }
+.cms-hot-video-source-choice strong { font-size: .8rem; overflow-wrap: anywhere; }
+.cms-hot-video-source-choice small { color: var(--cms-muted); font-size: .7rem; overflow-wrap: anywhere; }
+.cms-hot-video-source-status { display: grid; gap: .3rem; padding-top: .55rem; border-top: 1px solid var(--cms-line); }
+.cms-hot-video-source-status > div { display: flex; justify-content: space-between; flex-wrap: wrap; gap: .35rem; font-size: .72rem; }
+.cms-hot-video-source-status span { color: var(--cms-muted); }
+.cms-shell .cms-hot-video-source-status > p { margin: 0; font-size: .72rem; color: var(--cms-error); }
+.cms-hot-video-cloud-note { display: flex; align-items: flex-start; gap: .6rem; padding: .9rem 1rem; border: 1px solid var(--cms-line); background: var(--cms-accent-bg); border-radius: .6rem; }
+.cms-hot-video-cloud-note > svg { flex-shrink: 0; margin-top: .15rem; color: var(--cms-green); }
+.cms-hot-video-cloud-note > div { display: grid; gap: .25rem; }
+.cms-hot-video-cloud-note strong { font-size: .8rem; }
+.cms-hot-video-local-upload { min-width: 0; }
+.cms-hot-video-local-upload > summary { cursor: pointer; font-size: .8rem; color: var(--cms-muted); padding: .3rem 0; }
+.cms-hot-video-local-upload[open] > summary { margin-bottom: .65rem; }
+.cms-hot-video-filter { display: flex; flex-wrap: wrap; gap: .4rem; }
+.cms-shell .cms-hot-video-filter-active { border-color: var(--cms-green); color: var(--cms-green); background: var(--cms-accent-bg); }
+.cms-hot-video-use-state { font-size: .7rem; color: var(--cms-muted); }
+.cms-hot-video-use-used, .cms-hot-video-marker-state { color: var(--cms-green); }
+.cms-hot-video-use-unknown, .cms-hot-video-use-failed, .cms-hot-video-marker-error { color: var(--cms-error); }
+.cms-hot-video-marker-state, .cms-hot-video-marker-error { font-size: .7rem; line-height: 1.7; overflow-wrap: anywhere; }
+.cms-hot-video-meta > a { display: inline-flex; align-items: center; gap: .25rem; }
+@media (max-width: 480px) { .cms-hot-video-sources { padding: .75rem; } .cms-hot-video-sources .cms-hot-videos-heading > button { width: 100%; } }

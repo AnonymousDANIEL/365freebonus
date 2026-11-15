@@ -12,7 +12,7 @@ export function getDataDirectory(): string {
 function migrate(db: DatabaseSync) {
   if (migrated.has(db)) return;
   const readVersion = () => (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
-  if (readVersion() < 31) {
+  if (readVersion() < 32) {
     db.exec("BEGIN IMMEDIATE");
     try {
       // Read again inside the write lock, so concurrent process starts cannot
@@ -556,6 +556,38 @@ function migrate(db: DatabaseSync) {
         );
         PRAGMA user_version=31;
       `);
+      if (version < 32) {
+        // Replay-safe additions preserve all previous scheduler and relay state.
+        const addColumns = (table: string, entries: [string,string][]) => {
+          const columns = new Set((db.prepare(`PRAGMA table_info(${table})`).all() as {name:string}[]).map(c=>c.name));
+          for (const [name,definition] of entries) if (!columns.has(name)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${definition}`);
+        };
+        addColumns("telegram_hot_video_settings", [["mark_source_used","INTEGER NOT NULL DEFAULT 1"]]);
+        addColumns("telegram_hot_videos", [
+          ["origin","TEXT NOT NULL DEFAULT 'upload'"],["source_chat_id","INTEGER NOT NULL DEFAULT 0"],
+          ["source_message_id","INTEGER NOT NULL DEFAULT 0"],["source_document_id","TEXT NOT NULL DEFAULT ''"],
+          ["source_title","TEXT NOT NULL DEFAULT ''"],["source_date","INTEGER NOT NULL DEFAULT 0"],
+        ]);
+        addColumns("telegram_hot_video_jobs", [
+          ["consumption_key","TEXT NOT NULL DEFAULT ''"],["marker_status","TEXT NOT NULL DEFAULT 'none'"],
+          ["marker_attempts","INTEGER NOT NULL DEFAULT 0"],["marker_dispatch_started_at","INTEGER NOT NULL DEFAULT 0"],
+          ["marker_next_attempt_at","INTEGER NOT NULL DEFAULT 0"],["marker_message_id","INTEGER NOT NULL DEFAULT 0"],
+          ["marker_error","TEXT NOT NULL DEFAULT ''"],
+        ]);
+        db.exec(`
+          CREATE UNIQUE INDEX IF NOT EXISTS telegram_hot_video_source_reference ON telegram_hot_videos(source_chat_id,source_message_id) WHERE origin='channel';
+          CREATE TABLE IF NOT EXISTS telegram_hot_video_sources (
+            chat_id INTEGER PRIMARY KEY,title TEXT NOT NULL DEFAULT '',username TEXT NOT NULL DEFAULT '',selected INTEGER NOT NULL DEFAULT 0,
+            revision TEXT NOT NULL DEFAULT '',backfill_before_id INTEGER NOT NULL DEFAULT 0,last_message_id INTEGER NOT NULL DEFAULT 0,
+            backfill_done INTEGER NOT NULL DEFAULT 0,last_synced_at INTEGER NOT NULL DEFAULT 0,last_error TEXT NOT NULL DEFAULT '',next_attempt_at INTEGER NOT NULL DEFAULT 0,
+            token_hash TEXT NOT NULL DEFAULT '',verified_at INTEGER NOT NULL DEFAULT 0
+          );
+          CREATE UNIQUE INDEX IF NOT EXISTS telegram_hot_video_once_use ON telegram_hot_video_jobs(consumption_key)
+            WHERE consumption_key<>'' AND status IN ('pending','sending','sent','unknown');
+          CREATE INDEX IF NOT EXISTS telegram_hot_video_marker_due ON telegram_hot_video_jobs(status,marker_status,marker_next_attempt_at);
+          PRAGMA user_version=32;
+        `);
+      }
       db.exec("COMMIT");
     } catch (error) { db.exec("ROLLBACK"); throw error; }
   }
