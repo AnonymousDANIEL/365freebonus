@@ -12,7 +12,7 @@ export function getDataDirectory(): string {
 function migrate(db: DatabaseSync) {
   if (migrated.has(db)) return;
   const readVersion = () => (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
-  if (readVersion() < 33) {
+  if (readVersion() < 34) {
     db.exec("BEGIN IMMEDIATE");
     try {
       // Read again inside the write lock, so concurrent process starts cannot
@@ -600,6 +600,36 @@ function migrate(db: DatabaseSync) {
         INSERT OR IGNORE INTO telegram_hot_video_runtime(id) VALUES('primary');
         PRAGMA user_version=33;`);
       }
+      if (version < 34) db.exec(`
+        CREATE TABLE IF NOT EXISTS telegram_scheduled_message_plans (
+          id TEXT PRIMARY KEY,revision TEXT NOT NULL,name TEXT NOT NULL,text TEXT NOT NULL,times_json TEXT NOT NULL,
+          enabled INTEGER NOT NULL DEFAULT 0 CHECK(enabled IN (0,1)),next_run_at INTEGER NOT NULL DEFAULT 0,
+          last_run_at INTEGER NOT NULL DEFAULT 0,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,deleted_at INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS telegram_scheduled_message_plans_due ON telegram_scheduled_message_plans(deleted_at,enabled,next_run_at);
+        CREATE TABLE IF NOT EXISTS telegram_scheduled_message_targets (
+          target_key TEXT PRIMARY KEY,chat_id INTEGER NOT NULL DEFAULT 0,title TEXT NOT NULL,ready INTEGER NOT NULL DEFAULT 0,
+          last_error TEXT NOT NULL DEFAULT '',verified_at INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS telegram_scheduled_message_runtime (
+          id TEXT PRIMARY KEY,token_hash TEXT NOT NULL DEFAULT '',bot_id INTEGER NOT NULL DEFAULT 0,hot_chat_id INTEGER NOT NULL DEFAULT 0,
+          next_verify_at INTEGER NOT NULL DEFAULT 0,owner_id TEXT NOT NULL DEFAULT '',lease_id TEXT NOT NULL DEFAULT '',lease_until INTEGER NOT NULL DEFAULT 0,
+          heartbeat_at INTEGER NOT NULL DEFAULT 0,last_tick_at INTEGER NOT NULL DEFAULT 0,last_completed_at INTEGER NOT NULL DEFAULT 0,
+          last_error TEXT NOT NULL DEFAULT ''
+        );
+        INSERT OR IGNORE INTO telegram_scheduled_message_runtime(id) VALUES('primary');
+        CREATE TABLE IF NOT EXISTS telegram_scheduled_message_deliveries (
+          id TEXT PRIMARY KEY,plan_id TEXT NOT NULL REFERENCES telegram_scheduled_message_plans(id),plan_revision TEXT NOT NULL,
+          plan_name TEXT NOT NULL,text TEXT NOT NULL,run_at INTEGER NOT NULL,target_key TEXT NOT NULL,target_chat_id INTEGER NOT NULL,
+          target_title TEXT NOT NULL,token_hash TEXT NOT NULL,bot_id INTEGER NOT NULL,status TEXT NOT NULL DEFAULT 'pending',
+          attempts INTEGER NOT NULL DEFAULT 0,next_attempt_at INTEGER NOT NULL DEFAULT 0,lease_id TEXT NOT NULL DEFAULT '',
+          lease_until INTEGER NOT NULL DEFAULT 0,dispatch_started_at INTEGER NOT NULL DEFAULT 0,last_error TEXT NOT NULL DEFAULT '',
+          sent_at INTEGER NOT NULL DEFAULT 0,message_id INTEGER NOT NULL DEFAULT 0,
+          UNIQUE(plan_id,run_at,target_key)
+        );
+        CREATE INDEX IF NOT EXISTS telegram_scheduled_message_deliveries_due ON telegram_scheduled_message_deliveries(status,next_attempt_at,run_at);
+        PRAGMA user_version=34;
+      `);
       db.exec("COMMIT");
     } catch (error) { db.exec("ROLLBACK"); throw error; }
   }

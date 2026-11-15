@@ -662,6 +662,6 @@ export function startTelegramHotVideoWorker(decryptToken: DecryptToken) {
   void tick().catch(()=>undefined);void scanTick().catch(()=>undefined);
   setInterval(()=>void tick().catch(()=>undefined),TICK_MS).unref();
   setInterval(()=>void scanTick().catch(()=>undefined),TICK_MS).unref();
-  console.info("Telegram Hot scheduler started.",JSON.stringify({schemaVersion:33,sourceCount:(db.prepare("SELECT COUNT(*) AS n FROM telegram_hot_video_sources WHERE selected=1").get() as {n:number}).n,
+  console.info("Telegram Hot scheduler started.",JSON.stringify({schemaVersion:(db.prepare("PRAGMA user_version").get() as {user_version:number}).user_version,sourceCount:(db.prepare("SELECT COUNT(*) AS n FROM telegram_hot_video_sources WHERE selected=1").get() as {n:number}).n,
     enabled:config(db).enabled===1,intervalHours:config(db).interval_hours,nextRunAt:config(db).next_run_at,independentSourceWorker:true}));
 }

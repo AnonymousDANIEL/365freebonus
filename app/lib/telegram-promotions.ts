@@ -9,6 +9,8 @@ import { cancelRelayPending, relayStatus, startTelegramRelayWorker } from "./tel
 import { joinGateStatus, saveJoinGateSettings, type JoinGateInput } from "./telegram-join-gate";
 import { hotVideoStatus, saveHotVideoSettings, enqueueHotVideo, updateHotVideo, deleteHotVideo, cancelHotVideoJob,
   startTelegramHotVideoWorker } from "./telegram-hot-videos";
+import { scheduledMessageStatus, saveScheduledMessagePlan, deleteScheduledMessagePlan, verifyScheduledMessageTargets,
+  startTelegramScheduledMessageWorker } from "./telegram-scheduled-messages";
 import { RELAY_DEFAULT_TARGET } from "./telegram-relay-content";
 
 type StoredSettings = {
@@ -130,6 +132,11 @@ export async function syncTelegramHotVideoSources() {
 export function updateTelegramHotVideo(input: Parameters<typeof updateHotVideo>[1]) { return updateHotVideo(getSqlite(), input); }
 export function deleteTelegramHotVideo(id: string) { return deleteHotVideo(getSqlite(), id); }
 export function cancelTelegramHotVideoJob(id: string) { return cancelHotVideoJob(getSqlite(), id); }
+
+export function telegramScheduledMessageStatus() { return scheduledMessageStatus(getSqlite()); }
+export function saveTelegramScheduledMessagePlan(input: Parameters<typeof saveScheduledMessagePlan>[1]) { return saveScheduledMessagePlan(getSqlite(), input, decryptToken); }
+export function deleteTelegramScheduledMessagePlan(input: { id: string; revision: string }) { return deleteScheduledMessagePlan(getSqlite(), input); }
+export function verifyTelegramScheduledMessageTargets() { return verifyScheduledMessageTargets(getSqlite(), decryptToken); }
 
 function storedSettings(db: DatabaseSync): StoredSettings {
   return db.prepare(`SELECT enabled, chat_id, token_ciphertext, chat_bot_token_ciphertext, promotion_message,
@@ -539,6 +546,7 @@ export function startTelegramPromotionWorker() {
   startTelegramPrivateUpdatesWorker(decryptToken);
   startTelegramRelayWorker(decryptToken);
   startTelegramHotVideoWorker(decryptToken);
+  startTelegramScheduledMessageWorker(decryptToken);
   void import("./telegram-account").then(account => account.startTelegramAccountWorker())
     .catch(() => console.error("Telegram personal account receiver could not start."));
   let running = false;

@@ -1,0 +1,6 @@
+export type ScheduledMessageTargetKey = "official" | "group" | "hot";
+export type ScheduledMessagePlan = { id: string; revision: string; name: string; text: string; times: string[]; enabled: boolean; nextRunAt: number | null; lastRunAt: number | null; createdAt: number; updatedAt: number };
+export type ScheduledMessageTarget = { key: ScheduledMessageTargetKey; title: string; chatId: string; ready: boolean; lastError: string };
+export type ScheduledMessageDelivery = { id: string; planId: string; planName: string; runAt: number; targetKey: ScheduledMessageTargetKey; targetTitle: string; status: string; attempts: number; lastError: string; sentAt: number | null; messageId: number | null };
+export type ScheduledMessageStatus = { now: number; timezone: "Asia/Kuala_Lumpur"; hasToken: boolean; targets: ScheduledMessageTarget[]; plans: ScheduledMessagePlan[]; deliveries: ScheduledMessageDelivery[]; counts: Record<string, number>; scheduler: { workerHealthy: boolean; heartbeatAt: number | null; lastTickAt: number | null; lastCompletedAt: number | null; nextRunAt: number | null; lastError: string } };
+export type ScheduledMessagePlanInput = { requestId?: string; id?: string; revision?: string; name: string; text: string; times: string[]; enabled: boolean };
