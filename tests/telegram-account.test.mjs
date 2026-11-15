@@ -1581,3 +1581,25 @@ test('known-ID bootstrap excludes unsafe source '+change+' and never rearms an i
   assert.equal(telegram.state.calls.filter(call=>call.method==='getMessages').length,reads);
   assert.equal(telegram.state.observations.length,0);assert.equal(telegram.state.queue.length,0);
 });
+
+for(const scenario of [
+  {name:'previously busy retry within lease window',waits:1,delay:30000,blocked:true},
+  {name:'previously busy retry exactly at lease boundary',waits:1,delay:60000,blocked:true},
+  {name:'retry beyond the next lease window',waits:1,delay:60001,blocked:false},
+  {name:'initial future version without a busy wait',waits:0,delay:30000,blocked:false},
+  {name:'unknown media send',waits:1,delay:30000,status:'unknown',blocked:false},
+  {name:'superseded source version',waits:1,delay:30000,version:2,blocked:false},
+  {name:'old relay configuration',waits:1,delay:30000,revision:'old-relay',blocked:false},
+])test('account lease reservation respects '+scenario.name,async t=>{
+  await login();await select();ready();knownSourcePost(photo());
+  const outbox=db().prepare('SELECT id FROM telegram_relay_outbox').get(),now=Date.now();
+  db().prepare('UPDATE telegram_relay_outbox SET source_version=?,status=?,revision=?').run(scenario.version||1,scenario.status||'sent',scenario.revision||'relay-generation');
+  db().prepare(`INSERT INTO telegram_relay_source_edits(outbox_id,source_version,caption,caption_entities,baseline_caption,baseline_entities,
+    next_attempt_at,preflight_waits,created_at) VALUES(?,1,'new','[]','old','[]',?,?,?)`).run(outbox.id,now+scenario.delay,scenario.waits,now);
+  t.mock.method(Date,'now',()=>now);
+  const before=telegram.state.calls.length,job=db().prepare('SELECT * FROM telegram_relay_source_edits').get(),accountBefore=stored();
+  await account.pollTelegramAccountOnce();
+  assert.equal(telegram.state.calls.length===before,scenario.blocked);
+  assert.deepEqual(db().prepare('SELECT * FROM telegram_relay_source_edits').get(),job);
+  if(scenario.blocked)assert.deepEqual(stored(),accountBefore);
+});

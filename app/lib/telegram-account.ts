@@ -1373,11 +1373,13 @@ export async function pollTelegramAccountOnce() {
   const target = db.prepare("SELECT target_chat_id,ready_until,bot_id,revision FROM telegram_relay_state WHERE id='primary'").get() as { target_chat_id: number; ready_until: number; bot_id: number; revision: string } | undefined;
   const ready = relay?.relay_enabled === 1 && target && target.ready_until > Date.now() && target.revision === relay.relay_revision && target.target_chat_id < 0;
   const repairNow = Date.now();
-  // The source-caption worker also needs this account. Yield only to a due,
-  // actionable version so regular receive polling cannot consume its retries.
+  // Reserve the next lease window after a source-caption preflight has already
+  // waited. Otherwise receive can reacquire the account just before its retry
+  // and repeatedly exhaust a healthy version's bounded busy waits.
   if (ready && db.prepare(`SELECT 1 FROM telegram_relay_source_edits e JOIN telegram_relay_outbox o ON o.id=e.outbox_id
-    WHERE e.status='pending' AND e.next_attempt_at<=? AND e.source_version=o.source_version
-    AND o.status='sent' AND o.message_id>0 AND o.revision=? LIMIT 1`).get(repairNow, relay.relay_revision)) return;
+    WHERE e.status='pending' AND (e.next_attempt_at<=? OR (e.preflight_waits>0 AND e.next_attempt_at<=?))
+    AND e.source_version=o.source_version AND o.status='sent' AND o.message_id>0 AND o.revision=? LIMIT 1`)
+    .get(repairNow, repairNow + LEASE_MS, relay.relay_revision)) return;
   // Give a due caption repair the account lease first. No current poll is
   // interrupted, and future/backed-off or terminal repairs cannot starve receive.
   if (ready && db.prepare(`SELECT 1 FROM telegram_relay_outbox WHERE status='sent' AND revision=? AND message_id>0
