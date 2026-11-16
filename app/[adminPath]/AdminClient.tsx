@@ -8,6 +8,7 @@ import { brandScheduleInput, malaysiaDateTimeInput } from "../lib/brand-schedule
 import { AdminThemeToggle, useAdminTheme } from "../components/AdminTheme";
 import TelegramGroupSettings from "./TelegramGroupSettings";
 import TelegramScheduledMessages from "./TelegramScheduledMessages";
+import TelegramHotVideos from "./TelegramHotVideos";
 import PopupNoticeSettings from "./PopupNoticeSettings";
 import PasswordSettings from "./PasswordSettings";
 import SecureNotes from "./SecureNotes";
@@ -20,7 +21,7 @@ const sections = {
   settings: { title: "网站设置", description: "让首页文字、站名和公告，都保持你的风格。" },
   notices: { title: "弹窗公告", description: "上传公告图片，设置点击链接和展示顺序。" },
   telegram: { title: "Telegram 通知", description: "管理品牌更新的自动通知，查看发送状态。" },
-  scheduledMessages: { title: "文案定时", description: "设置每日文案时间，自动同步发布到 Official、Group 和 Hot 三个频道。" },
+  scheduledMessages: { title: "文案定时", description: "管理每日文案与 Hot 视频定时，分别查看发送时间、队列和记录。" },
   notes: { title: "安全笔记", description: "管理私人记录，使用独立 PIN 保护。" },
   password: { title: "更改密码", description: "在后台直接更换管理员密码。" },
 };
@@ -355,7 +356,10 @@ export default function AdminClient({ displayName, signInPath }: { displayName: 
         {error && !editing && !deleting && <div className="cms-alert cms-error" role="alert"><span>{error}</span>{sessionExpired && <Reauthenticate signInPath={signInPath} />}<button onClick={() => setError("")} aria-label="关闭错误"><X size={17} /></button></div>}
         {success && <div className="cms-alert cms-success" role="status"><Check size={18} /><span>{success}</span></div>}
         {section === "telegram" ? <TelegramGroupSettings request={request} signInPath={signInPath} /> :
-        section === "scheduledMessages" ? <TelegramScheduledMessages request={request} signInPath={signInPath} /> :
+        section === "scheduledMessages" ? <div className="cms-scheduled-workspace">
+          <TelegramScheduledMessages request={request} signInPath={signInPath} />
+          <TelegramHotVideos request={request} signInPath={signInPath} />
+        </div> :
         section === "notes" ? <SecureNotes request={request} signInPath={signInPath} /> :
         section === "password" ? <PasswordSettings request={request} signInPath={signInPath} /> :
         section === "notices" ? <PopupNoticeSettings request={request} signInPath={signInPath} uploadImage={uploadAdminImage} UploadButton={ImageUploadButton} /> :

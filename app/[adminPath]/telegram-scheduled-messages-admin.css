@@ -1,3 +1,4 @@
+.cms-scheduled-workspace { display: grid; grid-template-columns: minmax(0, 1fr); gap: 1.5rem; min-width: 0; }
 .cms-scheduled-messages { min-width: 0; }
 .cms-scheduled-messages .cms-settings-panel { display: grid; grid-template-columns: minmax(0, 1fr); gap: 1.1rem; }
 .cms-scheduled-messages h2, .cms-scheduled-messages h3, .cms-scheduled-messages p { margin: 0; }
