@@ -16,6 +16,7 @@ writeFileSync(path.join(fixture, 'cycle.js'), ts.transpileModule(
 const require = createRequire(import.meta.url);
 const { ensureCaptionWatchCycleSchema: schema, captionWatchFocus: focus, completeCaptionWatchFocus: complete,
   deferCaptionWatchFocus: defer, captionWatchCycleStatus: status } = require(path.join(fixture, 'cycle.js'));
+const {captionWatchAccountPriority: priority}=require(path.join(fixture,'cycle.js'));
 const now = 1_800_000_000_000, hour = 3_600_000;
 test.after(() => rmSync(fixture, { recursive: true, force: true }));
 function database(filename = ':memory:') {
@@ -25,8 +26,8 @@ function database(filename = ':memory:') {
     INSERT INTO telegram_promotion_settings VALUES('primary',1,'current',1,1);
     CREATE TABLE telegram_relay_state(id TEXT,revision TEXT,target_chat_id INTEGER,next_send_at INTEGER);
     INSERT INTO telegram_relay_state VALUES('primary','current',-10099,456);
-    CREATE TABLE telegram_personal_account(id TEXT,generation TEXT,stage TEXT);
-    INSERT INTO telegram_personal_account VALUES('primary','account-private','connected');
+    CREATE TABLE telegram_personal_account(id TEXT,generation TEXT,stage TEXT,lease_until INTEGER DEFAULT 0,next_attempt_at INTEGER DEFAULT 0);
+    INSERT INTO telegram_personal_account(id,generation,stage) VALUES('primary','account-private','connected');
     CREATE TABLE telegram_personal_sources(chat_id INTEGER,selected INTEGER,joined INTEGER,blocked INTEGER,
       selected_at INTEGER,last_message_id INTEGER);
     INSERT INTO telegram_personal_sources VALUES(-1001,1,1,0,1,1234);
@@ -184,5 +185,39 @@ test('a revoked Bot source retires only its private focus while invalid caption 
     db.exec("UPDATE telegram_relay_outbox SET source_content_hash='invalid:source_inactive' WHERE id=1");
     assert.equal(focus(db,now+2).outboxId,2);
     assert.equal(db.prepare('SELECT status FROM telegram_relay_outbox WHERE id=1').get().status,'sent');
+  }finally{db.close();}
+});
+
+test('busy lease upper bounds resume when released, with only a fifteen-second caption priority window',()=>{
+  const db=database();try{
+    add(db,1);focus(db,now);defer(db,1,now+60000,'busy');
+    db.prepare('UPDATE telegram_personal_account SET lease_until=?').run(now+60000);
+    assert.equal(priority(db,now+1000),false);assert.equal(focus(db,now+1000).retryAt,now+60000);
+    db.exec('UPDATE telegram_personal_account SET lease_until=0');
+    assert.equal(priority(db,now+2000),true);assert.equal(focus(db,now+2000).retryAt,now+2000);
+    assert.equal(priority(db,now+16999),true);assert.equal(priority(db,now+17000),false);
+    assert.equal(focus(db,now+17000).retryAt,now+2000);
+  }finally{db.close();}
+});
+
+test('caption priority never advances Telegram backoff or a non-busy retry deadline',()=>{
+  const db=database();try{
+    add(db,1);focus(db,now);defer(db,1,now+60000,'busy');
+    db.prepare('UPDATE telegram_personal_account SET next_attempt_at=?').run(now+120000);
+    assert.equal(priority(db,now+1000),false);assert.equal(focus(db,now+1000).retryAt,now+60000);
+    db.exec('UPDATE telegram_personal_account SET next_attempt_at=0');
+    defer(db,1,now+60000,'backoff');assert.equal(priority(db,now+2000),false);
+    assert.equal(focus(db,now+2000).retryAt,now+60000);assert.equal(priority(db,now+60000),true);
+  }finally{db.close();}
+});
+
+test('each completed caption leaves a durable ten-second background slot before the next priority window',()=>{
+  const db=database();try{
+    add(db,1);add(db,2);focus(db,now);mark(db,1,now);complete(db,1,0,now);
+    const second=focus(db,now+1);assert.equal(second.retryAt,now+10001);
+    assert.equal(priority(db,now+10000),false);assert.equal(priority(db,now+10001),true);
+    assert.equal(priority(db,now+25001),false);
+    const row=saved(db);db.exec('UPDATE telegram_promotion_settings SET relay_caption_watch_enabled=0');
+    assert.equal(priority(db,now+11000),false);assert.deepEqual(saved(db),row);
   }finally{db.close();}
 });

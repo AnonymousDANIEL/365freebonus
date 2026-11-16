@@ -124,7 +124,20 @@ export function captionWatchFocus(db: DatabaseSync, now = Date.now()): CaptionWa
     }
     if (cycle.current_outbox_id > 0) {
       const item = job(db, active, cycle.current_outbox_id);
-      if (item) return focusValue(db, active, cycle, item);
+      if (item) {
+        // A lease deadline is an upper bound, not the actual release time.
+        // Resume a busy caption as soon as the shared account is genuinely free.
+        if (cycle.last_reason === "busy" && cycle.retry_at > now && active.accountSources) {
+          const account = db.prepare("SELECT stage,lease_until,next_attempt_at FROM telegram_personal_account WHERE id='primary'")
+            .get() as { stage: string; lease_until: number; next_attempt_at: number } | undefined;
+          if (account?.stage === "connected" && account.lease_until <= now && account.next_attempt_at <= now) {
+            db.prepare(`UPDATE ${TABLE} SET retry_at=? WHERE id='primary' AND current_outbox_id=?
+              AND retry_at=? AND last_reason='busy'`).run(now, item.id, cycle.retry_at);
+            cycle = current(db)!;
+          }
+        }
+        return focusValue(db, active, cycle, item);
+      }
       // Deactivated/deleted sources are no longer authorized work. Retire only this private scheduling pointer.
       db.prepare(`UPDATE ${TABLE} SET cursor_id=MAX(cursor_id,current_outbox_id),current_outbox_id=0,
         current_started_at=0,retry_at=0,last_reason='' WHERE id='primary'`).run();
@@ -134,10 +147,24 @@ export function captionWatchFocus(db: DatabaseSync, now = Date.now()): CaptionWa
       FROM telegram_relay_outbox o WHERE ${eligible(active)} AND o.id>? AND o.id<=? ORDER BY o.id LIMIT 1`)
       .get(...args(active), cycle.cursor_id, cycle.cycle_ceiling_id) as Job | undefined;
     if (!item) { finish(db, cycle, now); return null; }
-    db.prepare(`UPDATE ${TABLE} SET current_outbox_id=?,current_started_at=?,retry_at=0,last_reason=''
-      WHERE id='primary'`).run(item.id, now);
+    // Leave a real receive/Hot work slot between captions, including after a restart.
+    db.prepare(`UPDATE ${TABLE} SET current_outbox_id=?,current_started_at=?,retry_at=?,last_reason=''
+      WHERE id='primary'`).run(item.id, now, cycle.completed_count > 0 ? now + 10_000 : 0);
     return focusValue(db, active, current(db)!, item);
   }); } catch (error) { if (absentSchema(error)) return null; throw error; }
+}
+
+/** A bounded arbitration hint; never takes or clears an account lease or Telegram backoff. */
+export function captionWatchAccountPriority(db: DatabaseSync, now = Date.now()): boolean {
+  const focus = captionWatchFocus(db, now);
+  if (!focus || focus.retryAt > now) return false;
+  try {
+    const account = db.prepare("SELECT stage,lease_until,next_attempt_at FROM telegram_personal_account WHERE id='primary'")
+      .get() as { stage: string; lease_until: number; next_attempt_at: number } | undefined;
+    if (account?.stage !== "connected" || account.lease_until > now || account.next_attempt_at > now) return false;
+    const anchor = focus.retryAt || focus.currentStartedAt;
+    return now >= anchor && now - anchor < 15_000;
+  } catch (error) { if (absentSchema(error)) return false; throw error; }
 }
 
 /** Advance only after a fresh, exact readback for the still-current source version. */

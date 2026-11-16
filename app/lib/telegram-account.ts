@@ -4,6 +4,7 @@ import { Api, Logger, TelegramClient, utils } from "teleproto";
 import { StringSession } from "teleproto/sessions";
 import bigInt from "big-integer";
 import { getSqlite } from "./sqlite";
+import { captionWatchAccountPriority } from "./telegram-caption-watch-cycle";
 import { inspectRelayDelivery, isRelayCustomEmojiId, normalizeRelayCaptionEntities, relayCaptionEntitiesMatch, relayCaptionFormattingMatches, relayKeyboard, type RelayCaptionEntity } from "./telegram-relay-content";
 
 type Stage = "disconnected" | "code" | "password" | "connected";
@@ -152,8 +153,10 @@ export function accountStatus() {
   };
 }
 
-function claimAccount(db: DatabaseSync, now: number, options: { connected?: boolean; respectBackoff?: boolean } = {}): Claim {
-  return transaction(db, () => {
+function claimAccount(db: DatabaseSync, now: number, options: {
+  connected?: boolean; respectBackoff?: boolean; purpose?: "interactive" | "caption" | "background";
+} = {}): Claim {
+  const claim = transaction(db, () => {
     const current = row(db);
     if (options.connected && (current.stage !== "connected" || !current.session_ciphertext)) throw new TelegramAccountError(REAUTH_ERROR, 409);
     if (current.lease_until > now) throw new TelegramAccountError(BUSY_ERROR, 409);
@@ -163,10 +166,16 @@ function claimAccount(db: DatabaseSync, now: number, options: { connected?: bool
         ? "Telegram 正在限制请求频率" : "上次操作未完成，系统正在等待重试";
       throw new TelegramAccountError(`${explanation}，请在 ${seconds} 秒后再试。`, 429);
     }
+    // Only short-lived background work yields. Owner actions remain available,
+    // and caption workers still obey the real lease and Telegram wait above.
+    if (options.purpose === "background" && captionWatchAccountPriority(db, now)) return null;
     const leaseId = randomUUID();
     db.prepare("UPDATE telegram_personal_account SET lease_id=?,lease_until=? WHERE id='primary'").run(leaseId, now + LEASE_MS);
     return { row: current, leaseId };
   });
+  // Commit the bounded scheduling hint even when this background caller yields.
+  if (!claim) throw new TelegramAccountError(BUSY_ERROR, 409);
+  return claim;
 }
 function owns(db: DatabaseSync, claim: Claim) {
   return Boolean(db.prepare("SELECT 1 FROM telegram_personal_account WHERE id='primary' AND generation=? AND lease_id=? AND lease_until>?")
@@ -798,7 +807,7 @@ export async function inspectBlockedRelayCaptionPreflights(): Promise<{
   const ids = [...new Set(references.flatMap(reference => reference.message_id ? [reference.message_id] : []))];
   if (!ids.length) return { ...empty, posts: references.map((reference, index) => blockedCaptionSummary(reference, sourceActive(reference, index), target.target_chat_id, "unknown")) };
   let claim: Claim;
-  try { claim = claimAccount(db, Date.now(), { connected: true, respectBackoff: true }); }
+  try { claim = claimAccount(db, Date.now(), { connected: true, respectBackoff: true, purpose: "background" }); }
   catch (error) {
     const state = error instanceof TelegramAccountError && error.status === 429 ? "backoff"
       : error instanceof TelegramAccountError && error.message === BUSY_ERROR ? "busy"
@@ -1004,7 +1013,7 @@ async function runVerifiedRelayCaptionWithAccount(input: VerifiedCaptionInput,
     legacyBaselineInvalid = true;
   }
   let claim: Claim;
-  try { claim = claimAccount(db, Date.now(), { connected: true, respectBackoff: true }); }
+  try { claim = claimAccount(db, Date.now(), { connected: true, respectBackoff: true, purpose: "caption" }); }
   catch (error) {
     const state = error instanceof TelegramAccountError && error.status === 429 ? "backoff"
       : error instanceof TelegramAccountError && error.message === BUSY_ERROR ? "busy"
@@ -1306,7 +1315,7 @@ export async function inspectRecentRelayDeliveries(): Promise<RelayDeliverySampl
   }
   if (!expected.size) return result;
   let claim: Claim;
-  try { claim = claimAccount(db, Date.now(), { connected: true, respectBackoff: true }); }
+  try { claim = claimAccount(db, Date.now(), { connected: true, respectBackoff: true, purpose: "background" }); }
   catch (error) {
     const state = error instanceof TelegramAccountError && error.status === 429 ? "backoff"
       : error instanceof TelegramAccountError && error.message === BUSY_ERROR ? "busy"
@@ -1403,7 +1412,7 @@ export async function inspectConnectedBotEmojiQualification(): Promise<Connected
   const botId = botIdentity();
   if (!Number.isSafeInteger(botId) || botId <= 0) return unknown;
   let claim: Claim;
-  try { claim = claimAccount(db, Date.now(), { connected: true, respectBackoff: true }); }
+  try { claim = claimAccount(db, Date.now(), { connected: true, respectBackoff: true, purpose: "background" }); }
   catch (error) {
     const state = error instanceof TelegramAccountError && error.status === 429 ? "backoff"
       : error instanceof TelegramAccountError && error.message === BUSY_ERROR ? "busy"
@@ -1459,7 +1468,7 @@ export async function sampleSelectedSourceEmoji(): Promise<SourceEmojiSample> {
     AND chat_id<>? ORDER BY chat_id LIMIT 3`).all(target) as SourceRow[];
   if (!sources.length) return result;
   let claim: Claim;
-  try { claim = claimAccount(db, Date.now(), { connected: true, respectBackoff: true }); }
+  try { claim = claimAccount(db, Date.now(), { connected: true, respectBackoff: true, purpose: "background" }); }
   catch (error) {
     const state = error instanceof TelegramAccountError && error.status === 429 ? "backoff"
       : error instanceof TelegramAccountError && error.message === BUSY_ERROR ? "busy"
@@ -1554,7 +1563,7 @@ export async function refreshRelayCaptionSourceWithAccount(input: {
   if (current.lease_until > now) return { state: "busy", reason: "source_busy", retryAt: current.lease_until };
   if (current.next_attempt_at > now) return { state: "backoff", reason: "source_backoff", retryAt: current.next_attempt_at };
   let claim: Claim;
-  try { claim = claimAccount(db, now, { connected: true, respectBackoff: true }); }
+  try { claim = claimAccount(db, now, { connected: true, respectBackoff: true, purpose: "caption" }); }
   catch {
     const latest = row(db), retryAt = Math.max(latest.lease_until, latest.next_attempt_at, Date.now() + 5000);
     return { state: latest.lease_until > Date.now() ? "busy" : latest.next_attempt_at > Date.now() ? "backoff" : "unavailable", reason: "source_unavailable", retryAt };
@@ -1671,7 +1680,7 @@ export async function pollTelegramAccountOnce() {
   const source = ready ? db.prepare(`SELECT * FROM telegram_personal_sources WHERE selected=1 AND joined=1
     AND chat_id<>? ORDER BY CASE WHEN chat_id>? THEN 0 ELSE 1 END,chat_id LIMIT 1`).get(target.target_chat_id, current.poll_source_id) as SourceRow | undefined : undefined;
   if (!refreshDue && !source) return;
-  const claim = claimAccount(db, Date.now(), { connected: true, respectBackoff: true });
+  const claim = claimAccount(db, Date.now(), { connected: true, respectBackoff: true, purpose: "background" });
   let client: TelegramClient | undefined;
   try {
     client = makeClient(unseal<Credentials>(claim.row.config_ciphertext), unseal<string>(claim.row.session_ciphertext));
@@ -1879,7 +1888,7 @@ export async function readHotVideoSourcePages(db: DatabaseSync, input: HotVideoS
   if (!selected || !selectedHot()) return { ...result, state: "changed" };
   if (selected.blocked) return { ...result, state: "protected" };
   let claim: Claim;
-  try { claim = claimAccount(db, Date.now(), { connected: true, respectBackoff: true }); }
+  try { claim = claimAccount(db, Date.now(), { connected: true, respectBackoff: true, purpose: "background" }); }
   catch { return { ...result, state: "busy", retryAfterMs: 15_000 }; }
   let client: TelegramClient | undefined;
   const deadline = Date.now() + 40_000;

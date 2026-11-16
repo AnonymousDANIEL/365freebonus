@@ -2529,6 +2529,7 @@ test('hourly serial checks retain A until exact readback, then B, and restart th
   assert.equal(personalEdit.watchCalls.length,2);
   personalEdit.watchResults.push({state:'ok',attempted:false,outcome:'preserved'});
   await deliver(now+79000);
+  assert.equal(personalEdit.freshCalls.length,2);await deliver(now+89000);
   assert.deepEqual(personalEdit.freshCalls.map(call=>call.outboxId),[a.id,a.id,b.id]);
   const finished=getSqlite().prepare('SELECT * FROM telegram_relay_caption_watch_cycle').get();
   assert.equal(finished.completed_count,2);assert.equal(finished.current_outbox_id,0);
@@ -2606,6 +2607,7 @@ test('a mixed Bot and account cycle drains events, applies the focused Bot edit,
   assert.equal(getSqlite().prepare('SELECT current_outbox_id FROM telegram_relay_caption_watch_cycle').get().current_outbox_id,bot.id);
   personalEdit.watchResults.push({state:'ok',attempted:false,outcome:'preserved'});await deliver(now+26000);
   personalEdit.watchResults.push({state:'ok',attempted:false,outcome:'preserved'});await deliver(now+37000);
+  assert.equal(personalEdit.freshCalls.length,0);await deliver(now+47000);
   assert.deepEqual(personalEdit.freshCalls.map(call=>call.outboxId),[account.id]);
   assert.deepEqual(personalEdit.watchCalls.map(call=>call.messageId),[bot.message_id,account.message_id]);
   assert.equal(getSqlite().prepare('SELECT completed_count FROM telegram_relay_caption_watch_cycle').get().completed_count,2);

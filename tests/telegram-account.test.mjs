@@ -1973,6 +1973,7 @@ for(const focused of [true,false])test('serial receive reserves only '+(focused?
   if(!focused){
     const second=photo(42);knownSourcePost(second);outboxId=db().prepare('SELECT MAX(id) AS id FROM telegram_relay_outbox').get().id;
     db().prepare('UPDATE telegram_relay_outbox SET source_version=1 WHERE id=?').run(outboxId);
+    const current=cycle.captionWatchFocus(db(),Date.now());cycle.deferCaptionWatchFocus(db(),current.outboxId,Date.now()+10000,'waiting');
   }
   db().prepare(`INSERT INTO telegram_relay_source_edits(outbox_id,source_version,caption,caption_entities,baseline_caption,baseline_entities,created_at)
     VALUES(?,1,'updated','[]','old','[]',?)`).run(outboxId,Date.now());
@@ -1982,6 +1983,7 @@ for(const focused of [true,false])test('serial receive reserves only '+(focused?
 
 test('serial observation lets receive continue despite an unrelated initial caption restoration',async()=>{
   await readyFocusedSourceRefresh();db().prepare('UPDATE telegram_promotion_settings SET relay_caption_serial_enabled=1').run();
+  const current=cycle.captionWatchFocus(db(),Date.now());cycle.deferCaptionWatchFocus(db(),current.outboxId,Date.now()+10000,'waiting');
   db().prepare(`UPDATE telegram_relay_outbox SET caption_edit_attempted_at=?,caption_edit_outcome='account_waiting_1',
     next_attempt_at=0,last_error='Telegram 未保留部分原始自定义 Emoji，请检查机器人的自定义 Emoji 使用权限。该消息不会自动重发。'`).run(Date.now());
   telegram.state.calls=[];await account.pollTelegramAccountOnce();
@@ -2000,6 +2002,52 @@ test('a deferred serial focus cannot reserve receive while its source edit is al
   assert.ok(telegram.state.calls.some(call=>call.method==='connect'));
   assert.equal(db().prepare('SELECT status FROM telegram_relay_source_edits').get().status,'pending');
   assert.equal(cycle.captionWatchFocus(db(),Date.now()).outboxId,input.outboxId);
+});
+
+test('due caption priority makes receive, Hot scanning and all startup audits yield without changing business state',async()=>{
+  const {input}=await readyFocusedSourceRefresh();const hot=hotSource();
+  db().prepare('UPDATE telegram_promotion_settings SET relay_caption_serial_enabled=1').run();
+  db().exec("UPDATE telegram_relay_outbox SET caption_edit_outcome='account_invalid'");
+  const beforeCursor=cursor(),beforeJobs=db().prepare('SELECT * FROM telegram_relay_outbox').all();
+  telegram.state.calls=[];
+  await assert.rejects(account.pollTelegramAccountOnce(),error=>error.message.includes('正在处理'));
+  for(const operation of [()=>account.readHotVideoSourcePages(db(),hot),()=>account.inspectBlockedRelayCaptionPreflights(),
+    ()=>account.inspectRecentRelayDeliveries(),()=>account.inspectConnectedBotEmojiQualification(),()=>account.sampleSelectedSourceEmoji()]){
+    assert.equal((await operation()).state,'busy');
+  }
+  assert.equal(telegram.state.calls.length,0);assert.equal(cursor(),beforeCursor);
+  assert.deepEqual(db().prepare('SELECT * FROM telegram_relay_outbox').all(),beforeJobs);
+  assert.equal((await account.refreshRelayCaptionSourceWithAccount(input)).state,'ok');
+  assert.ok(telegram.state.calls.some(call=>call.method==='connect'));
+});
+
+test('owner refresh bypasses caption priority and expired priority lets Hot scanning resume',async t=>{
+  let at=Date.now();t.mock.method(Date,'now',()=>at);
+  await readyFocusedSourceRefresh();const hot=hotSource();db().prepare('UPDATE telegram_promotion_settings SET relay_caption_serial_enabled=1').run();
+  assert.equal(cycle.captionWatchAccountPriority(db(),at),true);
+  telegram.state.calls=[];await account.handleAccountAction({action:'refresh'});
+  assert.ok(telegram.state.calls.some(call=>call.method==='connect'));
+  at+=15000;telegram.state.calls=[];
+  assert.equal(cycle.captionWatchAccountPriority(db(),at),false);
+  await account.readHotVideoSourcePages(db(),hot);assert.ok(telegram.state.calls.some(call=>call.method==='connect'));
+});
+
+test('released busy leases give the waiting caption the next bounded slot without clearing real leases or backoff',async t=>{
+  let at=Date.now();t.mock.method(Date,'now',()=>at);
+  const {input}=await readyFocusedSourceRefresh();const hot=hotSource();
+  db().prepare('UPDATE telegram_promotion_settings SET relay_caption_serial_enabled=1').run();
+  const current=cycle.captionWatchFocus(db(),Date.now()),until=Date.now()+60000;
+  db().prepare("UPDATE telegram_personal_account SET lease_id='other-work',lease_until=?").run(until);
+  cycle.deferCaptionWatchFocus(db(),current.outboxId,until,'busy');
+  telegram.state.calls=[];assert.equal((await account.refreshRelayCaptionSourceWithAccount(input)).state,'busy');
+  assert.equal(stored().lease_id,'other-work');assert.equal(stored().lease_until,until);
+  db().exec("UPDATE telegram_personal_account SET lease_id='',lease_until=0");
+  assert.equal((await account.readHotVideoSourcePages(db(),hot)).state,'busy');
+  assert.equal(telegram.state.calls.length,0);
+  assert.equal(db().prepare('SELECT retry_at FROM telegram_relay_caption_watch_cycle').get().retry_at,at);
+  at+=14999;assert.equal((await account.readHotVideoSourcePages(db(),hot)).state,'busy');
+  at+=1;assert.equal((await account.readHotVideoSourcePages(db(),hot)).state,'ok');
+  assert.equal((await account.refreshRelayCaptionSourceWithAccount(input)).state,'ok');
 });
 
 test('legacy caption text mismatch is repairable only after positive exact media identity and stable readback',async()=>{
