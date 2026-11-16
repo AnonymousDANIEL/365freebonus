@@ -627,7 +627,8 @@ type AccountCaptionEdit = {
 type RelayCaptionPreflightReason = "input_invalid" | "expected_entities_invalid" | "expected_links_unsafe" | "expected_buttons_invalid"
   | "stored_entities_invalid" | "stored_entities_mismatch" | "message_not_found" | "message_identity_invalid" | "message_not_direct_post"
   | "media_invalid" | "actual_entities_unsupported" | "caption_mismatch" | "actual_links_unsafe" | "buttons_mismatch"
-  | "target_unqualified" | "account_unqualified" | "source_inactive" | "ready_to_edit" | "already_preserved" | "watch_readonly";
+  | "target_unqualified" | "account_unqualified" | "source_inactive" | "ready_to_edit" | "already_preserved" | "watch_readonly"
+  | "identity_unverified" | "source_caption_missing" | "source_identity_invalid" | "source_media_changed" | "source_capture_waiting";
 
 type BlockedCaptionReference = {
   id: number; message_id: number | null; caption: string; caption_entities: string; caption_edit_outcome: string;
@@ -920,9 +921,9 @@ async function runVerifiedRelayCaptionWithAccount(input: VerifiedCaptionInput,
   type EditReference = { id: number; caption: string; caption_entities: string; lease_id: string; lease_until: number; caption_edit_outcome: string;
     origin: string; account_generation: string; queued_at: number; source_chat_id: number; source_message_id: number; source_version: number; last_error: string; caption_edit_attempted_at: number;
     media_kind: string; caption_watch_outcome: string; caption_watch_source_version: number; caption_watch_edit_attempted_at: number;
-    caption_watch_media_id: string };
+    caption_watch_media_id: string; content_hash: string; visual_hash: string; sent_at: number | null };
   const references = () => db.prepare(`SELECT id,caption,caption_entities,lease_id,lease_until,caption_edit_outcome,origin,account_generation,queued_at,source_chat_id,source_message_id,source_version,last_error,caption_edit_attempted_at,
-    media_kind,caption_watch_outcome,caption_watch_source_version,caption_watch_edit_attempted_at,caption_watch_media_id
+    media_kind,caption_watch_outcome,caption_watch_source_version,caption_watch_edit_attempted_at,caption_watch_media_id,content_hash,visual_hash,sent_at
     FROM telegram_relay_outbox WHERE status='sent' AND revision=? AND message_id=? LIMIT 2`)
     .all(input.relayRevision, input.messageId) as EditReference[];
   const settings = configuration(), target = runtime(), storedReferences = references();
@@ -1083,12 +1084,59 @@ async function runVerifiedRelayCaptionWithAccount(input: VerifiedCaptionInput,
         else if (watch && reference.caption_watch_media_id && reference.caption_watch_media_id !== media) failure = "media_invalid";
         else if (!original) failure = "actual_entities_unsupported";
         else {
+          const actualKind = !watch ? reference.media_kind : before[0].media instanceof Api.MessageMediaPhoto ? "photo"
+            : before[0].media instanceof Api.MessageMediaDocument && before[0].media.document instanceof Api.Document
+              && before[0].media.document.attributes.some(attribute => attribute instanceof Api.DocumentAttributeAnimated) ? "animation" : "video";
+          if (watch && actualKind !== reference.media_kind) return invalid("media_invalid");
           if (watch && !reference.caption_watch_media_id) {
-            // A first legacy observation is tied to its immutable stored text;
-            // later checks are additionally pinned to this exact media ID.
-            if (before[0].message !== reference.caption && before[0].message !== input.caption) return invalid("caption_mismatch");
-            db.prepare(`UPDATE telegram_relay_outbox SET caption_watch_media_id=? WHERE id=? AND lease_id=?
-              AND caption_watch_media_id=''`).run(media, reference.id, watch.leaseId);
+            // Historical deliveries lack a target media receipt. Different text
+            // can be repaired only after positively matching the stored upload,
+            // never merely because two reads happen to show the same media ID.
+            if (before[0].message !== reference.caption && before[0].message !== input.caption) {
+              const firstSnapshot = { date: before[0].date, caption: before[0].message, entities: original.caption_entities };
+              if (!inspectRelayDelivery(input.caption, expected, original).buttonsMatch
+                || reference.last_error === "Telegram 返回的消息目标未能确认，已停止自动补正；该消息不会重复发送。"
+                || !Number.isSafeInteger(reference.sent_at) || Number(reference.sent_at) <= 0
+                || !Number.isSafeInteger(before[0].date) || before[0].date * 1000 > Number(reference.sent_at) + 5000
+                || before[0].date * 1000 < Number(reference.sent_at) - LEASE_MS - 5000
+                || !/^[a-f0-9]{64}$/.test(reference.content_hash) && !/^[a-f0-9]{64}$/.test(reference.visual_hash)) return invalid("identity_unverified");
+              const max = reference.media_kind === "photo" ? MAX_PHOTO : reference.media_kind === "animation" ? MAX_ANIMATION : MAX_VIDEO;
+              let bytes: string | Buffer | undefined;
+              try {
+                bytes = await bounded(client, client.downloadMedia(before[0], {
+                  signal: AbortSignal.timeout(remaining()), requestTimeout: remaining(),
+                  progressCallback: (downloaded, total) => {
+                    if (Number(downloaded.toString()) > max || Number(total.toString()) > max) throw new OversizeMediaError();
+                  },
+                }), remaining());
+              } catch (error) { if (error instanceof OversizeMediaError) return invalid("identity_unverified"); throw error; }
+              if (!allowed()) return unavailable();
+              renew(db, claim);
+              if (!Buffer.isBuffer(bytes) || bytes.length === 0 || bytes.length > max) return invalid("identity_unverified");
+              let matched = createHash("sha256").update(bytes).digest("hex") === reference.content_hash;
+              if (!matched && /^[a-f0-9]{64}$/.test(reference.visual_hash)) {
+                const { relayMediaIdentity } = await import("./telegram-relay-media");
+                if (!allowed()) return unavailable();
+                const hashes = await bounded(client, relayMediaIdentity(bytes, reference.media_kind as "photo" | "animation" | "video"), remaining());
+                matched = !!hashes.visualHash && hashes.visualHash === reference.visual_hash;
+              }
+              if (!matched) return invalid("identity_unverified");
+              if (!allowed()) return unavailable();
+              renew(db, claim);
+              const recheck = await bounded(client, client.getMessages(entity, { ids: [input.messageId], limit: 1 }), remaining());
+              if (!allowed()) return unavailable();
+              renew(db, claim);
+              const second = recheck.length === 1 && recheck[0] instanceof Api.Message ? recheck[0] : null;
+              const secondDelivery = second && relayDeliveryMessage(second);
+              if (!second || !identity(second) || mediaIdentity(second) !== media || second.date !== firstSnapshot.date
+                || second.message !== firstSnapshot.caption || !secondDelivery || !inspectRelayDelivery(input.caption, expected, secondDelivery).buttonsMatch
+                || !relayCaptionEntitiesMatch(firstSnapshot.caption, firstSnapshot.entities, secondDelivery.caption_entities)) return invalid("identity_unverified");
+            }
+            const pinned = db.prepare(`UPDATE telegram_relay_outbox SET caption_watch_media_id=? WHERE id=? AND lease_id=?
+              AND caption_watch_media_id='' AND status='sent' AND source_version=? AND caption_watch_source_version=?
+              AND caption_watch_outcome='checking' AND lease_until>?`)
+              .run(media, reference.id, watch.leaseId, watch.sourceVersion, watch.sourceVersion, Date.now());
+            if (!pinned.changes) return unavailable();
             reference.caption_watch_media_id = media;
           }
           if (sourceEdit || watch) {
@@ -1099,10 +1147,6 @@ async function runVerifiedRelayCaptionWithAccount(input: VerifiedCaptionInput,
               if (!watch.allowRepair || reference.caption_watch_edit_attempted_at > 0) return invalid("watch_readonly");
               if (requiresPremium && me.premium !== true) return { state: "ok", attempted: false, outcome: "rejected", reason: "account_unqualified" };
               if (!desired.buttonsMatch) return invalid("buttons_mismatch");
-              const actualKind = before[0].media instanceof Api.MessageMediaPhoto ? "photo"
-                : before[0].media instanceof Api.MessageMediaDocument && before[0].media.document instanceof Api.Document
-                  && before[0].media.document.attributes.some(attribute => attribute instanceof Api.DocumentAttributeAnimated) ? "animation" : "video";
-              if (actualKind !== reference.media_kind) return invalid("media_invalid");
               originalMedia = media;
               break;
             }
@@ -1460,25 +1504,146 @@ export async function sampleSelectedSourceEmoji(): Promise<SourceEmojiSample> {
   } finally { release(db, claim); await closeClient(client); }
 }
 
+export type RelayCaptionSourceRefresh = {
+  state: "ok" | "waiting" | "busy" | "backoff" | "unavailable" | "disconnected";
+  sourceVersion?: number; verifiedAt?: number; retryAt?: number;
+  reason?: "input_invalid" | "source_inactive" | "source_identity_invalid" | "source_media_changed"
+    | "source_caption_missing" | "source_capture_waiting" | "source_busy" | "source_backoff" | "source_unavailable";
+};
+
+/** Refresh exactly one known delivered source; never discover/replay media or advance a cursor. */
+export async function refreshRelayCaptionSourceWithAccount(input: {
+  outboxId: number; relayRevision: string; targetChatId: number;
+}): Promise<RelayCaptionSourceRefresh> {
+  const waiting = (reason: RelayCaptionSourceRefresh["reason"]): RelayCaptionSourceRefresh => ({ state: "waiting", reason });
+  if (!Number.isSafeInteger(input.outboxId) || input.outboxId <= 0 || typeof input.relayRevision !== "string" || !input.relayRevision
+    || !Number.isSafeInteger(input.targetChatId) || input.targetChatId >= 0) return waiting("input_invalid");
+  const db = getSqlite(), current = row(db), now = Date.now();
+  type Reference = { id: number; status: string; message_id: number | null; revision: string; origin: string;
+    source_chat_id: number; source_message_id: number; account_generation: string; queued_at: number;
+    file_unique_id: string; media_kind: "photo" | "animation" | "video"; source_version: number; source_content_hash: string };
+  const reference = () => db.prepare(`SELECT id,status,message_id,revision,origin,source_chat_id,source_message_id,
+    account_generation,queued_at,file_unique_id,media_kind,source_version,source_content_hash FROM telegram_relay_outbox WHERE id=?`).get(input.outboxId) as Reference | undefined;
+  const configuration = () => db.prepare(`SELECT relay_enabled,relay_revision,relay_started_at,relay_caption_watch_enabled,token_ciphertext
+    FROM telegram_promotion_settings WHERE id='primary'`).get() as {
+      relay_enabled: number; relay_revision: string; relay_started_at: number; relay_caption_watch_enabled: number; token_ciphertext: string;
+    } | undefined;
+  const runtime = () => db.prepare("SELECT target_chat_id,revision,bot_id FROM telegram_relay_state WHERE id='primary'").get() as {
+    target_chat_id: number; revision: string; bot_id: number;
+  } | undefined;
+  const job = reference(), settings = configuration(), target = runtime();
+  const source = job && db.prepare("SELECT * FROM telegram_personal_sources WHERE chat_id=?").get(job.source_chat_id) as SourceRow | undefined;
+  const post = job && db.prepare(`SELECT * FROM telegram_personal_source_posts WHERE source_chat_id=? AND source_message_id=?`)
+    .get(job.source_chat_id, job.source_message_id) as SourcePostRow | undefined;
+  if (!job || job.status !== "sent" || !Number.isSafeInteger(job.message_id) || Number(job.message_id) <= 0
+    || job.origin !== "account" || job.revision !== input.relayRevision || job.account_generation !== current.generation
+    || !Number.isSafeInteger(job.source_message_id) || job.source_message_id <= 0 || job.source_chat_id === input.targetChatId
+    || !settings || settings.relay_enabled !== 1 || settings.relay_caption_watch_enabled !== 1 || settings.relay_revision !== input.relayRevision
+    || !target || target.target_chat_id !== input.targetChatId || target.revision !== input.relayRevision || !Number.isSafeInteger(target.bot_id) || target.bot_id <= 0
+    || !source || source.selected !== 1 || source.joined !== 1 || source.blocked !== 0 || source.selected_at > job.queued_at
+    || !post || post.account_generation !== current.generation || post.relay_revision !== input.relayRevision
+    || post.selected_at !== source.selected_at || !/^[a-f0-9]{64}$/.test(job.file_unique_id) || post.media_id_hash !== job.file_unique_id) return waiting("source_inactive");
+  if (current.stage !== "connected" || !current.session_ciphertext) return { state: "disconnected", reason: "source_inactive", retryAt: now + RETRY_MS };
+  if (current.lease_until > now) return { state: "busy", reason: "source_busy", retryAt: current.lease_until };
+  if (current.next_attempt_at > now) return { state: "backoff", reason: "source_backoff", retryAt: current.next_attempt_at };
+  let claim: Claim;
+  try { claim = claimAccount(db, now, { connected: true, respectBackoff: true }); }
+  catch {
+    const latest = row(db), retryAt = Math.max(latest.lease_until, latest.next_attempt_at, Date.now() + 5000);
+    return { state: latest.lease_until > Date.now() ? "busy" : latest.next_attempt_at > Date.now() ? "backoff" : "unavailable", reason: "source_unavailable", retryAt };
+  }
+  const deadline = Date.now() + 40_000;
+  const remaining = () => Math.max(1, Math.min(REQUEST_MS, deadline - Date.now()));
+  const active = () => {
+    const latest = reference(), config = configuration(), state = runtime(), account = row(db);
+    const peer = db.prepare("SELECT selected,joined,blocked,selected_at FROM telegram_personal_sources WHERE chat_id=?").get(source.chat_id) as SourceRow | undefined;
+    const watched = db.prepare(`SELECT account_generation,relay_revision,selected_at,media_id_hash FROM telegram_personal_source_posts
+      WHERE source_chat_id=? AND source_message_id=?`).get(source.chat_id, job.source_message_id) as SourcePostRow | undefined;
+    return Date.now() < deadline && owns(db, claim) && account.stage === "connected" && account.generation === current.generation
+      && account.config_ciphertext === current.config_ciphertext && account.session_ciphertext === current.session_ciphertext
+      && config?.relay_enabled === 1 && config.relay_caption_watch_enabled === 1 && config.relay_revision === settings.relay_revision
+      && config.relay_started_at === settings.relay_started_at && config.token_ciphertext === settings.token_ciphertext
+      && state?.target_chat_id === target.target_chat_id && state.revision === target.revision && state.bot_id === target.bot_id
+      && latest?.status === "sent" && latest.message_id === job.message_id && latest.revision === job.revision
+      && latest.origin === job.origin && latest.account_generation === job.account_generation && latest.queued_at === job.queued_at
+      && latest.source_chat_id === job.source_chat_id && latest.source_message_id === job.source_message_id
+      && latest.file_unique_id === job.file_unique_id && latest.media_kind === job.media_kind
+      && peer?.selected === 1 && peer.joined === 1 && peer.blocked === 0 && peer.selected_at === source.selected_at
+      && watched?.account_generation === post.account_generation && watched.relay_revision === post.relay_revision
+      && watched.selected_at === post.selected_at && watched.media_id_hash === post.media_id_hash;
+  };
+  let client: TelegramClient | undefined;
+  try {
+    if (!active()) return waiting("source_inactive");
+    client = makeClient(unseal<Credentials>(claim.row.config_ciphertext), unseal<string>(claim.row.session_ciphertext));
+    await bounded(client, client.connect(), remaining());
+    if (!active()) return waiting("source_inactive");
+    renew(db, claim);
+    const peer = inputPeer(source), entity = await bounded(client, client.getEntity(peer.input), remaining());
+    if (!active()) return waiting("source_inactive");
+    renew(db, claim);
+    if (!(entity instanceof Api.Channel) || entity.broadcast !== true || entity.left || entity.noforwards || peer.protected
+      || Number(utils.getPeerId(entity)) !== job.source_chat_id) return waiting("source_identity_invalid");
+    const messages = await bounded(client, client.getMessages(peer.input, { ids: [job.source_message_id], limit: 1 }), remaining());
+    if (!active()) return waiting("source_inactive");
+    renew(db, claim);
+    const message = messages.length === 1 && messages[0] instanceof Api.Message ? messages[0] : null;
+    if (!message || message.id !== job.source_message_id || !message.peerId || Number(utils.getPeerId(message.peerId)) !== job.source_chat_id
+      || !Number.isSafeInteger(message.date) || message.date * 1000 > Date.now() + 1000
+      || message.date * 1000 < Math.floor(Math.max(source.selected_at, settings.relay_started_at) / 1000) * 1000
+      || post.source_date > 0 && post.source_date !== message.date) return waiting("source_identity_invalid");
+    const media = eligibleMedia(message, false, target.bot_id, false);
+    if (!media || media.mediaKind !== job.media_kind || sourceMediaHash(media.mediaId) !== post.media_id_hash) return waiting("source_media_changed");
+    if (!message.message?.trim()) return waiting("source_caption_missing");
+    const { observeRelaySourceCaption } = await import("./telegram-relay");
+    if (!active()) return waiting("source_inactive");
+    const accepted = observeRelaySourceCaption({ sourceChatId: job.source_chat_id, sourceMessageId: job.source_message_id,
+      sourceDate: message.date, mediaKind: media.mediaKind, sourceMediaId: media.mediaId, caption: message.message,
+      captionEntities: captionEntities(message.entities), expectedCustomEmojiCount: (message.entities || []).filter(entity => entity.className === "MessageEntityCustomEmoji").length,
+      origin: "account", accountGeneration: current.generation, relayRevision: input.relayRevision });
+    if (!active()) return waiting("source_inactive");
+    const latest = reference();
+    if (!accepted || !latest || latest.source_content_hash.startsWith("invalid:")) return waiting("source_capture_waiting");
+    const verifiedAt = Date.now();
+    db.prepare(`UPDATE telegram_personal_source_posts SET revision_hash=?,checked_at=?,source_date=?
+      WHERE source_chat_id=? AND source_message_id=? AND account_generation=? AND relay_revision=? AND selected_at=? AND media_id_hash=?`)
+      .run(sourcePostHash(message, media.mediaId), verifiedAt, message.date, job.source_chat_id, job.source_message_id,
+        current.generation, input.relayRevision, source.selected_at, post.media_id_hash);
+    return { state: "ok", sourceVersion: latest.source_version, verifiedAt };
+  } catch (error) {
+    const safe = safeError(error);
+    // Observation persists only a bounded cooldown. Even a revoked-session
+    // reply must not reset selections, cursors, credentials or media queues.
+    if (owns(db, claim)) db.prepare(`UPDATE telegram_personal_account SET last_error=?,next_attempt_at=MAX(next_attempt_at,?)
+      WHERE id='primary' AND lease_id=?`).run(safe.message, Math.min(Number.MAX_SAFE_INTEGER, Date.now() + safe.delay), claim.leaseId);
+    console.warn("Telegram personal account operation failed.", JSON.stringify({ operation: "relay-caption-source-refresh", category: failureCategory(error) }));
+    const latest = row(db), backoff = safe.status === 429;
+    return { state: safe.revoked || latest.stage !== "connected" ? "disconnected" : backoff ? "backoff" : "unavailable",
+      reason: backoff ? "source_backoff" : "source_unavailable", retryAt: Math.max(Date.now() + 5000, latest.next_attempt_at) };
+  } finally { release(db, claim); await closeClient(client, Math.max(1, Math.min(2000, deadline - Date.now()))); }
+}
+
 /** Catch up from per-channel durable cursors; new selections start at the latest message. */
 export async function pollTelegramAccountOnce() {
   const db = getSqlite();
   const current = row(db);
   if (current.stage !== "connected" || !current.session_ciphertext || current.next_attempt_at > Date.now() || current.lease_until > Date.now()) return;
-  const relay = db.prepare("SELECT relay_enabled,relay_revision,relay_started_at,relay_caption_watch_enabled,relay_caption_watch_interval_seconds FROM telegram_promotion_settings WHERE id='primary'").get() as { relay_enabled: number; relay_revision: string; relay_started_at: number; relay_caption_watch_enabled: number; relay_caption_watch_interval_seconds: number } | undefined;
+  const relay = db.prepare("SELECT relay_enabled,relay_revision,relay_started_at,relay_caption_watch_enabled,relay_caption_watch_interval_seconds,relay_caption_serial_enabled FROM telegram_promotion_settings WHERE id='primary'").get() as { relay_enabled: number; relay_revision: string; relay_started_at: number; relay_caption_watch_enabled: number; relay_caption_watch_interval_seconds: number; relay_caption_serial_enabled: number } | undefined;
   const target = db.prepare("SELECT target_chat_id,ready_until,bot_id,revision FROM telegram_relay_state WHERE id='primary'").get() as { target_chat_id: number; ready_until: number; bot_id: number; revision: string } | undefined;
   const ready = relay?.relay_enabled === 1 && target && target.ready_until > Date.now() && target.revision === relay.relay_revision && target.target_chat_id < 0;
   const repairNow = Date.now();
+  const serialWatch = relay?.relay_caption_serial_enabled === 1 && relay.relay_caption_watch_enabled === 1;
+  const focus = serialWatch ? (await import("./telegram-caption-watch-cycle")).captionWatchFocus(db, repairNow) : null;
   // Reserve the next lease window after a source-caption preflight has already
   // waited. Otherwise receive can reacquire the account just before its retry
   // and repeatedly exhaust a healthy version's bounded busy waits.
-  if (ready && relay.relay_caption_watch_enabled === 1 && db.prepare(`SELECT 1 FROM telegram_relay_source_edits e JOIN telegram_relay_outbox o ON o.id=e.outbox_id
+  if (ready && relay.relay_caption_watch_enabled === 1 && (!serialWatch || focus && focus.retryAt <= repairNow) && db.prepare(`SELECT 1 FROM telegram_relay_source_edits e JOIN telegram_relay_outbox o ON o.id=e.outbox_id
     WHERE e.status='pending' AND (e.next_attempt_at<=? OR (e.preflight_waits>0 AND e.next_attempt_at<=?))
-    AND e.source_version=o.source_version AND o.status='sent' AND o.message_id>0 AND o.revision=? LIMIT 1`)
-    .get(repairNow, repairNow + LEASE_MS, relay.relay_revision)) return;
+    AND e.source_version=o.source_version AND o.status='sent' AND o.message_id>0 AND o.revision=?${serialWatch ? " AND e.outbox_id=?" : ""} LIMIT 1`)
+    .get(repairNow, repairNow + LEASE_MS, relay.relay_revision, ...(serialWatch ? [focus!.outboxId] : []))) return;
   // Initial Emoji repairs share the same lease reservation as source updates.
   // Match the actual worker's eligibility so obsolete work cannot block receive.
-  if (ready && db.prepare(`SELECT 1 FROM telegram_relay_outbox WHERE status='sent' AND revision=? AND message_id>0
+  if (ready && !serialWatch && db.prepare(`SELECT 1 FROM telegram_relay_outbox WHERE status='sent' AND revision=? AND message_id>0
     AND sent_at>=? AND sent_at<=? AND caption_edit_attempted_at>0
     AND (next_attempt_at<=? OR (caption_edit_outcome IN ('account_waiting_1','account_waiting_2','account_waiting_3',
       'account_recheck_waiting_1','account_recheck_waiting_2','account_recheck_waiting_3') AND next_attempt_at<=?))

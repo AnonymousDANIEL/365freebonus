@@ -140,7 +140,7 @@ test('migrations preserve brand data and existing expiry without creating Telegr
       process.env.DATA_DIR = legacyPath;
       const saved = await repository.readDirectory(true, now);
       const upgraded = sqlite.getSqlite();
-      assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version, 35);
+      assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version, 36);
       assert.equal(upgraded.prepare('SELECT COUNT(*) AS count FROM telegram_promotion_outbox').get().count, version >= 5 ? 1 : 0);
       assert.equal(upgraded.prepare('SELECT COUNT(*) AS count FROM telegram_private_contacts').get().count, 0);
       const runtime = upgraded.prepare("SELECT revision, next_offset, last_polled_at, sent, keyword_replies, private_replies FROM telegram_welcome_state WHERE id='primary'").get();
@@ -155,7 +155,7 @@ test('migrations preserve brand data and existing expiry without creating Telegr
         const settings = upgraded.prepare("SELECT * FROM telegram_promotion_settings WHERE id='primary'").get();
         assert.deepEqual({ ...settings }, {
           id: 'primary', enabled: 1, chat_id: '-10012345', token_ciphertext: 'existing-ciphertext',
-          relay_caption_watch_enabled: 1, relay_caption_watch_interval_seconds: 30,
+          relay_caption_watch_enabled: 1, relay_caption_watch_interval_seconds: 30, relay_caption_serial_enabled: 1,
           promotion_message: version >= 7 ? 'Existing promotion message' : '',
           welcome_enabled: Number(hasChatBot), welcome_chat_id: version >= 7 ? '-10054321' : '',
           welcome_message: version >= 7 ? 'Existing welcome message' : '',

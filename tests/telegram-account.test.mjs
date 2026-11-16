@@ -11,7 +11,7 @@ import ts from 'typescript';
 // Telegram is entirely replaced: no credentials or network traffic are used.
 const fixture = mkdtempSync(path.join(tmpdir(), 'telegram-personal-account-'));
 writeFileSync(path.join(fixture, 'package.json'), '{"type":"commonjs"}');
-for (const name of ['sqlite', 'telegram-relay-content', 'telegram-account']) writeFileSync(path.join(fixture, `${name}.js`), ts.transpileModule(
+for (const name of ['sqlite', 'telegram-relay-content', 'telegram-caption-watch-cycle', 'telegram-account']) writeFileSync(path.join(fixture, `${name}.js`), ts.transpileModule(
   readFileSync(new URL(`../app/lib/${name}.ts`, import.meta.url), 'utf8'),
   { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, esModuleInterop: true } },
 ).outputText);
@@ -40,7 +40,7 @@ MessageEntityCustomEmoji,MessageEntityBold,MessageEntityItalic,MessageEntityUnde
 exports.utils={getPeerId:entity=>'-100'+(entity.channelId||entity.id)};
 exports.Logger=class {setLevel(){};};
 exports.state={};
-exports.reset=()=>Object.assign(exports.state,{calls:[],dialogs:[],messages:[],error:null,passwordNeeded:false,media:Buffer.from('fixture-image'),consume:true,queue:[],observations:[],onObserve:null,onDownload:null,onEnqueue:null,me:null,ownedBots:[],onOwnedBots:null,resolvedTarget:null,onEntity:null,onGetMessages:null,onGetMe:null,onEdit:null,applyEdit:true});
+exports.reset=()=>Object.assign(exports.state,{calls:[],dialogs:[],messages:[],error:null,passwordNeeded:false,media:Buffer.from('fixture-image'),targetVisualHash:'',consume:true,queue:[],observations:[],onObserve:null,onDownload:null,onEnqueue:null,me:null,ownedBots:[],onOwnedBots:null,resolvedTarget:null,onEntity:null,onGetMessages:null,onGetMe:null,onEdit:null,applyEdit:true});
 exports.reset();
 function fail(method){const e=exports.state.error;if(e&&e.method===method)throw Object.assign(new Error('PRIVATE RAW DETAIL'),e);}
 exports.TelegramClient=class {
@@ -71,8 +71,12 @@ writeFileSync(path.join(fixture, 'telegram-relay.js'), `
 exports.enqueuePersonalRelayMedia=async value=>{const s=require('teleproto').state;s.queue.push(value);if(s.onEnqueue)await s.onEnqueue(value);return s.consume;};
 exports.observeRelaySourceCaption=value=>{const s=require('teleproto').state;s.observations.push(value);if(s.onObserve)s.onObserve(value);return s.consume;};
 `);
+writeFileSync(path.join(fixture, 'telegram-relay-media.js'), `
+exports.relayMediaIdentity=async bytes=>({contentHash:require('node:crypto').createHash('sha256').update(bytes).digest('hex'),visualHash:require('teleproto').state.targetVisualHash||''});
+`);
 const require = createRequire(import.meta.url);
 const account = require(path.join(fixture, 'telegram-account.js'));
+const cycle = require(path.join(fixture, 'telegram-caption-watch-cycle.js'));
 const telegram = require(path.join(fixture, 'node_modules/teleproto'));
 const { Api } = telegram;
 const relayContent = require(path.join(fixture, 'telegram-relay-content.js'));
@@ -107,8 +111,8 @@ async function login() {
 }
 async function select(ids=[String(source)]) { return await account.handleAccountAction({action:'select',channelIds:ids}); }
 function ready() {
-  db().prepare(`INSERT INTO telegram_promotion_settings(id,enabled,chat_id,token_ciphertext,relay_enabled,relay_revision,relay_started_at)
-    VALUES('primary',0,'','fixture',1,'relay-generation',?)`).run(Date.now()-10000);
+  db().prepare(`INSERT INTO telegram_promotion_settings(id,enabled,chat_id,token_ciphertext,relay_enabled,relay_revision,relay_started_at,relay_caption_serial_enabled)
+    VALUES('primary',0,'','fixture',1,'relay-generation',?,0)`).run(Date.now()-10000);
   db().prepare("UPDATE telegram_relay_state SET target_chat_id=?,target_verified_at=?,ready_until=?,bot_id=77,revision='relay-generation' WHERE id='primary'").run(target,Date.now(),Date.now()+600000);
 }
 function delivery(messageId=701,{caption='⭐ Offer https://365freebonus.com/',custom=true,...extra}={}) {
@@ -1886,4 +1890,149 @@ test('confirmed forwarded source watches survive the candidate 512-post pruning 
   await account.pollTelegramAccountOnce();
   assert.equal(db().prepare('SELECT COUNT(*) AS n FROM telegram_personal_source_posts WHERE source_message_id=1').get().n,1);
   assert.equal(db().prepare('SELECT COUNT(*) AS n FROM telegram_personal_source_posts').get().n,513);
+});
+
+async function readyFocusedSourceRefresh() {
+  await login();await select();ready();
+  const message=photo(41),hash=createHash('sha256').update('photo-'+message.media.photo.id).digest('hex');
+  telegram.state.messages=[message];knownSourcePost(message);
+  db().prepare("UPDATE telegram_relay_outbox SET file_unique_id=?,source_version=1").run(hash);
+  const outbox=db().prepare('SELECT * FROM telegram_relay_outbox').get();
+  const selectedAt=db().prepare('SELECT selected_at FROM telegram_personal_sources WHERE chat_id=?').get(source).selected_at;
+  db().prepare(`INSERT INTO telegram_personal_source_posts(source_chat_id,source_message_id,account_generation,relay_revision,
+    selected_at,source_date,media_id_hash,revision_hash,checked_at) VALUES(?,?,?,'relay-generation',?,?,?,'previous-snapshot',0)`)
+    .run(source,message.id,stored().generation,selectedAt,message.date,hash);
+  return {message,input:{outboxId:outbox.id,relayRevision:'relay-generation',targetChatId:target}};
+}
+
+test('focused source refresh captures the exact latest version without downloading media or advancing a cursor',async()=>{
+  const {message,input}=await readyFocusedSourceRefresh();const beforeCursor=cursor();
+  message.message='Latest source edit https://example.test';
+  telegram.state.onObserve=()=>db().prepare("UPDATE telegram_relay_outbox SET source_version=2,source_content_hash='fresh'").run();
+  const result=await account.refreshRelayCaptionSourceWithAccount(input);
+  assert.equal(result.state,'ok');assert.equal(result.sourceVersion,2);assert.ok(result.verifiedAt<=Date.now());
+  assert.equal(telegram.state.observations.length,1);assert.equal(telegram.state.observations[0].caption,message.message);
+  assert.equal(cursor(),beforeCursor);assert.equal(telegram.state.queue.length,0);
+  assert.equal(telegram.state.calls.filter(call=>call.method==='download'||call.method==='EditMessage').length,0);
+  const read=telegram.state.calls.filter(call=>call.method==='getMessages').at(-1);assert.deepEqual(read.params.ids,[message.id]);
+  assert.equal(stored().lease_until,0);assert.ok(telegram.state.calls.some(call=>call.method==='destroy'));
+  assert.equal(db().prepare('SELECT source_date FROM telegram_personal_source_posts').get().source_date,message.date);
+});
+
+for(const kind of ['empty','media','peer','date','selection','unknown'])test('focused source refresh waits safely for '+kind,async()=>{
+  const {message,input}=await readyFocusedSourceRefresh();const beforeCursor=cursor();
+  if(kind==='empty')message.message=' ';
+  if(kind==='media')message.media=new Api.MessageMediaPhoto({photo:new Api.Photo({id:'replacement'})});
+  if(kind==='peer')message.peerId=new Api.PeerChannel({channelId:'9999'});
+  if(kind==='date')message.date-=60;
+  if(kind==='selection')telegram.state.onGetMessages=()=>db().prepare('UPDATE telegram_personal_sources SET selected=0').run();
+  if(kind==='unknown')db().prepare("UPDATE telegram_relay_outbox SET status='unknown'").run();
+  const result=await account.refreshRelayCaptionSourceWithAccount(input);
+  assert.equal(result.state,'waiting');assert.ok(result.reason.startsWith('source_'));assert.equal(result.verifiedAt,undefined);
+  assert.equal(telegram.state.observations.length,0);assert.equal(cursor(),beforeCursor);
+  assert.equal(telegram.state.calls.filter(call=>call.method==='download'||call.method==='EditMessage').length,0);
+  assert.equal(stored().lease_until,0);
+});
+
+for(const kind of ['busy','backoff'])test('focused source refresh respects account '+kind+' deadlines without network',async()=>{
+  const {input}=await readyFocusedSourceRefresh(),until=Date.now()+90000;
+  db().prepare(`UPDATE telegram_personal_account SET ${kind==='busy'?'lease_until':'next_attempt_at'}=?`).run(until);
+  telegram.state.calls=[];const result=await account.refreshRelayCaptionSourceWithAccount(input);
+  assert.equal(result.state,kind);assert.equal(result.retryAt,until);assert.equal(telegram.state.calls.length,0);
+});
+
+test('focused source refresh cannot claim consistency when capture rejects or marks source content invalid',async()=>{
+  const {input}=await readyFocusedSourceRefresh();telegram.state.consume=false;
+  let result=await account.refreshRelayCaptionSourceWithAccount(input);assert.equal(result.reason,'source_capture_waiting');
+  telegram.state.consume=true;telegram.state.onObserve=()=>db().prepare("UPDATE telegram_relay_outbox SET source_content_hash='invalid:fixture'").run();
+  result=await account.refreshRelayCaptionSourceWithAccount(input);assert.equal(result.reason,'source_capture_waiting');assert.equal(result.verifiedAt,undefined);
+  assert.equal(stored().lease_until,0);
+});
+
+test('focused source refresh releases its lease and returns bounded retry after a connection failure',async()=>{
+  const {input}=await readyFocusedSourceRefresh();telegram.state.error={method:'connect',errorMessage:'ETIMEDOUT'};
+  const result=await account.refreshRelayCaptionSourceWithAccount(input);
+  assert.equal(result.state,'unavailable');assert.equal(result.reason,'source_unavailable');assert.ok(result.retryAt>Date.now());
+  assert.equal(stored().lease_until,0);assert.ok(telegram.state.calls.some(call=>call.method==='destroy'));
+});
+
+test('focused source observation never resets credentials, selection or jobs on a revoked-session reply',async()=>{
+  const {input}=await readyFocusedSourceRefresh(),before=stored();
+  telegram.state.error={method:'connect',errorMessage:'AUTH_KEY_UNREGISTERED'};
+  const result=await account.refreshRelayCaptionSourceWithAccount(input);
+  assert.equal(result.state,'disconnected');assert.equal(stored().generation,before.generation);
+  assert.equal(stored().session_ciphertext,before.session_ciphertext);assert.equal(stored().config_ciphertext,before.config_ciphertext);
+  assert.equal(db().prepare('SELECT selected FROM telegram_personal_sources WHERE chat_id=?').get(source).selected,1);
+  assert.equal(db().prepare('SELECT status FROM telegram_relay_outbox').get().status,'sent');
+  assert.equal(stored().lease_until,0);
+});
+
+for(const focused of [true,false])test('serial receive reserves only '+(focused?'the current focus':'no unrelated source edit'),async()=>{
+  const {input}=await readyFocusedSourceRefresh();db().prepare('UPDATE telegram_promotion_settings SET relay_caption_serial_enabled=1').run();
+  let outboxId=input.outboxId;
+  if(!focused){
+    const second=photo(42);knownSourcePost(second);outboxId=db().prepare('SELECT MAX(id) AS id FROM telegram_relay_outbox').get().id;
+    db().prepare('UPDATE telegram_relay_outbox SET source_version=1 WHERE id=?').run(outboxId);
+  }
+  db().prepare(`INSERT INTO telegram_relay_source_edits(outbox_id,source_version,caption,caption_entities,baseline_caption,baseline_entities,created_at)
+    VALUES(?,1,'updated','[]','old','[]',?)`).run(outboxId,Date.now());
+  telegram.state.calls=[];await account.pollTelegramAccountOnce();
+  assert.equal(telegram.state.calls.some(call=>call.method==='connect'),!focused);
+});
+
+test('serial observation lets receive continue despite an unrelated initial caption restoration',async()=>{
+  await readyFocusedSourceRefresh();db().prepare('UPDATE telegram_promotion_settings SET relay_caption_serial_enabled=1').run();
+  db().prepare(`UPDATE telegram_relay_outbox SET caption_edit_attempted_at=?,caption_edit_outcome='account_waiting_1',
+    next_attempt_at=0,last_error='Telegram 未保留部分原始自定义 Emoji，请检查机器人的自定义 Emoji 使用权限。该消息不会自动重发。'`).run(Date.now());
+  telegram.state.calls=[];await account.pollTelegramAccountOnce();
+  assert.ok(telegram.state.calls.some(call=>call.method==='connect'));
+});
+
+test('a deferred serial focus cannot reserve receive while its source edit is already due',async()=>{
+  const {input}=await readyFocusedSourceRefresh();
+  db().prepare('UPDATE telegram_promotion_settings SET relay_caption_serial_enabled=1').run();
+  const focus=cycle.captionWatchFocus(db(),Date.now());
+  assert.equal(focus.outboxId,input.outboxId);
+  assert.equal(cycle.deferCaptionWatchFocus(db(),focus.outboxId,Date.now()+60000,'connection'),true);
+  db().prepare(`INSERT INTO telegram_relay_source_edits(outbox_id,source_version,caption,caption_entities,baseline_caption,baseline_entities,created_at)
+    VALUES(?,1,'updated','[]','old','[]',?)`).run(input.outboxId,Date.now());
+  telegram.state.calls=[];await account.pollTelegramAccountOnce();
+  assert.ok(telegram.state.calls.some(call=>call.method==='connect'));
+  assert.equal(db().prepare('SELECT status FROM telegram_relay_source_edits').get().status,'pending');
+  assert.equal(cycle.captionWatchFocus(db(),Date.now()).outboxId,input.outboxId);
+});
+
+test('legacy caption text mismatch is repairable only after positive exact media identity and stable readback',async()=>{
+  const input=await readyCaptionObservation({custom:false});
+  telegram.state.messages[0].message='Wrong stale text';telegram.state.messages[0].entities=[];
+  db().prepare('UPDATE telegram_relay_outbox SET content_hash=?').run(createHash('sha256').update(telegram.state.media).digest('hex'));
+  const result=await account.observeVerifiedRelayCaptionWithAccount(input);
+  assert.deepEqual(result,{state:'ok',attempted:true,outcome:'preserved'});
+  assert.equal(telegram.state.calls.filter(call=>call.method==='download').length,1);
+  assert.equal(telegram.state.calls.filter(call=>call.method==='EditMessage').length,1);
+  assert.match(db().prepare('SELECT caption_watch_media_id FROM telegram_relay_outbox').get().caption_watch_media_id,/Photo:/);
+});
+
+test('legacy target identity can use a positively matching exact normalized visual hash',async()=>{
+  const input=await readyCaptionObservation({custom:false});
+  telegram.state.messages[0].message='Wrong stale text';telegram.state.messages[0].entities=[];
+  telegram.state.targetVisualHash='a'.repeat(64);
+  db().prepare('UPDATE telegram_relay_outbox SET content_hash=?,visual_hash=?').run('b'.repeat(64),telegram.state.targetVisualHash);
+  assert.deepEqual(await account.observeVerifiedRelayCaptionWithAccount(input),{state:'ok',attempted:true,outcome:'preserved'});
+  assert.equal(telegram.state.calls.filter(call=>call.method==='EditMessage').length,1);
+});
+
+for(const kind of ['missing-hash','wrong-hash','changed-media','wrong-date'])test('legacy target text mismatch stays read-only when identity is '+kind,async()=>{
+  const input=await readyCaptionObservation({custom:false});
+  telegram.state.messages[0].message='Wrong stale text';telegram.state.messages[0].entities=[];
+  if(kind==='wrong-hash')db().prepare('UPDATE telegram_relay_outbox SET content_hash=?').run('b'.repeat(64));
+  if(kind==='wrong-date')telegram.state.messages[0].date-=120;
+  if(kind==='changed-media'){
+    db().prepare('UPDATE telegram_relay_outbox SET content_hash=?').run(createHash('sha256').update(telegram.state.media).digest('hex'));
+    let reads=0;telegram.state.onGetMessages=()=>{if(++reads===2)telegram.state.messages[0]=new Api.Message({...telegram.state.messages[0],media:new Api.MessageMediaPhoto({photo:new Api.Photo({id:'555555555555555556'})})});};
+  }
+  const result=await account.observeVerifiedRelayCaptionWithAccount(input);
+  assert.deepEqual(result,{state:'ok',attempted:false,outcome:'invalid',reason:'identity_unverified'});
+  assert.equal(telegram.state.calls.filter(call=>call.method==='EditMessage').length,0);
+  assert.equal(db().prepare('SELECT caption_watch_media_id FROM telegram_relay_outbox').get().caption_watch_media_id,'');
 });

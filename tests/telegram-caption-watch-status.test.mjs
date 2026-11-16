@@ -13,6 +13,10 @@ writeFileSync(path.join(fixture,'status.js'),ts.transpileModule(
   readFileSync(new URL('../app/lib/telegram-caption-watch-status.ts',import.meta.url),'utf8'),
   {compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}},
 ).outputText);
+writeFileSync(path.join(fixture,'telegram-caption-watch-cycle.js'),ts.transpileModule(
+  readFileSync(new URL('../app/lib/telegram-caption-watch-cycle.ts',import.meta.url),'utf8'),
+  {compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}},
+).outputText);
 const require=createRequire(import.meta.url);
 const {relayCaptionWatchStatus}=require(path.join(fixture,'status.js'));
 const now=1_800_000_000_000;

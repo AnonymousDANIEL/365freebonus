@@ -9,7 +9,7 @@ import ts from 'typescript';
 const require=createRequire(import.meta.url),actualPath=require.resolve('teleproto'),{Api}=require('teleproto'),bigInt=require('big-integer');
 const {BinaryReader}=require('teleproto/compat/extensions/BinaryReader');
 const dir=mkdtempSync(path.join(tmpdir(),'hot-source-real-wire-'));writeFileSync(path.join(dir,'package.json'),'{"type":"commonjs"}');
-for(const name of ['sqlite','telegram-relay-content','telegram-account'])writeFileSync(path.join(dir,name+'.js'),ts.transpileModule(readFileSync(new URL('../app/lib/'+name+'.ts',import.meta.url),'utf8'),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS,esModuleInterop:true}}).outputText);
+for(const name of ['sqlite','telegram-relay-content','telegram-caption-watch-cycle', 'telegram-account'])writeFileSync(path.join(dir,name+'.js'),ts.transpileModule(readFileSync(new URL('../app/lib/'+name+'.ts',import.meta.url),'utf8'),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS,esModuleInterop:true}}).outputText);
 mkdirSync(path.join(dir,'node_modules/teleproto/sessions'),{recursive:true});mkdirSync(path.join(dir,'node_modules/big-integer'),{recursive:true});
 writeFileSync(path.join(dir,'node_modules/big-integer/index.js'),`module.exports=require(${JSON.stringify(require.resolve('big-integer'))});`);
 writeFileSync(path.join(dir,'node_modules/teleproto/sessions/index.js'),`exports.StringSession=class{constructor(value){this.value=value;}save(){return this.value;}};`);

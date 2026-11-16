@@ -260,7 +260,7 @@ test('gate migration adds only isolated tables and preserves existing credential
   const vault={...connection.prepare("SELECT * FROM notes_vault_settings WHERE id='primary'").get()};
   for(const name of ['settings','members','jobs','candidates','discovery','events'])connection.exec('DROP TABLE telegram_join_gate_'+name);
   connection.exec('PRAGMA user_version=25');close();
-  assert.equal(db().prepare('PRAGMA user_version').get().user_version, 35);
+  assert.equal(db().prepare('PRAGMA user_version').get().user_version, 36);
   assert.deepEqual({...db().prepare("SELECT * FROM telegram_promotion_settings WHERE id='primary'").get()},before);
   assert.deepEqual({...db().prepare("SELECT * FROM notes_vault_settings WHERE id='primary'").get()},vault);
   assert.equal(gate.joinGateStatus(db()).enabled,false);

@@ -12,7 +12,7 @@ export function getDataDirectory(): string {
 function migrate(db: DatabaseSync) {
   if (migrated.has(db)) return;
   const readVersion = () => (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
-  if (readVersion() < 35) {
+  if (readVersion() < 36) {
     db.exec("BEGIN IMMEDIATE");
     try {
       // Read again inside the write lock, so concurrent process starts cannot
@@ -651,6 +651,20 @@ function migrate(db: DatabaseSync) {
           if (!relayColumns.some(column => column.name === name)) db.exec(`ALTER TABLE telegram_relay_outbox ADD COLUMN ${name} ${definition}`);
         }
         db.exec("PRAGMA user_version=35");
+      }
+      if (version < 36) {
+        const columns = db.prepare("PRAGMA table_info(telegram_promotion_settings)").all() as { name: string }[];
+        if (!columns.some(column => column.name === "relay_caption_serial_enabled")) db.exec("ALTER TABLE telegram_promotion_settings ADD COLUMN relay_caption_serial_enabled INTEGER NOT NULL DEFAULT 1 CHECK(relay_caption_serial_enabled IN (0,1))");
+        const stateColumns = db.prepare("PRAGMA table_info(telegram_relay_state)").all() as { name: string }[];
+        if (!stateColumns.some(column => column.name === "bot_updates_drained_at")) db.exec("ALTER TABLE telegram_relay_state ADD COLUMN bot_updates_drained_at INTEGER NOT NULL DEFAULT 0");
+        if (!stateColumns.some(column => column.name === "bot_updates_gap")) db.exec("ALTER TABLE telegram_relay_state ADD COLUMN bot_updates_gap INTEGER NOT NULL DEFAULT 0 CHECK(bot_updates_gap IN (0,1))");
+        db.exec(`CREATE TABLE IF NOT EXISTS telegram_relay_caption_watch_cycle (
+          id TEXT PRIMARY KEY CHECK(id='primary'),relay_revision TEXT NOT NULL DEFAULT '',target_chat_id INTEGER NOT NULL DEFAULT 0,
+          account_generation TEXT NOT NULL DEFAULT '',cycle_number INTEGER NOT NULL DEFAULT 0,cycle_started_at INTEGER NOT NULL DEFAULT 0,
+          cycle_finished_at INTEGER NOT NULL DEFAULT 0,cycle_ceiling_id INTEGER NOT NULL DEFAULT 0,cursor_id INTEGER NOT NULL DEFAULT 0,
+          current_outbox_id INTEGER NOT NULL DEFAULT 0,current_started_at INTEGER NOT NULL DEFAULT 0,next_cycle_at INTEGER NOT NULL DEFAULT 0,
+          retry_at INTEGER NOT NULL DEFAULT 0,completed_count INTEGER NOT NULL DEFAULT 0,last_reason TEXT NOT NULL DEFAULT ''
+        ); PRAGMA user_version=36;`);
       }
       db.exec("COMMIT");
     } catch (error) { db.exec("ROLLBACK"); throw error; }

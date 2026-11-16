@@ -61,19 +61,17 @@ function harness(initial = snapshot()) {
   };
 }
 
-test('observation preferences save their own switch and interval through the existing authenticated settings request', async () => {
+test('hourly serial observation saves its switch without changing source capture frequency or sending a message', async () => {
   const h = harness();
   try {
     await h.ready();
     assert.equal(h.field('观察并同步来源文案').props.checked, true);
-    assert.equal(h.field('文案检查间隔', 'select').props.value, 30);
-    h.field('文案检查间隔', 'select').props.onChange({ target: { value: '180' } }); h.render();
+    assert.match(h.text(), /每 60 分钟一轮 · 逐条核对文案/);
     h.field('观察并同步来源文案').props.onChange({ target: { checked: false } }); h.render();
-    assert.equal(h.field('文案检查间隔', 'select').props.disabled, true);
     await h.form().props.onSubmit({ preventDefault() {} }); h.render();
     const saved = h.calls.find(call => call.method === 'PUT');
     assert.equal(saved.body.relay.captionWatchEnabled, false);
-    assert.equal(saved.body.relay.captionWatchIntervalSeconds, 180);
+    assert.equal(saved.body.relay.captionWatchIntervalSeconds, 30);
     assert.equal(saved.body.relay.enabled, true);
     assert.ok(!h.calls.some(call => call.path.includes('send') || call.path.includes('publish')));
   } finally { h.close(); }
@@ -85,12 +83,15 @@ test('periodic status refresh preserves unsaved copy and preferences while showi
     await h.ready();
     const copy = '  Unsaved copy\n\n🎁 Exact draft  ';
     h.field('品牌通知文案', 'textarea').props.onChange({ target: { value: copy } }); h.render();
-    h.field('文案检查间隔', 'select').props.onChange({ target: { value: '60' } }); h.render();
-    const status = snapshot(); status.relay.captionWatch = { ...status.relay.captionWatch, pending: 0, consistent: 1, lastCheckedAt: at };
+    h.field('观察并同步来源文案').props.onChange({ target: { checked: false } }); h.render();
+    const status = snapshot(); status.relay.captionWatch = { ...status.relay.captionWatch, pending: 0, consistent: 1, lastCheckedAt: at,
+      cycle:{enabled:true,cycleNumber:2,position:2,total:4,completed:1,currentStartedAt:at,cycleStartedAt:at-30000,nextCycleAt:at+3600000,nextAttemptAt:at,currentState:'waiting',lastReason:'waiting'} };
     h.setSnapshot(status); await h.poll();
     assert.equal(h.field('品牌通知文案', 'textarea').props.value, copy);
-    assert.equal(h.field('文案检查间隔', 'select').props.value, 60);
-    assert.match(h.text(), /已核对一致1/);
+    assert.equal(h.field('观察并同步来源文案').props.checked, false);
+    assert.match(h.text(), /上次核对一致1/);
+    assert.match(h.text(), /第 2 \/ 4 条/);
+    assert.match(h.text(), /本轮已通过1/);
     assert.match(h.text(), /2026\/11\/16 20:30:00/);
     assert.ok(h.calls.every(call => call.method === 'GET'));
     h.document.visibilityState = 'hidden'; const count = h.calls.length; await h.poll();

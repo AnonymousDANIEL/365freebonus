@@ -35,7 +35,7 @@ writeFixture('package.json', '{"type":"commonjs"}');
 symlinkSync(fileURLToPath(new URL('../node_modules', import.meta.url)), path.join(fixture, 'node_modules'), 'dir');
 for (const relative of [
   'app/api/admin/_security', 'app/api/admin/telegram/route',
-  ...['auth-core', 'brand-links', 'directory', 'image-media', 'image-url', 'sqlite', 'telegram-background', 'telegram-brand-card', 'telegram-followups', 'telegram-private-updates', 'telegram-relay-content', 'telegram-relay-media', 'telegram-caption-watch-status', 'telegram-relay', 'telegram-join-gate', 'telegram-hot-video-limits', 'telegram-hot-videos', 'telegram-scheduled-messages-types', 'telegram-scheduled-messages', 'telegram-promotions'].map(name => `app/lib/${name}`),
+  ...['auth-core', 'brand-links', 'directory', 'image-media', 'image-url', 'sqlite', 'telegram-background', 'telegram-brand-card', 'telegram-followups', 'telegram-private-updates', 'telegram-relay-content', 'telegram-relay-media', 'telegram-caption-watch-cycle', 'telegram-caption-watch-status', 'telegram-relay', 'telegram-join-gate', 'telegram-hot-video-limits', 'telegram-hot-videos', 'telegram-scheduled-messages-types', 'telegram-scheduled-messages', 'telegram-promotions'].map(name => `app/lib/${name}`),
 ]) {
   const source = readFileSync(new URL(`../${relative}.ts`, import.meta.url), 'utf8');
   const { outputText } = ts.transpileModule(source, {
@@ -692,7 +692,7 @@ test('schema35 adds observation defaults while retaining existing private settin
   database.exec('ALTER TABLE telegram_promotion_settings DROP COLUMN relay_caption_watch_enabled; ALTER TABLE telegram_promotion_settings DROP COLUMN relay_caption_watch_interval_seconds; PRAGMA user_version=34');
   const filename = path.join(process.env.DATA_DIR, 'directory.sqlite');
   database.close(); globalThis.__directorySqlite.delete(filename); database = getSqlite();
-  assert.equal(database.prepare('PRAGMA user_version').get().user_version, 35);
+  assert.equal(database.prepare('PRAGMA user_version').get().user_version, 36);
   const migratedSettings = settingsRow();
   assert.equal(migratedSettings.relay_caption_watch_enabled, 1); assert.equal(migratedSettings.relay_caption_watch_interval_seconds, 30);
   delete migratedSettings.relay_caption_watch_enabled; delete migratedSettings.relay_caption_watch_interval_seconds;
