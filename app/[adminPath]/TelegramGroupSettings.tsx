@@ -6,7 +6,16 @@ import "./telegram-keywords-admin.css";
 import TelegramPersonalAccount from "./TelegramPersonalAccount";
 import TelegramJoinGate from "./TelegramJoinGate";
 
-type RelayStatus = { enabled: boolean; chatId: string; ready: boolean; counts: { pending: number; sending: number; sent: number; failed: number; unknown: number; cancelled: number; skipped: number }; lastError: string; lastPolledAt: number | null };
+type CaptionWatchStatus = {
+  watched: number; lastCheckedAt: number | null; nextCheckAt: number | null;
+  pending: number; checking: number; consistent: number; mismatch: number; waiting: number; lastError: string;
+};
+type RelayStatus = {
+  enabled: boolean; chatId: string; ready: boolean; captionWatchEnabled: boolean; captionWatchIntervalSeconds: number;
+  captionWatch?: CaptionWatchStatus;
+  counts: { pending: number; sending: number; sent: number; failed: number; unknown: number; cancelled: number; skipped: number };
+  lastError: string; lastPolledAt: number | null;
+};
 type WelcomeDraft = { enabled: boolean; chatId: string; message: string };
 type FollowupPreferences = { enabled: boolean; message: string };
 type FollowupStatus = FollowupPreferences & {
@@ -29,7 +38,7 @@ type TelegramConfig = {
 };
 type TelegramDraft = Pick<TelegramConfig, "enabled" | "chatId" | "promotionMessage"> & {
   token: string;
-  relay: Pick<RelayStatus, "enabled" | "chatId">;
+  relay: Pick<RelayStatus, "enabled" | "chatId" | "captionWatchEnabled" | "captionWatchIntervalSeconds">;
   welcome: WelcomeDraft;
   chatBot: ChatBotPreferences & { token: string };
 };
@@ -46,7 +55,7 @@ const keywordLimit = 120;
 const messageLimit = 2000;
 const initialDraft: TelegramDraft = {
   enabled: false, chatId: "", token: "", promotionMessage: "",
-  relay: { enabled: false, chatId: "@join365freebonusgroup" },
+  relay: { enabled: false, chatId: "@join365freebonusgroup", captionWatchEnabled: true, captionWatchIntervalSeconds: 30 },
   welcome: { enabled: false, chatId: "", message: "" },
   chatBot: { token: "", keywordEnabled: false, privateEnabled: false, privateStartMessage: "", followup: { enabled: false, message: "" }, updates: { enabled: false } },
 };
@@ -66,7 +75,8 @@ const pollTimeFormat = new Intl.DateTimeFormat("zh-CN", {
 function draftFromConfig({ enabled, chatId, promotionMessage, relay, welcome, chatBot }: TelegramConfig): TelegramDraft {
   return {
     enabled, chatId, promotionMessage, token: "",
-    relay: { enabled: relay?.enabled ?? false, chatId: relay?.chatId || "@join365freebonusgroup" },
+    relay: { enabled: relay?.enabled ?? false, chatId: relay?.chatId || "@join365freebonusgroup",
+      captionWatchEnabled: relay?.captionWatchEnabled ?? true, captionWatchIntervalSeconds: relay?.captionWatchIntervalSeconds ?? 30 },
     welcome: { enabled: welcome.enabled, chatId: welcome.chatId, message: welcome.message },
     chatBot: {
       token: "", keywordEnabled: chatBot.keywordEnabled,
@@ -255,12 +265,19 @@ export default function TelegramGroupSettings({ request, signInPath }: AdminProp
   const [saving, setSaving] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [reload, setReload] = useState(0);
+  const alive = useRef(false);
+  const busy = useRef(false);
+  const requestVersion = useRef(0);
+  const pollBusy = useRef(false);
+  const requestRef = useRef(request);
+  requestRef.current = request;
 
   useEffect(() => {
     let active = true;
+    alive.current = true;
     setLoading(true);
     setNotice(null);
-    request<TelegramConfig>(endpoint).then(result => {
+    requestRef.current<TelegramConfig>(endpoint).then(result => {
       if (!active) return;
       setConfig(result);
       setDraft(draftFromConfig(result));
@@ -269,15 +286,31 @@ export default function TelegramGroupSettings({ request, signInPath }: AdminProp
     }).finally(() => {
       if (active) setLoading(false);
     });
-    return () => { active = false; };
-  }, [request, reload]);
+    return () => { active = false; alive.current = false; };
+  }, [reload]);
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      if (document.visibilityState !== "visible" || busy.current || pollBusy.current) return;
+      const version = requestVersion.current;
+      pollBusy.current = true;
+      requestRef.current<TelegramConfig>(endpoint).then(result => {
+        if (alive.current && version === requestVersion.current && !busy.current) setConfig(result);
+      }).catch(error => {
+        if (alive.current && version === requestVersion.current && error instanceof Error && "status" in error && error.status === 401) {
+          setNotice(requestFailure(error));
+        }
+      }).finally(() => { pollBusy.current = false; });
+    }, 30_000);
+    return () => clearInterval(timer);
+  }, []);
 
   async function save(event: FormEvent) {
     event.preventDefault();
-    if (!config || loading || saving || refreshing) return;
+    if (!config || loading || saving || refreshing || busy.current) return;
     const chatId = draft.chatId.trim();
     const token = draft.token.trim();
-    const relay = { enabled: draft.relay.enabled, chatId: draft.relay.chatId.trim() };
+    const relay = { ...draft.relay, chatId: draft.relay.chatId.trim() };
     const { token: chatTokenInput, keywordEnabled, privateEnabled, privateStartMessage, followup, updates } = draft.chatBot;
     const chatToken = chatTokenInput.trim();
     const welcome = { ...draft.welcome, chatId: draft.welcome.chatId.trim(), message: draft.welcome.message.trim() };
@@ -319,6 +352,8 @@ export default function TelegramGroupSettings({ request, signInPath }: AdminProp
       return;
     }
     setSaving(true);
+    busy.current = true;
+    requestVersion.current++;
     setNotice(null);
     try {
       const result = await request<TelegramConfig>(endpoint, "PUT", {
@@ -341,12 +376,15 @@ export default function TelegramGroupSettings({ request, signInPath }: AdminProp
     } catch (error) {
       setNotice(requestFailure(error));
     } finally {
+      busy.current = false;
       setSaving(false);
     }
   }
 
   async function refreshStatus() {
-    if (loading || saving || refreshing) return;
+    if (loading || saving || refreshing || busy.current) return;
+    busy.current = true;
+    requestVersion.current++;
     setRefreshing(true);
     setNotice(null);
     try {
@@ -354,6 +392,7 @@ export default function TelegramGroupSettings({ request, signInPath }: AdminProp
     } catch (error) {
       setNotice(requestFailure(error));
     } finally {
+      busy.current = false;
       setRefreshing(false);
     }
   }
@@ -366,6 +405,7 @@ export default function TelegramGroupSettings({ request, signInPath }: AdminProp
   const chatStatus = chatEnabled ? "已启用" : chatRequested ? "请检查设置" : config?.chatBot.hasToken ? "已停用" : "未配置";
   const targetRequired = draft.welcome.enabled || draft.chatBot.keywordEnabled;
   const chatTokenRequired = targetRequired || draft.chatBot.privateEnabled;
+  const captionWatch = config?.relay.captionWatch;
   const feedback = <TelegramNotice notice={notice} signInPath={signInPath} />;
 
   return <><form className="cms-settings-form cms-telegram-settings" onSubmit={save}>
@@ -435,15 +475,43 @@ export default function TelegramGroupSettings({ request, signInPath }: AdminProp
                 onChange={event => setDraft({ ...draft, relay: { ...draft.relay, chatId: event.target.value } })} />
               <small>将 @FreeBonus365Bot 加入目标群并允许发送照片、视频和 GIF；频道需要管理员发布权限。此目标独立于上方品牌通知目标。</small>
             </label>
+            <label className="cms-telegram-switch">
+              <input type="checkbox" role="switch" checked={draft.relay.captionWatchEnabled}
+                onChange={event => setDraft({ ...draft, relay: { ...draft.relay, captionWatchEnabled: event.target.checked } })} />
+              观察并同步来源文案
+            </label>
+            <label>文案检查间隔
+              <select value={draft.relay.captionWatchIntervalSeconds} disabled={!draft.relay.captionWatchEnabled}
+                onChange={event => setDraft({ ...draft, relay: { ...draft.relay, captionWatchIntervalSeconds: Number(event.target.value) } })}>
+                <option value={30}>每 30 秒</option><option value={60}>每 1 分钟</option>
+                <option value={180}>每 3 分钟</option><option value={300}>每 5 分钟</option>
+              </select>
+              <small>保存后由服务器持续检查；关闭网页也会运行。按批次轮询，来源较多或 Telegram 限流时会延后。</small>
+            </label>
             <small>处理开启后识别到的照片／视频／GIF＋文案。来源先发媒体、之后才补文案时，会在后续检查发现后转发；已转发的来源再编辑文案，会更新目标原贴。纯文字及禁止转发的内容会跳过。原文链接和原按钮会换成以下固定入口：</small>
             <small>🌐 Visit website — https://365freebonus.com/</small>
             <small>🎁 365 Free Bonus Official — https://t.me/join365freebonus</small>
             <small>💬 NEED HELP? — https://t.me/FreeBonus365ChatBot</small>
-            <small>个人账号会轮询已追踪的媒体，检测后补或修改的文案；每个来源保留最近 512 条，所有来源合计最多 4,096 条。更新前未被追踪的历史媒体不会自动补发，Telegram 限流或队列忙碌时会延后检查。</small>
+            <small>个人账号会轮询已追踪的媒体，检测后补或修改的文案。已转发的来源持续保留观察；尚未转发的候选媒体每个来源保留最近 512 条、所有来源合计最多 4,096 条。未被追踪的历史媒体不会自动补发；Telegram 限流或队列忙碌时会延后检查。</small>
             <small>来源群需允许机器人接收普通消息：将机器人设为管理员，或在 BotFather 关闭 Group Privacy。其他机器人发出的消息还可能需要开启 Bot-to-Bot Communication Mode。</small>
             <small>不要同时为此机器人使用其他 Webhook 或轮询接收服务。系统会去重、限速，并忽略自己的消息和目标群消息。</small>
             <small>按马来西亚日期（UTC+8）每天 00:00 重新计算媒体去重：同一天相同图片身份或内容会跳过，第二天新收到相同媒体可以再转发。文案相同不会单独去重，不同媒体仍可分别发送；纯文字不转发，未带文案的媒体暂不发送；后补文案仍须符合当天媒体去重。当天记录在重新开启和重启后保留，历史消息不会在午夜自动重发；跨午夜仍在发送或结果未确认的请求会保留防重保护。</small>
-            <small>保留原文换行、文字格式和自定义 Emoji 资料；正文链接改为本站，按钮统一为上方三项。初次发送不符时仍按原流程补正；来源的新文案版本会另行排队，编辑目标原贴，不会重复发送媒体。已连接个人账号须具备频道编辑权限；带自定义 Emoji 的版本另须 Premium。编辑后回读核对原媒体、文案、格式、表情及三个按钮；权限不足、目标文案或按钮被手动更改或结果无法确认时停止并提示。超长文案、缺少格式资料或未知发送结果不会强行重发。</small>
+            <small>保留原文换行、文字格式和自定义 Emoji 资料；正文链接改为本站，按钮统一为上方三项。来源的新文案版本会排队更新目标原贴，并回读核对文字、格式、表情及按钮。已连接个人账号须具备频道编辑权限；带自定义 Emoji 的版本另须 Premium。无法确认权限、原媒体身份或编辑结果时显示等待核实；未知发送结果不会重新发送媒体。</small>
+            <div className="cms-telegram-followup-note" aria-label="文案一致性观察">
+              <p>文案一致性观察 · {config.relay.enabled && config.relay.captionWatchEnabled ? "已启用" : "已暂停"} · 状态每 30 秒自动刷新</p>
+              <dl className="cms-telegram-counts">
+                <div><dt>观察中</dt><dd>{captionWatch?.watched ?? 0}</dd></div>
+                <div><dt>待检查</dt><dd>{captionWatch?.pending ?? 0}</dd></div>
+                <div><dt>检查中</dt><dd>{captionWatch?.checking ?? 0}</dd></div>
+                <div><dt>已核对一致</dt><dd>{captionWatch?.consistent ?? 0}</dd></div>
+                <div><dt>发现不一致</dt><dd>{captionWatch?.mismatch ?? 0}</dd></div>
+                <div><dt>等待核实</dt><dd>{captionWatch?.waiting ?? 0}</dd></div>
+                <div><dt>文案最近检查（MYT）</dt><dd>{captionWatch?.lastCheckedAt ? pollTimeFormat.format(captionWatch.lastCheckedAt) : "尚未检查"}</dd></div>
+                <div><dt>文案下次检查（MYT）</dt><dd>{captionWatch?.nextCheckAt ? pollTimeFormat.format(captionWatch.nextCheckAt) : "等待安排"}</dd></div>
+              </dl>
+              <small>「已核对一致」以目标消息实际回读为准，包含文字、格式、自定义 Emoji 和固定按钮。无法验证时显示等待核实。</small>
+              {captionWatch?.lastError && <p className="cms-telegram-last-error">文案检查提示 · {captionWatch.lastError}</p>}
+            </div>
             <dl className="cms-telegram-counts" aria-label="群图片转发记录">
               {Object.entries(config.relay.counts).map(([key, count]) => <div key={key}><dt>{({ ...deliveryLabels, cancelled: "已取消" } as Record<string, string>)[key] || key}</dt><dd>{count}</dd></div>)}
               <div><dt>最近检查（MYT）</dt><dd>{config.relay.lastPolledAt === null ? "尚未检查" : pollTimeFormat.format(config.relay.lastPolledAt)}</dd></div>

@@ -12,7 +12,7 @@ export function getDataDirectory(): string {
 function migrate(db: DatabaseSync) {
   if (migrated.has(db)) return;
   const readVersion = () => (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
-  if (readVersion() < 34) {
+  if (readVersion() < 35) {
     db.exec("BEGIN IMMEDIATE");
     try {
       // Read again inside the write lock, so concurrent process starts cannot
@@ -630,6 +630,28 @@ function migrate(db: DatabaseSync) {
         CREATE INDEX IF NOT EXISTS telegram_scheduled_message_deliveries_due ON telegram_scheduled_message_deliveries(status,next_attempt_at,run_at);
         PRAGMA user_version=34;
       `);
+      if (version < 35) {
+        const columns = db.prepare("PRAGMA table_info(telegram_promotion_settings)").all() as { name: string }[];
+        if (!columns.some(column => column.name === "relay_caption_watch_enabled")) {
+          db.exec("ALTER TABLE telegram_promotion_settings ADD COLUMN relay_caption_watch_enabled INTEGER NOT NULL DEFAULT 1 CHECK(relay_caption_watch_enabled IN (0,1))");
+        }
+        if (!columns.some(column => column.name === "relay_caption_watch_interval_seconds")) {
+          db.exec("ALTER TABLE telegram_promotion_settings ADD COLUMN relay_caption_watch_interval_seconds INTEGER NOT NULL DEFAULT 30 CHECK(relay_caption_watch_interval_seconds IN (30,60,180,300))");
+        }
+        const relayColumns = db.prepare("PRAGMA table_info(telegram_relay_outbox)").all() as { name: string }[];
+        for (const [name, definition] of [
+          ["caption_watch_checked_at", "INTEGER NOT NULL DEFAULT 0"],
+          ["caption_watch_next_at", "INTEGER NOT NULL DEFAULT 0"],
+          ["caption_watch_outcome", "TEXT NOT NULL DEFAULT ''"],
+          ["caption_watch_last_error", "TEXT NOT NULL DEFAULT ''"],
+          ["caption_watch_edit_attempted_at", "INTEGER NOT NULL DEFAULT 0"],
+          ["caption_watch_source_version", "INTEGER NOT NULL DEFAULT -1"],
+          ["caption_watch_media_id", "TEXT NOT NULL DEFAULT ''"],
+        ]) {
+          if (!relayColumns.some(column => column.name === name)) db.exec(`ALTER TABLE telegram_relay_outbox ADD COLUMN ${name} ${definition}`);
+        }
+        db.exec("PRAGMA user_version=35");
+      }
       db.exec("COMMIT");
     } catch (error) { db.exec("ROLLBACK"); throw error; }
   }

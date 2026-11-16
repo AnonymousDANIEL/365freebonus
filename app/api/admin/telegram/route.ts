@@ -10,7 +10,11 @@ const configInput = z.object({
   chatId: z.string().trim().max(80),
   token: z.string().trim().max(160).optional(),
   promotionMessage: z.string().trim().max(2_000).optional(),
-  relay: z.object({ enabled: z.boolean(), chatId: z.string().trim().max(80) }).strict().optional(),
+  relay: z.object({
+    enabled: z.boolean(), chatId: z.string().trim().max(80),
+    captionWatchEnabled: z.boolean().optional(),
+    captionWatchIntervalSeconds: z.union([z.literal(30), z.literal(60), z.literal(180), z.literal(300)]).optional(),
+  }).strict().optional(),
   welcome: z.object({
     enabled: z.boolean(),
     chatId: z.string().trim().max(80),

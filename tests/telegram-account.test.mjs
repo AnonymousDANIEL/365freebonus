@@ -773,7 +773,9 @@ test('personal caption edit reports explicit rejection, uncertain timeout and re
   telegram.state.error={method:'EditMessage',code:'ETIMEDOUT'};
   assert.deepEqual(await account.editVerifiedRelayCaptionWithAccount(input),{state:'unavailable',attempted:true,outcome:'uncertain'});
   const at=Date.now();telegram.state.error={method:'EditMessage',code:420,errorMessage:'FLOOD_WAIT_120',seconds:120};
-  assert.deepEqual(await account.editVerifiedRelayCaptionWithAccount(input),{state:'backoff',attempted:true,outcome:'rejected'});
+  const limited=await account.editVerifiedRelayCaptionWithAccount(input);
+  assert.deepEqual({...limited,retryAt:undefined},{state:'backoff',attempted:true,outcome:'rejected',retryAt:undefined});
+  assert.ok(limited.retryAt>=at+120000);
   assert.ok(stored().next_attempt_at>=at+120000);assert.equal(stored().session_ciphertext,session);
   assert.equal(telegram.state.calls.filter(call=>call.method==='EditMessage').length,3);
 });
@@ -1359,6 +1361,17 @@ test('source caption and entity changes within the same editDate are observed wi
   assert.equal(telegram.state.calls.filter(call=>call.method==='download').length,1);
 });
 
+test('removing a known source caption is observed instead of accepting the old desired text as consistent',async()=>{
+  await login();await select();ready();
+  const message=photo(41,{message:'Original caption'});telegram.state.messages=[message];
+  await account.pollTelegramAccountOnce();knownSourcePost(message);
+  message.message='';message.entities=[];
+  dueSourceWatch();await account.pollTelegramAccountOnce();
+  assert.equal(telegram.state.observations.length,1);
+  assert.equal(telegram.state.observations[0].caption,'');
+  assert.equal(telegram.state.calls.filter(call=>call.method==='download').length,1);
+});
+
 test('source watches persist across restarts and observe edits on posts older than one day',async()=>{
   await login();await select();ready();
   const message=photo(41,{message:''});telegram.state.messages=[message];await account.pollTelegramAccountOnce();
@@ -1485,6 +1498,22 @@ test('source edit already exactly at the desired caption does not submit another
   telegram.state.messages[0].message=input.caption;telegram.state.messages[0].entities=wireEntities(input.captionEntities);
   assert.deepEqual(await account.editVerifiedRelayCaptionWithAccount(input),{state:'ok',attempted:false,outcome:'preserved'});
   assert.equal(telegram.state.calls.filter(call=>call.method==='EditMessage').length,0);
+});
+
+test('pausing observation during source-edit preflight prevents a new edit RPC',async()=>{
+  const input=await readySourceCaptionEdit();
+  telegram.state.onGetMessages=()=>db().exec('UPDATE telegram_promotion_settings SET relay_caption_watch_enabled=0');
+  const result=await account.editVerifiedRelayCaptionWithAccount(input);
+  assert.equal(result.attempted,false);
+  assert.equal(telegram.state.calls.filter(call=>call.method==='EditMessage').length,0);
+});
+
+test('pausing observation after source edit submission still permits readback without another RPC',async()=>{
+  const input=await readySourceCaptionEdit();
+  telegram.state.onEdit=()=>db().exec('UPDATE telegram_promotion_settings SET relay_caption_watch_enabled=0');
+  const result=await account.editVerifiedRelayCaptionWithAccount(input);
+  assert.equal(result.outcome,'preserved');assert.equal(result.attempted,true);
+  assert.equal(telegram.state.calls.filter(call=>call.method==='EditMessage').length,1);
 });
 
 test('source version superseded during an actual edit still reads back its immutable submitted caption without retrying',async()=>{
@@ -1769,4 +1798,92 @@ test('Hot history accepts only regular non-ephemeral MP4 videos and skips other 
 test('Hot history reports changed when the saved personal account no longer has a joined source peer',async()=>{
  await login();const input=hotSource();db().prepare('UPDATE telegram_personal_sources SET joined=0 WHERE chat_id=?').run(source);telegram.state.calls=[];
  const r=await account.readHotVideoSourcePages(db(),input);assert.equal(r.state,'changed');assert.deepEqual(r.videos,[]);assert.equal(telegram.state.calls.length,0);
+});
+
+async function readyCaptionObservation({custom=true}={}) {
+  const input=await readyAccountEdit(delivery(701,{custom}));
+  const lease='fixture-watch-lease',until=Date.now()+60000;
+  db().prepare(`UPDATE telegram_relay_outbox SET caption_edit_outcome='account_invalid_final',
+    caption_watch_outcome='checking',caption_watch_source_version=source_version,lease_id=?,lease_until=?`).run(lease,until);
+  db().prepare('UPDATE telegram_relay_state SET send_lease_id=?,send_lease_until=?').run(lease,until);
+  return {...input,watch:{leaseId:lease,sourceVersion:0,allowRepair:true}};
+}
+
+test('recurring observation repairs original custom artwork and leaves one-shot terminals intact',async()=>{
+  const input=await readyCaptionObservation();
+  const result=await account.observeVerifiedRelayCaptionWithAccount(input);
+  assert.deepEqual(result,{state:'ok',attempted:true,outcome:'preserved'});
+  assert.equal(telegram.state.calls.filter(call=>call.method==='EditMessage').length,1);
+  const row=db().prepare('SELECT * FROM telegram_relay_outbox').get();
+  assert.equal(row.caption_edit_outcome,'account_invalid_final');assert.ok(row.caption_watch_edit_attempted_at>0);
+  assert.match(row.caption_watch_media_id,/Photo:/);
+});
+
+test('recurring ordinary caption repair does not require Premium and uses the pinned media identity',async()=>{
+  const input=await readyCaptionObservation({custom:false});telegram.state.me.premium=false;
+  db().prepare("UPDATE telegram_relay_outbox SET caption_watch_media_id='Photo:555555555555555555'").run();
+  telegram.state.messages[0].message='Changed locally';telegram.state.messages[0].entities=[];
+  assert.deepEqual(await account.observeVerifiedRelayCaptionWithAccount(input),{state:'ok',attempted:true,outcome:'preserved'});
+  assert.equal(telegram.state.calls.filter(call=>call.method==='EditMessage').length,1);
+});
+
+test('recurring observation reads exact custom artwork without requiring Premium or a second edit',async()=>{
+  const input=await readyCaptionObservation();telegram.state.me.premium=false;
+  telegram.state.messages[0].entities=wireEntities(input.captionEntities);
+  db().prepare('UPDATE telegram_relay_outbox SET caption_watch_edit_attempted_at=?').run(Date.now()-5000);
+  assert.deepEqual(await account.observeVerifiedRelayCaptionWithAccount(input),{state:'ok',attempted:false,outcome:'preserved'});
+  assert.equal(telegram.state.calls.filter(call=>call.method==='EditMessage').length,0);
+});
+
+for(const reason of ['uncertain','readonly','version','source-disabled','media-replaced','missing-source'])
+test('recurring observation refuses unsafe mutation '+reason,async()=>{
+  const input=await readyCaptionObservation();
+  if(reason==='uncertain')db().prepare('UPDATE telegram_relay_outbox SET caption_watch_edit_attempted_at=1').run();
+  if(reason==='readonly')input.watch.allowRepair=false;
+  if(reason==='version')db().prepare('UPDATE telegram_relay_outbox SET source_version=1').run();
+  if(reason==='source-disabled')db().prepare('UPDATE telegram_promotion_settings SET relay_caption_watch_enabled=0').run();
+  if(reason==='media-replaced')db().prepare("UPDATE telegram_relay_outbox SET caption_watch_media_id='Photo:other'").run();
+  if(reason==='missing-source')db().prepare("UPDATE telegram_relay_outbox SET origin='account',account_generation=?").run(stored().generation);
+  const result=await account.observeVerifiedRelayCaptionWithAccount(input);
+  assert.equal(result.attempted,false);assert.notEqual(result.outcome,'preserved');
+  assert.equal(telegram.state.calls.filter(call=>call.method==='EditMessage').length,0);
+});
+
+test('recurring observation commits a durable marker before its only RPC and never retries a timed-out edit',async()=>{
+  const input=await readyCaptionObservation();
+  telegram.state.onEdit=()=>{assert.ok(db().prepare('SELECT caption_watch_edit_attempted_at AS at FROM telegram_relay_outbox').get().at>0);throw Object.assign(new Error(),{errorMessage:'TIMEOUT'});};
+  const first=await account.observeVerifiedRelayCaptionWithAccount(input);assert.equal(first.attempted,true);
+  const second=await account.observeVerifiedRelayCaptionWithAccount(input);assert.equal(second.attempted,false);
+  assert.equal(telegram.state.calls.filter(call=>call.method==='EditMessage').length,1);
+});
+
+test('a definite Telegram flood rejection reports its recovery deadline separately from unknown edits',async()=>{
+  const input=await readyCaptionObservation();
+  telegram.state.onEdit=()=>{throw Object.assign(new Error(),{code:420,errorMessage:'FLOOD_WAIT',seconds:90});};
+  const result=await account.observeVerifiedRelayCaptionWithAccount(input);
+  assert.equal(result.state,'backoff');assert.equal(result.outcome,'rejected');assert.equal(result.attempted,true);
+  assert.ok(result.retryAt>Date.now()+80000);
+});
+
+test('disabled source observation keeps old snapshot hashes until reenabled and applies configured recheck interval',async()=>{
+  await login();await select();ready();const message=photo(41,{message:''});telegram.state.messages=[message];
+  await account.pollTelegramAccountOnce();const before=db().prepare('SELECT revision_hash FROM telegram_personal_source_posts').get().revision_hash;
+  message.message='Later source caption';dueSourceWatch();db().prepare('UPDATE telegram_promotion_settings SET relay_caption_watch_enabled=0').run();
+  await account.pollTelegramAccountOnce();assert.equal(db().prepare('SELECT revision_hash FROM telegram_personal_source_posts').get().revision_hash,before);
+  assert.equal(telegram.state.queue.length,0);
+  db().prepare('UPDATE telegram_promotion_settings SET relay_caption_watch_enabled=1,relay_caption_watch_interval_seconds=300').run();
+  db().prepare('UPDATE telegram_personal_source_posts SET checked_at=?').run(Date.now()-60000);
+  await account.pollTelegramAccountOnce();assert.equal(telegram.state.queue.length,0);
+  dueSourceWatch();await account.pollTelegramAccountOnce();assert.equal(telegram.state.queue.length,1);
+});
+
+test('confirmed forwarded source watches survive the candidate 512-post pruning limit',async()=>{
+  await login();await select();ready();const message=photo(1);knownSourcePost(message);
+  const sourceRow=db().prepare('SELECT * FROM telegram_personal_sources WHERE chat_id=?').get(source);
+  const insert=db().prepare(`INSERT INTO telegram_personal_source_posts(source_chat_id,source_message_id,account_generation,relay_revision,
+    selected_at,source_date,media_id_hash,checked_at) VALUES(?,?,?,'relay-generation',?,?,?,?)`);
+  for(let id=1;id<=514;id++)insert.run(source,id,stored().generation,sourceRow.selected_at,Math.floor(Date.now()/1000),'hash',Date.now());
+  await account.pollTelegramAccountOnce();
+  assert.equal(db().prepare('SELECT COUNT(*) AS n FROM telegram_personal_source_posts WHERE source_message_id=1').get().n,1);
+  assert.equal(db().prepare('SELECT COUNT(*) AS n FROM telegram_personal_source_posts').get().n,513);
 });

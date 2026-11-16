@@ -35,7 +35,7 @@ writeFixture('package.json', '{"type":"commonjs"}');
 symlinkSync(fileURLToPath(new URL('../node_modules', import.meta.url)), path.join(fixture, 'node_modules'), 'dir');
 for (const relative of [
   'app/api/admin/_security', 'app/api/admin/telegram/route',
-  ...['auth-core', 'brand-links', 'directory', 'image-media', 'image-url', 'sqlite', 'telegram-background', 'telegram-brand-card', 'telegram-followups', 'telegram-private-updates', 'telegram-relay-content', 'telegram-relay-media', 'telegram-relay', 'telegram-join-gate', 'telegram-hot-video-limits', 'telegram-hot-videos', 'telegram-scheduled-messages-types', 'telegram-scheduled-messages', 'telegram-promotions'].map(name => `app/lib/${name}`),
+  ...['auth-core', 'brand-links', 'directory', 'image-media', 'image-url', 'sqlite', 'telegram-background', 'telegram-brand-card', 'telegram-followups', 'telegram-private-updates', 'telegram-relay-content', 'telegram-relay-media', 'telegram-caption-watch-status', 'telegram-relay', 'telegram-join-gate', 'telegram-hot-video-limits', 'telegram-hot-videos', 'telegram-scheduled-messages-types', 'telegram-scheduled-messages', 'telegram-promotions'].map(name => `app/lib/${name}`),
 ]) {
   const source = readFileSync(new URL(`../${relative}.ts`, import.meta.url), 'utf8');
   const { outputText } = ts.transpileModule(source, {
@@ -164,6 +164,8 @@ test('Telegram settings reject invalid nested shapes and unknown fields before t
     { ...base, relay: { enabled: true, chatId: 123 } },
     { ...base, relay: { enabled: false, chatId: '@fixture_group', unknown: true } },
     { ...base, relay: { enabled: false, chatId: 'a'.repeat(81) } },
+    { ...base, relay: { enabled: false, chatId: '', captionWatchEnabled: 'true' } },
+    ...[0, 29, 31, 30.5, '30', null].map(value => ({ ...base, relay: { enabled: false, chatId: '', captionWatchIntervalSeconds: value } })),
     { ...base, welcome: [] },
     { ...base, welcome: { enabled: false, chatId: '', message: '', unknown: true } },
     { ...base, welcome: { enabled: 'false', chatId: '', message: '' } },
@@ -592,6 +594,8 @@ test('photo relay uses the promotion bot independently and validates its incomin
   const empty = await get();
   assert.equal(empty.relay.enabled, false);
   assert.equal(empty.relay.chatId, '@join365freebonusgroup');
+  assert.equal(empty.relay.captionWatchEnabled, true);
+  assert.equal(empty.relay.captionWatchIntervalSeconds, 30);
   await put({ enabled: false, chatId: '', relay: { enabled: true, chatId: '@fixture_group' } }, 400);
   assert.equal(telegram.calls.length, 0, 'missing promotion credentials must fail before network validation');
 
@@ -600,6 +604,8 @@ test('photo relay uses the promotion bot independently and validates its incomin
   assert.equal(saved.chatId, '');
   assert.equal(saved.relay.enabled, true);
   assert.equal(saved.relay.chatId, '@fixture_group');
+  assert.equal(saved.relay.captionWatchEnabled, true);
+  assert.equal(saved.relay.captionWatchIntervalSeconds, 30);
   assert.equal(saved.chatBot.hasToken, false);
   assert.ok(telegram.calls.every(call => call.token === promotionToken));
   assert.ok(telegram.calls.some(call => call.method === 'getWebhookInfo'));
@@ -642,6 +648,65 @@ function relayJob({ messageId = 901, status = 'pending' } = {}) {
     VALUES(-1005566778899,?,?,?,?, 'photo','fixture-source-file','fixture-source-unique','Source-only caption must remain internal.',?)`)
     .run(messageId, `relay-fingerprint-${messageId}`, Date.now(), current.relay_revision, status);
 }
+
+test('caption observation preferences save independently without resetting relay identity, cursors or delivery states', async () => {
+  await put(relayOnlyConfig);
+  relayJob(); relayJob({ messageId: 902, status: 'unknown' }); relayJob({ messageId: 903, status: 'sent' });
+  const original = settingsRow();
+  database.prepare("UPDATE telegram_relay_state SET revision=?,next_offset=81,last_polled_at=12345,next_send_at=67890 WHERE id='primary'").run(original.relay_revision);
+  database.prepare(`INSERT INTO telegram_relay_source_edits(outbox_id,source_version,caption,caption_entities,baseline_caption,baseline_entities,created_at)
+    SELECT id,1,'New source copy','[]',caption,caption_entities,1 FROM telegram_relay_outbox WHERE source_message_id=903`).run();
+  const savedRuntime = { ...database.prepare("SELECT * FROM telegram_relay_state WHERE id='primary'").get() };
+  const jobs = database.prepare('SELECT * FROM telegram_relay_outbox ORDER BY id').all().map(row => ({ ...row }));
+  const edits = database.prepare('SELECT * FROM telegram_relay_source_edits ORDER BY id').all().map(row => ({ ...row }));
+  telegram.calls.length = 0;
+  const off = await put({ enabled: false, chatId: '', relay: { enabled: true, chatId: '@fixture_group', captionWatchEnabled: false, captionWatchIntervalSeconds: 300 } });
+  assert.equal(off.relay.captionWatchEnabled, false); assert.equal(off.relay.captionWatchIntervalSeconds, 300);
+  assert.equal(settingsRow().relay_revision, original.relay_revision);
+  assert.equal(settingsRow().relay_started_at, original.relay_started_at);
+  assert.deepEqual({ ...database.prepare("SELECT * FROM telegram_relay_state WHERE id='primary'").get() }, savedRuntime);
+  assert.deepEqual(database.prepare('SELECT * FROM telegram_relay_outbox ORDER BY id').all().map(row => ({ ...row })), jobs);
+  assert.deepEqual(database.prepare('SELECT * FROM telegram_relay_source_edits ORDER BY id').all().map(row => ({ ...row })), edits);
+  assert.equal(telegram.calls.length, 0, 'preference-only saves must not send Telegram messages or revalidate unchanged targets');
+  const legacy = await put({ enabled: false, chatId: '', relay: { enabled: true, chatId: '@fixture_group' } });
+  assert.equal(legacy.relay.captionWatchEnabled, false); assert.equal(legacy.relay.captionWatchIntervalSeconds, 300);
+  for (const interval of [30, 60, 180, 300]) {
+    const saved = await put({ enabled: false, chatId: '', relay: { enabled: true, chatId: '@fixture_group', captionWatchEnabled: true, captionWatchIntervalSeconds: interval } });
+    assert.equal(saved.relay.captionWatchEnabled, true); assert.equal(saved.relay.captionWatchIntervalSeconds, interval);
+    assert.equal(settingsRow().relay_revision, original.relay_revision);
+  }
+});
+
+test('schema35 adds observation defaults while retaining existing private settings, media records and cursor state', async () => {
+  await put(relayOnlyConfig);
+  relayJob(); relayJob({ messageId: 902, status: 'unknown' }); relayJob({ messageId: 903, status: 'sent' });
+  const beforeSettings = settingsRow();
+  delete beforeSettings.relay_caption_watch_enabled; delete beforeSettings.relay_caption_watch_interval_seconds;
+  const watcherColumns = ['caption_watch_checked_at','caption_watch_next_at','caption_watch_outcome','caption_watch_last_error','caption_watch_edit_attempted_at','caption_watch_source_version','caption_watch_media_id'];
+  const beforeJobs = database.prepare('SELECT * FROM telegram_relay_outbox ORDER BY id').all().map(row => {
+    const saved = { ...row }; for (const name of watcherColumns) delete saved[name]; return saved;
+  });
+  database.prepare("UPDATE telegram_relay_state SET revision=?,next_offset=93,next_send_at=54321 WHERE id='primary'").run(settingsRow().relay_revision);
+  const beforeRuntime = { ...database.prepare("SELECT * FROM telegram_relay_state WHERE id='primary'").get() };
+  for (const name of watcherColumns) database.exec(`ALTER TABLE telegram_relay_outbox DROP COLUMN ${name}`);
+  database.exec('ALTER TABLE telegram_promotion_settings DROP COLUMN relay_caption_watch_enabled; ALTER TABLE telegram_promotion_settings DROP COLUMN relay_caption_watch_interval_seconds; PRAGMA user_version=34');
+  const filename = path.join(process.env.DATA_DIR, 'directory.sqlite');
+  database.close(); globalThis.__directorySqlite.delete(filename); database = getSqlite();
+  assert.equal(database.prepare('PRAGMA user_version').get().user_version, 35);
+  const migratedSettings = settingsRow();
+  assert.equal(migratedSettings.relay_caption_watch_enabled, 1); assert.equal(migratedSettings.relay_caption_watch_interval_seconds, 30);
+  delete migratedSettings.relay_caption_watch_enabled; delete migratedSettings.relay_caption_watch_interval_seconds;
+  assert.deepEqual(migratedSettings, beforeSettings);
+  assert.deepEqual({ ...database.prepare("SELECT * FROM telegram_relay_state WHERE id='primary'").get() }, beforeRuntime);
+  const migratedJobs = database.prepare('SELECT * FROM telegram_relay_outbox ORDER BY id').all().map(row => {
+    assert.equal(row.caption_watch_checked_at, 0); assert.equal(row.caption_watch_next_at, 0);
+    assert.equal(row.caption_watch_outcome, ''); assert.equal(row.caption_watch_last_error, ''); assert.equal(row.caption_watch_edit_attempted_at, 0);
+    assert.equal(row.caption_watch_source_version, -1);
+    assert.equal(row.caption_watch_media_id, '');
+    const saved = { ...row }; for (const name of watcherColumns) delete saved[name]; return saved;
+  });
+  assert.deepEqual(migratedJobs, beforeJobs);
+});
 
 test('relay status is aggregate-only and same-bot credential rotation leaves its private cursor and queue intact', async () => {
   await put(relayOnlyConfig);

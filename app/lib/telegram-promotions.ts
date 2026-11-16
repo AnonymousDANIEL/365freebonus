@@ -23,6 +23,8 @@ type StoredSettings = {
   relay_chat_id: string;
   relay_started_at: number;
   relay_revision: string;
+  relay_caption_watch_enabled: number;
+  relay_caption_watch_interval_seconds: number;
   welcome_enabled: number;
   welcome_chat_id: string;
   welcome_message: string;
@@ -46,7 +48,7 @@ type SettingsInput = {
   chatId: string;
   token?: string;
   promotionMessage?: string;
-  relay?: { enabled: boolean; chatId: string };
+  relay?: { enabled: boolean; chatId: string; captionWatchEnabled?: boolean; captionWatchIntervalSeconds?: number };
   welcome?: { enabled: boolean; chatId: string; message: string };
   chatBot?: { token?: string; keywordEnabled: boolean; privateEnabled?: boolean; privateStartMessage?: string; updates?: { enabled: boolean }; followup?: { enabled: boolean; message: string } };
 };
@@ -140,7 +142,7 @@ export function verifyTelegramScheduledMessageTargets() { return verifyScheduled
 
 function storedSettings(db: DatabaseSync): StoredSettings {
   return db.prepare(`SELECT enabled, chat_id, token_ciphertext, chat_bot_token_ciphertext, promotion_message,
-    relay_enabled, relay_chat_id, relay_started_at, relay_revision, welcome_enabled,
+    relay_enabled, relay_chat_id, relay_started_at, relay_revision, relay_caption_watch_enabled, relay_caption_watch_interval_seconds, welcome_enabled,
     welcome_chat_id, welcome_message, welcome_started_at, welcome_revision, keyword_enabled, keyword_started_at,
     private_enabled, private_started_at, private_start_message,
     private_updates_enabled, private_updates_started_at, private_updates_revision,
@@ -149,6 +151,7 @@ function storedSettings(db: DatabaseSync): StoredSettings {
     ?? {
       enabled: 0, chat_id: "", token_ciphertext: "", chat_bot_token_ciphertext: "", promotion_message: "",
       relay_enabled: 0, relay_chat_id: RELAY_DEFAULT_TARGET, relay_started_at: 0, relay_revision: "",
+      relay_caption_watch_enabled: 1, relay_caption_watch_interval_seconds: 30,
       welcome_enabled: 0, welcome_chat_id: "", welcome_message: "", welcome_started_at: 0, welcome_revision: "",
       keyword_enabled: 0, keyword_started_at: 0,
       private_enabled: 0, private_started_at: 0, private_start_message: "",
@@ -292,7 +295,9 @@ export function telegramPromotionStatus() {
   return {
     enabled: settings.enabled === 1, chatId: settings.chat_id, hasToken: Boolean(settings.token_ciphertext), counts, lastError,
     promotionMessage: settings.promotion_message,
-    relay: { enabled: settings.relay_enabled === 1, chatId: settings.relay_chat_id, ...relayStatus(db) },
+    relay: { enabled: settings.relay_enabled === 1, chatId: settings.relay_chat_id,
+      captionWatchEnabled: settings.relay_caption_watch_enabled === 1,
+      captionWatchIntervalSeconds: settings.relay_caption_watch_interval_seconds, ...relayStatus(db) },
     chatBot: {
       hasToken: Boolean(settings.chat_bot_token_ciphertext), keywordEnabled: settings.keyword_enabled === 1,
       keywordReplies: welcome?.keyword_replies ?? 0,
@@ -338,6 +343,9 @@ export async function saveTelegramPromotionSettings(input: SettingsInput) {
   const promotionMessage = input.promotionMessage?.trim() ?? previous.promotion_message;
   const relayEnabled = input.relay?.enabled ?? (previous.relay_enabled === 1);
   const relayChatId = input.relay ? normalizeChatTarget(input.relay.chatId) : previous.relay_chat_id || RELAY_DEFAULT_TARGET;
+  const captionWatchEnabled = input.relay?.captionWatchEnabled ?? (previous.relay_caption_watch_enabled === 1);
+  const captionWatchIntervalSeconds = input.relay?.captionWatchIntervalSeconds ?? previous.relay_caption_watch_interval_seconds;
+  if (![30, 60, 180, 300].includes(captionWatchIntervalSeconds)) throw new TelegramSettingsError("请选择有效的文案检查间隔。");
   if (relayEnabled && !token) throw new TelegramSettingsError(`请填写 @${PROMOTION_BOT} 的 Token，再启用图片转发。`);
   if (relayEnabled && !relayChatId) throw new TelegramSettingsError("请填写图片转发的目标群组或频道。");
   const promotionIdentityChanged = tokenChanged && token.split(":", 1)[0] !== previousToken.split(":", 1)[0];
@@ -442,8 +450,8 @@ export async function saveTelegramPromotionSettings(input: SettingsInput) {
       chat_bot_token_ciphertext, keyword_enabled, keyword_started_at, private_enabled, private_started_at, private_start_message,
       private_followup_enabled, private_followup_message, private_followup_started_at, private_followup_revision,
       private_updates_enabled, private_updates_started_at, private_updates_revision,
-      relay_enabled, relay_chat_id, relay_started_at, relay_revision
-    ) VALUES ('primary', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      relay_enabled, relay_chat_id, relay_started_at, relay_revision, relay_caption_watch_enabled, relay_caption_watch_interval_seconds
+    ) VALUES ('primary', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET enabled = excluded.enabled, chat_id = excluded.chat_id,
       token_ciphertext = excluded.token_ciphertext, promotion_message = excluded.promotion_message,
       welcome_enabled = excluded.welcome_enabled, welcome_chat_id = excluded.welcome_chat_id,
@@ -460,13 +468,15 @@ export async function saveTelegramPromotionSettings(input: SettingsInput) {
       private_updates_started_at = excluded.private_updates_started_at,
       private_updates_revision = excluded.private_updates_revision,
       relay_enabled = excluded.relay_enabled, relay_chat_id = excluded.relay_chat_id,
-      relay_started_at = excluded.relay_started_at, relay_revision = excluded.relay_revision`)
+      relay_started_at = excluded.relay_started_at, relay_revision = excluded.relay_revision,
+      relay_caption_watch_enabled = excluded.relay_caption_watch_enabled,
+      relay_caption_watch_interval_seconds = excluded.relay_caption_watch_interval_seconds`)
       .run(Number(input.enabled), chatId, ciphertext, promotionMessage, Number(welcomeEnabled),
         welcomeChatId, welcomeMessage, welcomeStartedAt, welcomeRevision, chatCiphertext, Number(keywordEnabled), keywordStartedAt,
         Number(privateEnabled), privateStartedAt, privateStartMessage,
         Number(followupEnabled), followupMessage, followupStartedAt, followupRevision,
         Number(updatesEnabled), updatesStartedAt, updatesRevision,
-        Number(relayEnabled), relayChatId, relayStartedAt, relayRevision);
+        Number(relayEnabled), relayChatId, relayStartedAt, relayRevision, Number(captionWatchEnabled), captionWatchIntervalSeconds);
   });
   return telegramPromotionStatus();
 }
