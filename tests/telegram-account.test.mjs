@@ -2036,3 +2036,35 @@ for(const kind of ['missing-hash','wrong-hash','changed-media','wrong-date'])tes
   assert.equal(telegram.state.calls.filter(call=>call.method==='EditMessage').length,0);
   assert.equal(db().prepare('SELECT caption_watch_media_id FROM telegram_relay_outbox').get().caption_watch_media_id,'');
 });
+
+for(const evidence of ['fresh-and-matching-media','fresh-no-media-proof','no-fresh-version','fresh-but-unknown-edit'])test('invalid legacy caption metadata requires '+evidence+' before repair',async()=>{
+  const input=await readyCaptionObservation({custom:false});
+  const corrupt='[{"type":"bold","offset":999999,"length":1}]';
+  db().prepare('UPDATE telegram_relay_outbox SET caption_entities=?').run(corrupt);
+  telegram.state.messages[0].message='Wrong old caption';telegram.state.messages[0].entities=[];
+  if(evidence!=='no-fresh-version'){
+    db().exec('UPDATE telegram_relay_outbox SET source_version=1,caption_watch_source_version=1');
+    const job=db().prepare('SELECT id FROM telegram_relay_outbox').get();
+    const edit=db().prepare(`INSERT INTO telegram_relay_source_edits(outbox_id,source_version,caption,caption_entities,
+      baseline_caption,baseline_entities,created_at,status) VALUES(?,1,?,?,?, ?,?,'failed')`)
+      .run(job.id,input.caption,JSON.stringify(input.captionEntities),input.caption,corrupt,Date.now());
+    input.watch.sourceVersion=1;input.watch.sourceEditId=Number(edit.lastInsertRowid);
+  }
+  if(evidence==='fresh-and-matching-media'||evidence==='fresh-but-unknown-edit')db().prepare('UPDATE telegram_relay_outbox SET content_hash=?')
+    .run(createHash('sha256').update(telegram.state.media).digest('hex'));
+  if(evidence==='fresh-but-unknown-edit'){
+    input.watch.allowRepair=false;
+    db().prepare('UPDATE telegram_relay_outbox SET caption_watch_edit_attempted_at=?').run(Date.now());
+  }
+  const result=await account.observeVerifiedRelayCaptionWithAccount(input);
+  if(evidence==='fresh-and-matching-media'){
+    assert.deepEqual(result,{state:'ok',attempted:true,outcome:'preserved'});
+    assert.equal(telegram.state.calls.filter(call=>call.method==='EditMessage').length,1);
+  }else{
+    if(evidence==='no-fresh-version')assert.equal(result.state,'unavailable');
+    else assert.equal(result.reason,evidence==='fresh-but-unknown-edit'?'watch_readonly':'identity_unverified');
+    assert.equal(telegram.state.calls.filter(call=>call.method==='EditMessage').length,0);
+    if(evidence!=='fresh-but-unknown-edit')assert.equal(db().prepare('SELECT caption_watch_media_id FROM telegram_relay_outbox').get().caption_watch_media_id,'');
+    else assert.ok(db().prepare('SELECT caption_watch_edit_attempted_at FROM telegram_relay_outbox').get().caption_watch_edit_attempted_at>0);
+  }
+});

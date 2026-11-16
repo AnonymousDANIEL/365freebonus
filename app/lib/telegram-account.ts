@@ -989,13 +989,20 @@ async function runVerifiedRelayCaptionWithAccount(input: VerifiedCaptionInput,
     || watch && (settings.relay_caption_watch_enabled !== 1 || !watchMatches(reference))
     || !activeLeaseId || target.send_lease_id !== activeLeaseId || target.send_lease_until <= now
     || !sourceAllowed(reference)) return unavailable();
+  let legacyBaselineInvalid = false;
   try {
     const storedEntities: unknown = JSON.parse(reference.caption_entities);
     const normalized = normalizeRelayCaptionEntities(reference.caption, storedEntities);
-    if (!Array.isArray(storedEntities) || normalized.length !== storedEntities.length) return invalid("stored_entities_invalid");
+    if (!Array.isArray(storedEntities) || normalized.length !== storedEntities.length) {
+      if (!watch?.sourceEditId) return invalid("stored_entities_invalid");
+      legacyBaselineInvalid = true;
+    }
     if (!watch && (sourceEdit ? !relayCaptionEntitiesMatch(baselineCaption, baselineEntities, normalized)
       : JSON.stringify(normalized) !== JSON.stringify(expected))) return invalid("stored_entities_mismatch");
-  } catch { return invalid("stored_entities_invalid"); }
+  } catch {
+    if (!watch?.sourceEditId) return invalid("stored_entities_invalid");
+    legacyBaselineInvalid = true;
+  }
   let claim: Claim;
   try { claim = claimAccount(db, Date.now(), { connected: true, respectBackoff: true }); }
   catch (error) {
@@ -1092,7 +1099,7 @@ async function runVerifiedRelayCaptionWithAccount(input: VerifiedCaptionInput,
             // Historical deliveries lack a target media receipt. Different text
             // can be repaired only after positively matching the stored upload,
             // never merely because two reads happen to show the same media ID.
-            if (before[0].message !== reference.caption && before[0].message !== input.caption) {
+            if (legacyBaselineInvalid || before[0].message !== reference.caption && before[0].message !== input.caption) {
               const firstSnapshot = { date: before[0].date, caption: before[0].message, entities: original.caption_entities };
               if (!inspectRelayDelivery(input.caption, expected, original).buttonsMatch
                 || reference.last_error === "Telegram 返回的消息目标未能确认，已停止自动补正；该消息不会重复发送。"
