@@ -1,5 +1,4 @@
 import type { Metadata } from 'next';
-import Script from 'next/script';
 import DirectoryClient from './DirectoryClient';
 import NoticeCarousel from './components/NoticeCarousel';
 import { readPublicPopupNotices, type PopupNotice } from './lib/popup-notices';
@@ -32,7 +31,6 @@ export default async function Home() {
     return <>
       <DirectoryClient initialData={data} initialTime={now} />
       {notices.length > 0 && <NoticeCarousel notices={notices} />}
-      <Script src="/front-pause.js" strategy="afterInteractive" />
     </>;
   } catch {
     return <main className="site-error"><span className="brandmark">N</span><h1>We couldn’t load the collection.</h1><p>Please refresh in a moment. Your saved content has not been changed.</p><a href="/">Try again ↗</a></main>;
