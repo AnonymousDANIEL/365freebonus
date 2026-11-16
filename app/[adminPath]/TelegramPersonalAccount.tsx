@@ -43,6 +43,7 @@ export default function TelegramPersonalAccount({ request, signInPath }: Props) 
   const busyRef = useRef(false);
   const requestVersion = useRef(0);
   const alive = useRef(false);
+  const focusChannel = useRef<string | null>(null);
   const requestRef = useRef(request);
   requestRef.current = request;
 
@@ -82,6 +83,14 @@ export default function TelegramPersonalAccount({ request, signInPath }: Props) 
     const timer = setInterval(() => setClock(Date.now()), 1_000);
     return () => clearInterval(timer);
   }, []);
+
+  useEffect(() => {
+    if (!focusChannel.current) return;
+    const input = document.getElementById(`telegram-source-${focusChannel.current}`)
+      ?? document.getElementById("telegram-source-search");
+    input?.focus({ preventScroll: true });
+    focusChannel.current = null;
+  }, [selected]);
 
   async function act(body: Record<string, unknown>, message: string, forceSelection = false) {
     if (busyRef.current) return;
@@ -125,13 +134,20 @@ export default function TelegramPersonalAccount({ request, signInPath }: Props) 
   }
 
   function toggle(id: string, checked: boolean) {
+    focusChannel.current = id;
     dirtyRef.current = true; setDirty(true);
     setSelected(previous => checked ? [...new Set([...previous, id])] : previous.filter(value => value !== id));
   }
 
   const search = query.trim().toLocaleLowerCase();
-  const channels = (status?.channels ?? []).filter(channel => !search || `${channel.title} ${channel.username}`.toLocaleLowerCase().includes(search));
-  const selectedCount = selected.filter(id => status?.channels.some(channel => channel.id === id && channel.joined)).length;
+  const selectedIds = new Set(selected);
+  const joinedChannels = (status?.channels ?? []).filter(channel => channel.joined);
+  const selectedChannels = joinedChannels.filter(channel => selectedIds.has(channel.id));
+  const availableChannels = joinedChannels.filter(channel => !selectedIds.has(channel.id));
+  const matchingChannels = availableChannels.filter(channel => !search || `${channel.title} ${channel.username}`.toLocaleLowerCase().includes(search));
+  const leftChannels = (status?.channels ?? []).filter(channel => !channel.joined);
+  const selectedCount = selectedChannels.length;
+  const savedCount = joinedChannels.filter(channel => channel.selected).length;
   const stage = status?.stage ?? "disconnected";
   const retrySeconds = Math.max(0, Math.ceil(((status?.retryAt ?? 0) - clock) / 1_000));
   const waiting = retrySeconds > 0;
@@ -194,21 +210,49 @@ export default function TelegramPersonalAccount({ request, signInPath }: Props) 
               <button type="button" className="cms-secondary" onClick={() => void act({ action: "disconnect" }, "个人账号已断开，已停止读取来源频道。", true)}>断开个人账号</button>
             </div>
             <small>你的账号加入新频道后会自动更新列表；只有勾选并保存的频道才会转发。首次勾选从保存后的新消息开始，不补发历史内容。</small>
-            <label>搜索已加入的频道
-              <input type="search" autoComplete="off" maxLength={100} value={query} onChange={event => setQuery(event.target.value)} placeholder="频道名称或用户名" />
-            </label>
-            <div className="cms-telegram-channel-list" aria-label="可选择的来源频道">
-              {channels.length === 0 ? <p className="cms-telegram-account-empty">{status.channels.length === 0 ? "尚未识别到你已加入的频道。加入后点击刷新频道列表。" : "没有找到匹配的频道。"}</p> :
-                channels.map(channel => <label className={`cms-telegram-channel${channel.joined ? "" : " cms-telegram-channel-left"}`} key={channel.id}>
-                  <input type="checkbox" checked={selected.includes(channel.id)} disabled={!channel.joined && !selected.includes(channel.id)}
-                    onChange={event => toggle(channel.id, event.target.checked)} />
-                  <span><strong>{channel.title || "未命名频道"}</strong><small>{channel.username ? `@${channel.username.replace(/^@/, "")}` : "私密频道"}{!channel.joined && " · 已离开，停止读取"}</small></span>
-                </label>)}
-            </div>
-            <div className="cms-telegram-account-actions">
+            <section className="cms-telegram-source-section cms-telegram-source-selected" aria-labelledby="telegram-selected-sources-title">
+              <div className="cms-telegram-source-heading">
+                <h3 id="telegram-selected-sources-title"><Check size={16} />已勾选频道 <span className="cms-telegram-source-count">{selectedCount}</span></h3>
+                <small role="status">已保存 {savedCount} 个{dirty ? " · 有未保存的更改" : " · 选择已保存"}</small>
+              </div>
+              <p className="cms-telegram-source-help">这里单独列出当前勾选的频道；取消勾选后会移到下方。更改后请保存。</p>
+              <div className="cms-telegram-channel-list cms-telegram-channel-cards" aria-label="已勾选的来源频道">
+                {selectedCount === 0 ? <p className="cms-telegram-account-empty">还没有勾选频道，请从下方选择来源。</p> :
+                  selectedChannels.map(channel => <label className="cms-telegram-channel cms-telegram-channel-selected" key={channel.id}>
+                    <input id={`telegram-source-${channel.id}`} type="checkbox" checked
+                      onChange={event => toggle(channel.id, event.target.checked)} />
+                    <span><strong>{channel.title || "未命名频道"}</strong><small>{channel.username ? `@${channel.username.replace(/^@/, "")}` : "私密频道"}</small>
+                      <small className="cms-telegram-source-state">{channel.selected ? "已保存" : "待保存后生效"}</small></span>
+                  </label>)}
+              </div>
+            </section>
+            <div className="cms-telegram-account-actions cms-telegram-source-save">
               <button type="button" className="cms-primary" disabled={waiting || !dirty} onClick={() => void act({ action: "select", channelIds: selected.filter(id => status.channels.some(channel => channel.id === id && channel.joined)) }, "来源频道选择已保存。", true)}><Check size={15} />保存来源频道</button>
-              <small>已选择 {selectedCount} 个频道{dirty ? " · 尚未保存" : ""}</small>
+              <small role="status">当前勾选 {selectedCount} 个频道{dirty ? " · 尚未保存" : " · 已保存"}</small>
             </div>
+            <section className="cms-telegram-source-section" aria-labelledby="telegram-available-sources-title">
+              <div className="cms-telegram-source-heading">
+                <h3 id="telegram-available-sources-title">未勾选频道 <span className="cms-telegram-source-count">{availableChannels.length}</span></h3>
+                <small>勾选后会显示在上方</small>
+              </div>
+              <label>搜索未勾选的频道
+                <input id="telegram-source-search" type="search" autoComplete="off" maxLength={100} value={query} onChange={event => setQuery(event.target.value)} placeholder="频道名称或用户名" />
+              </label>
+              {search && <small role="status">找到 {matchingChannels.length} 个 · 未勾选共 {availableChannels.length} 个</small>}
+              <div className="cms-telegram-channel-list cms-telegram-channel-cards" aria-label="未勾选的来源频道">
+                {matchingChannels.length === 0 ? <p className="cms-telegram-account-empty">{search ? "没有找到匹配的频道。" : joinedChannels.length === 0 ? "尚未识别到你已加入的频道。加入后点击刷新频道列表。" : "已加入的频道都已勾选。"}</p> :
+                  matchingChannels.map(channel => <label className="cms-telegram-channel" key={channel.id}>
+                    <input id={`telegram-source-${channel.id}`} type="checkbox" checked={false}
+                      onChange={event => toggle(channel.id, event.target.checked)} />
+                    <span><strong>{channel.title || "未命名频道"}</strong><small>{channel.username ? `@${channel.username.replace(/^@/, "")}` : "私密频道"}</small>
+                      {channel.selected && <small className="cms-telegram-source-state">待取消 · 保存后停止读取</small>}</span>
+                  </label>)}
+              </div>
+            </section>
+            {leftChannels.length > 0 && <details className="cms-telegram-source-left">
+              <summary>已离开的频道 · {leftChannels.length} 个（停止读取）</summary>
+              <ul>{leftChannels.map(channel => <li key={channel.id}><strong>{channel.title || "未命名频道"}</strong><small>{channel.username ? `@${channel.username.replace(/^@/, "")}` : "私密频道"} · 已离开，停止读取</small></li>)}</ul>
+            </details>}
             <small>发送目标使用「图片自动转发」中的群组或频道；请启用转发并保存目标设置。发到频道时，@FreeBonus365Bot 需要目标频道的管理员发布权限。</small>
           </>}
           {waiting && <small className="cms-telegram-account-retry">
