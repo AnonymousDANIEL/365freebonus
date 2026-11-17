@@ -52,6 +52,8 @@ type KeywordDraft = Omit<KeywordRule, "id"> & { id?: number };
 type Notice = { message: string; error?: boolean; sessionExpired?: boolean };
 type AdminRequest = <T>(path: string, method?: string, body?: unknown) => Promise<T>;
 type AdminProps = { request: AdminRequest; signInPath: string };
+export type TelegramSettingsView = "notifications" | "relay" | "sources" | "chatbot" | "private" | "updates" | "followup" | "keywords" | "joinGate";
+type TelegramSettingsProps = AdminProps & { view?: TelegramSettingsView | "all" };
 
 const endpoint = "/api/admin/telegram";
 const keywordsEndpoint = `${endpoint}/keywords`;
@@ -90,6 +92,34 @@ function draftFromConfig({ enabled, chatId, promotionMessage, relay, welcome, ch
       updates: { enabled: chatBot.updates?.enabled ?? false },
     },
   };
+}
+
+function draftForView(view: TelegramSettingsView | "all", draft: TelegramDraft, config: TelegramConfig): TelegramDraft {
+  if (view === "all") return draft;
+  const saved = draftFromConfig(config);
+  if (view === "notifications") return { ...saved, enabled: draft.enabled, chatId: draft.chatId, promotionMessage: draft.promotionMessage, token: draft.token };
+  if (view === "relay") return { ...saved, relay: draft.relay, token: draft.token };
+  const chatBot = { ...saved.chatBot, token: draft.chatBot.token };
+  if (view === "chatbot") return { ...saved, welcome: draft.welcome, chatBot: { ...chatBot, keywordEnabled: draft.chatBot.keywordEnabled } };
+  if (view === "private") return { ...saved, chatBot: { ...chatBot, privateEnabled: draft.chatBot.privateEnabled, privateStartMessage: draft.chatBot.privateStartMessage,
+    updates: { enabled: draft.chatBot.privateEnabled && saved.chatBot.updates.enabled },
+    followup: { ...saved.chatBot.followup, enabled: draft.chatBot.privateEnabled && saved.chatBot.followup.enabled } } };
+  if (view === "updates") return { ...saved, chatBot: { ...chatBot, updates: draft.chatBot.updates } };
+  if (view === "followup") return { ...saved, chatBot: { ...chatBot, followup: draft.chatBot.followup } };
+  return saved;
+}
+
+function mergeSavedView(view: TelegramSettingsView | "all", draft: TelegramDraft, result: TelegramConfig): TelegramDraft {
+  const saved = draftFromConfig(result);
+  if (view === "all") return saved;
+  if (view === "notifications") return { ...draft, enabled: saved.enabled, chatId: saved.chatId, promotionMessage: saved.promotionMessage, token: "" };
+  if (view === "relay") return { ...draft, relay: saved.relay, token: "" };
+  if (view === "chatbot") return { ...draft, welcome: saved.welcome, chatBot: { ...draft.chatBot, token: "", keywordEnabled: saved.chatBot.keywordEnabled } };
+  if (view === "private") return { ...draft, chatBot: { ...draft.chatBot, token: "", privateEnabled: saved.chatBot.privateEnabled, privateStartMessage: saved.chatBot.privateStartMessage,
+    ...(!saved.chatBot.privateEnabled ? { updates: { enabled: false }, followup: { ...draft.chatBot.followup, enabled: false } } : {}) } };
+  if (view === "updates") return { ...draft, chatBot: { ...draft.chatBot, token: "", updates: saved.chatBot.updates } };
+  if (view === "followup") return { ...draft, chatBot: { ...draft.chatBot, token: "", followup: saved.chatBot.followup } };
+  return draft;
 }
 
 function requestFailure(error: unknown): Notice {
@@ -262,7 +292,7 @@ function TelegramKeywordRules({ request, signInPath }: AdminProps) {
   </section>;
 }
 
-export default function TelegramGroupSettings({ request, signInPath }: AdminProps) {
+export default function TelegramGroupSettings({ request, signInPath, view = "all" }: TelegramSettingsProps) {
   const [config, setConfig] = useState<TelegramConfig | null>(null);
   const [draft, setDraft] = useState<TelegramDraft>(initialDraft);
   const [notice, setNotice] = useState<Notice | null>(null);
@@ -313,14 +343,15 @@ export default function TelegramGroupSettings({ request, signInPath }: AdminProp
   async function save(event: FormEvent) {
     event.preventDefault();
     if (!config || loading || saving || refreshing || busy.current) return;
-    const chatId = draft.chatId.trim();
-    const token = draft.token.trim();
-    const relay = { ...draft.relay, chatId: draft.relay.chatId.trim() };
-    const { token: chatTokenInput, keywordEnabled, privateEnabled, privateStartMessage, followup, updates } = draft.chatBot;
+    const editing = draftForView(view, draft, config);
+    const chatId = editing.chatId.trim();
+    const token = editing.token.trim();
+    const relay = { ...editing.relay, chatId: editing.relay.chatId.trim() };
+    const { token: chatTokenInput, keywordEnabled, privateEnabled, privateStartMessage, followup, updates } = editing.chatBot;
     const chatToken = chatTokenInput.trim();
-    const welcome = { ...draft.welcome, chatId: draft.welcome.chatId.trim(), message: draft.welcome.message.trim() };
+    const welcome = { ...editing.welcome, chatId: editing.welcome.chatId.trim(), message: editing.welcome.message.trim() };
     const targetRequired = welcome.enabled || keywordEnabled;
-    if ((draft.enabled || relay.enabled) && !config.hasToken && !token) {
+    if ((editing.enabled || relay.enabled) && !config.hasToken && !token) {
       setNotice({ message: "请填写 @FreeBonus365Bot 的 Token。", error: true });
       return;
     }
@@ -328,7 +359,7 @@ export default function TelegramGroupSettings({ request, signInPath }: AdminProp
       setNotice({ message: "请填写群图片转发的目标群组或频道。", error: true });
       return;
     }
-    if (draft.enabled && !chatId) {
+    if (editing.enabled && !chatId) {
       setNotice({ message: "请填写品牌通知的发送目标。", error: true });
       return;
     }
@@ -361,22 +392,23 @@ export default function TelegramGroupSettings({ request, signInPath }: AdminProp
     requestVersion.current++;
     setNotice(null);
     try {
+      const all = view === "all";
       const result = await request<TelegramConfig>(endpoint, "PUT", {
-        enabled: draft.enabled,
-        chatId,
-        promotionMessage: draft.promotionMessage.trim(),
-        relay,
-        welcome,
-        chatBot: {
-          keywordEnabled, privateEnabled, privateStartMessage: privateStartMessage.trim(),
-          followup: { enabled: followup.enabled, message: followup.message.trim() },
-          updates: { enabled: updates.enabled },
+        enabled: editing.enabled, chatId,
+        ...(all || view === "notifications" ? { promotionMessage: editing.promotionMessage.trim() } : {}),
+        ...(all || view === "relay" ? { relay } : {}),
+        ...(all || view === "chatbot" ? { welcome } : {}),
+        ...(all || ["chatbot", "private", "updates", "followup"].includes(view) ? { chatBot: {
+          keywordEnabled,
+          ...(all || view === "private" ? { privateEnabled, privateStartMessage: privateStartMessage.trim() } : {}),
+          ...(all || view === "followup" ? { followup: { enabled: followup.enabled, message: followup.message.trim() } } : {}),
+          ...(all || view === "updates" ? { updates: { enabled: updates.enabled } } : {}),
           ...(chatToken ? { token: chatToken } : {}),
-        },
-        ...(token ? { token } : {}),
+        } } : {}),
+        ...(token && (all || view === "notifications" || view === "relay") ? { token } : {}),
       });
       setConfig(result);
-      setDraft(draftFromConfig(result));
+      setDraft(previous => mergeSavedView(view, previous, result));
       setNotice({ message: "Telegram 设置已保存。" });
     } catch (error) {
       setNotice(requestFailure(error));
@@ -412,6 +444,11 @@ export default function TelegramGroupSettings({ request, signInPath }: AdminProp
   const chatTokenRequired = targetRequired || draft.chatBot.privateEnabled;
   const captionWatch = config?.relay.captionWatch;
   const feedback = <TelegramNotice notice={notice} signInPath={signInPath} />;
+  const show = (section: TelegramSettingsView) => view === "all" || view === section;
+
+  if (view === "sources") return <TelegramPersonalAccount request={request} signInPath={signInPath} />;
+  if (view === "keywords") return <TelegramKeywordRules request={request} signInPath={signInPath} />;
+  if (view === "joinGate") return <TelegramJoinGate request={request} signInPath={signInPath} />;
 
   return <><form className="cms-settings-form cms-telegram-settings" onSubmit={save}>
     <fieldset disabled={loading || saving}>
@@ -427,7 +464,7 @@ export default function TelegramGroupSettings({ request, signInPath }: AdminProp
         </div>
       </section>}
       {!loading && config && <>
-        <section className="cms-settings-panel" aria-labelledby="telegram-promotion-title">
+        {show("notifications") && <section className="cms-settings-panel" aria-labelledby="telegram-promotion-title">
           <div>
             <h2 id="telegram-promotion-title">通知机器人</h2>
             <p>品牌进入 Update 或 New 时发送通知。启用或更换目标时，已上线的待发推广会跳过。</p>
@@ -462,14 +499,19 @@ export default function TelegramGroupSettings({ request, signInPath }: AdminProp
             </dl>
             {config.lastError && <p className="cms-telegram-last-error">最近发送异常 · {config.lastError}</p>}
           </div>
-        </section>
-        <section className="cms-settings-panel" aria-labelledby="telegram-relay-title">
+        </section>}
+        {show("relay") && <section className="cms-settings-panel" aria-labelledby="telegram-relay-title">
           <div>
             <h2 id="telegram-relay-title">图片自动转发</h2>
-            <p>将来源群、频道的照片、视频或 GIF＋文案整理后，由 @FreeBonus365Bot 发送到你的群或频道。个人账号来源在下方单独选择。</p>
+            <p>将来源群、频道的照片、视频或 GIF＋文案整理后，由 @FreeBonus365Bot 发送到你的群或频道。个人账号来源在“个人账号来源频道”中单独选择。</p>
             <span className={`cms-telegram-status${config.relay.enabled && config.relay.ready ? " cms-telegram-enabled" : ""}`}>{config.relay.enabled ? config.relay.ready ? "目标已连接" : "等待连接" : "已停用"}</span>
           </div>
           <div className="cms-settings-fields">
+            {view === "relay" && <label>@FreeBonus365Bot Token（品牌通知／群图片转发）
+              <input type="password" autoComplete="new-password" spellCheck={false} maxLength={160} value={draft.token}
+                required={draft.relay.enabled && !config.hasToken} onChange={event => setDraft({ ...draft, token: event.target.value })} />
+              <small>{config.hasToken ? "已保存通知机器人的 Token。留空继续使用。" : "填写 BotFather 提供的 @FreeBonus365Bot Token。"}</small>
+            </label>}
             <label className="cms-telegram-switch">
               <input type="checkbox" role="switch" checked={draft.relay.enabled} onChange={event => setDraft({ ...draft, relay: { ...draft.relay, enabled: event.target.checked } })} />
               启用图片自动转发
@@ -478,7 +520,7 @@ export default function TelegramGroupSettings({ request, signInPath }: AdminProp
               <input type="text" autoComplete="off" spellCheck={false} maxLength={80} required={draft.relay.enabled}
                 value={draft.relay.chatId} placeholder="https://t.me/join365freebonusgroup"
                 onChange={event => setDraft({ ...draft, relay: { ...draft.relay, chatId: event.target.value } })} />
-              <small>将 @FreeBonus365Bot 加入目标群并允许发送照片、视频和 GIF；频道需要管理员发布权限。此目标独立于上方品牌通知目标。</small>
+              <small>将 @FreeBonus365Bot 加入目标群并允许发送照片、视频和 GIF；频道需要管理员发布权限。此目标独立于“品牌通知”的发送目标。</small>
             </label>
             <label className="cms-telegram-switch">
               <input type="checkbox" role="switch" checked={draft.relay.captionWatchEnabled}
@@ -532,9 +574,22 @@ export default function TelegramGroupSettings({ request, signInPath }: AdminProp
             </dl>
             {config.relay.lastError && <p className="cms-telegram-last-error">最近转发异常 · {config.relay.lastError}</p>}
           </div>
-        </section>
-        <TelegramPersonalAccount request={request} signInPath={signInPath} />
-        <section className="cms-settings-panel" aria-labelledby="telegram-welcome-title">
+        </section>}
+        {view === "all" && <TelegramPersonalAccount request={request} signInPath={signInPath} />}
+        {["private", "updates", "followup"].includes(view) && <section className="cms-settings-panel" aria-labelledby="telegram-chat-connection-title">
+          <div><h2 id="telegram-chat-connection-title">聊天机器人连接</h2><p>私聊、品牌更新及自动跟进共用 @FreeBonus365ChatBot。</p>
+            <span className={`cms-telegram-status${chatEnabled ? " cms-telegram-enabled" : ""}`}>{chatStatus}</span>
+          </div>
+          <div className="cms-settings-fields">
+            <label>@FreeBonus365ChatBot Token（欢迎、关键词、私聊）
+              <input type="password" autoComplete="new-password" spellCheck={false} maxLength={160} value={draft.chatBot.token}
+                required={chatTokenRequired && !config.chatBot.hasToken}
+                onChange={event => setDraft({ ...draft, chatBot: { ...draft.chatBot, token: event.target.value } })} />
+              <small>{config.chatBot.hasToken ? "已保存聊天机器人的 Token。留空继续使用。" : "填写 BotFather 提供的 @FreeBonus365ChatBot Token。"}</small>
+            </label>
+          </div>
+        </section>}
+        {show("chatbot") && <section className="cms-settings-panel" aria-labelledby="telegram-welcome-title">
           <div>
             <h2 id="telegram-welcome-title">聊天机器人</h2>
             <p>管理加入欢迎、群组关键词回复和 1 对 1 私聊。只有加入欢迎或群组回复需要设置目标。</p>
@@ -581,11 +636,11 @@ export default function TelegramGroupSettings({ request, signInPath }: AdminProp
             </dl>
             {config.welcome.lastError && <p className="cms-telegram-last-error">最近聊天机器人异常 · {config.welcome.lastError}</p>}
           </div>
-        </section>
-        <section className="cms-settings-panel" aria-labelledby="telegram-private-title">
+        </section>}
+        {show("private") && <section className="cms-settings-panel" aria-labelledby="telegram-private-title">
           <div>
             <h2 id="telegram-private-title">1 对 1 私聊</h2>
-            <p>新顾客点击 Start 后，按键会显示在聊天底部，直接点击即可获得回复。已有聊天发送 /start 或 /menu 刷新一次即可。私聊沿用下方规则，也支持输入部分品牌名称搜索网页 All 的已上架品牌，可独立于群组关键词回复开启。</p>
+            <p>新顾客点击 Start 后，按键会显示在聊天底部，直接点击即可获得回复。已有聊天发送 /start 或 /menu 刷新一次即可。私聊沿用“关键词回复”中的规则，也支持输入部分品牌名称搜索网页 All 的已上架品牌，可独立于群组关键词回复开启。</p>
           </div>
           <div className="cms-settings-fields">
             <label className="cms-telegram-switch">
@@ -612,8 +667,8 @@ export default function TelegramGroupSettings({ request, signInPath }: AdminProp
               <div><dt>已发送私聊回复</dt><dd>{config.chatBot.privateReplies}</dd></div>
             </dl>
           </div>
-        </section>
-        <section className="cms-settings-panel" aria-labelledby="telegram-private-updates-title">
+        </section>}
+        {show("updates") && <section className="cms-settings-panel" aria-labelledby="telegram-private-updates-title">
           <div>
             <h2 id="telegram-private-updates-title">私聊品牌更新通知</h2>
             <p>网页 Update / New 品牌上线时，由 @FreeBonus365ChatBot 自动私聊通知已主动开启机器人的顾客。</p>
@@ -627,16 +682,16 @@ export default function TelegramGroupSettings({ request, signInPath }: AdminProp
                 onChange={event => setDraft({ ...draft, chatBot: { ...draft.chatBot, updates: { enabled: event.target.checked } } })} />
               启用私聊品牌更新通知
             </label>
-            {!draft.chatBot.privateEnabled && <small>需先开启上方的“1 对 1 私聊”。</small>}
-            <small>通知沿用上方品牌通知文案，附带品牌图片、介绍及品牌名称、🌐 Visit website、🚀 Join Now 按钮。</small>
+            {!draft.chatBot.privateEnabled && <small>需先在“1 对 1 私聊”中开启私聊。</small>}
+            <small>通知沿用“品牌通知”中的文案，附带品牌图片、介绍及品牌名称、🌐 Visit website、🚀 Join Now 按钮。</small>
             <small>仅发送启用后新上线的 Update / New，不补发历史通知。顾客需先主动开始私聊，可发送 /stop 停止自动通知，/start 重新开启。</small>
             <dl className="cms-telegram-counts" aria-label="私聊品牌通知发送记录">
               {Object.entries({ pending: "待发送", sending: "发送中", sent: "已发送", failed: "发送失败", unknown: "待确认", cancelled: "已取消" }).map(([key, label]) => <div key={key}><dt>{label}</dt><dd>{config.chatBot.updates?.counts[key as keyof UpdatesStatus["counts"]] ?? 0}</dd></div>)}
             </dl>
             {config.chatBot.updates?.lastError && <p className="cms-telegram-last-error">最近私聊品牌通知异常 · {config.chatBot.updates.lastError}</p>}
           </div>
-        </section>
-        <section className="cms-settings-panel cms-telegram-followup" aria-labelledby="telegram-followup-title">
+        </section>}
+        {show("followup") && <section className="cms-settings-panel cms-telegram-followup" aria-labelledby="telegram-followup-title">
           <div>
             <h2 id="telegram-followup-title">未识别消息自动跟进</h2>
             <p>根据本系统记录的机器人私聊消息判断。顾客消息未匹配关键字时，等待 1 小时后自动发送跟进文案。</p>
@@ -650,7 +705,7 @@ export default function TelegramGroupSettings({ request, signInPath }: AdminProp
                 onChange={event => setDraft({ ...draft, chatBot: { ...draft.chatBot, followup: { ...draft.chatBot.followup, enabled: event.target.checked } } })} />
               启用未识别消息自动跟进
             </label>
-            {!draft.chatBot.privateEnabled && <small className="cms-telegram-followup-note">需同时开启上方的“1 对 1 私聊”。</small>}
+            {!draft.chatBot.privateEnabled && <small className="cms-telegram-followup-note">需先在“1 对 1 私聊”中开启私聊。</small>}
             <div className="cms-telegram-followup-delay"><strong>等待时间</strong><span>最后一条未识别消息后 1 小时</span></div>
             <label>自动跟进文案
               <textarea rows={4} maxLength={messageLimit} required={draft.chatBot.followup.enabled}
@@ -668,7 +723,7 @@ export default function TelegramGroupSettings({ request, signInPath }: AdminProp
             </dl>
             {config.chatBot.followup?.lastError && <p className="cms-telegram-last-error">最近跟进异常 · {config.chatBot.followup.lastError}</p>}
           </div>
-        </section>
+        </section>}
         <div className="cms-settings-fields">
           {feedback}
           <div className="cms-settings-save">
@@ -677,11 +732,11 @@ export default function TelegramGroupSettings({ request, signInPath }: AdminProp
               <button className="cms-secondary" type="button" disabled={refreshing} onClick={refreshStatus}>
                 {refreshing && <LoaderCircle size={15} className="cms-spin" />}{refreshing ? "正在刷新…" : "刷新运行状态"}
               </button>
-              <button className="cms-primary" type="submit" disabled={refreshing}>{saving ? <LoaderCircle size={17} className="cms-spin" /> : <Check size={17} />}{saving ? "正在保存…" : "保存 Telegram 设置"}</button>
+              <button className="cms-primary" type="submit" disabled={refreshing}>{saving ? <LoaderCircle size={17} className="cms-spin" /> : <Check size={17} />}{saving ? "正在保存…" : view === "all" ? "保存 Telegram 设置" : "保存当前设置"}</button>
             </div>
           </div>
         </div>
       </>}
     </fieldset>
-  </form><TelegramJoinGate request={request} signInPath={signInPath} /><TelegramKeywordRules request={request} signInPath={signInPath} /></>;
+  </form>{view === "all" && <><TelegramJoinGate request={request} signInPath={signInPath} /><TelegramKeywordRules request={request} signInPath={signInPath} /></>}</>;
 }

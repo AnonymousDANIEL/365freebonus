@@ -221,3 +221,65 @@
     gap: 8px;
   }
 }
+
+/* Telegram tools share one expandable navigation group, with an independent workspace for each tool. */
+.cms-shell .cms-sidebar nav {
+  flex: 1;
+  min-height: 0;
+  align-content: start;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--cms-line) transparent;
+  padding-right: 3px;
+}
+.cms-shell .cms-sidebar > .cms-logo,
+.cms-shell .cms-sidebar > .cms-workspace-label,
+.cms-shell .cms-sidebar > .cms-side-note,
+.cms-shell .cms-sidebar > .cms-user { flex-shrink: 0; }
+.cms-shell .cms-side-note { margin-top: 20px; }
+.cms-shell .cms-sidebar nav > .cms-nav-group { display: grid; gap: 4px; min-width: 0; }
+.cms-shell .cms-sidebar nav .cms-nav-group-toggle { width: 100%; gap: 10px; white-space: nowrap; }
+.cms-shell .cms-nav-group-chevron { margin-left: auto; flex-shrink: 0; transition: transform .15s ease; }
+.cms-shell .cms-nav-group-toggle[aria-expanded="false"] .cms-nav-group-chevron { transform: rotate(-90deg); }
+.cms-shell .cms-nav-submenu {
+  display: grid;
+  gap: 2px;
+  margin: 0 0 5px 22px;
+  padding-left: 10px;
+  border-left: 1px solid var(--cms-line);
+  min-width: 0;
+}
+.cms-shell .cms-nav-submenu[hidden] { display: none !important; }
+.cms-shell .cms-sidebar nav .cms-nav-submenu button {
+  min-height: 35px;
+  padding: 8px;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+.cms-shell .cms-sidebar nav .cms-nav-submenu button svg { flex-shrink: 0; opacity: .8; }
+.cms-shell .cms-sidebar nav .cms-nav-submenu button.active { font-weight: 700; }
+@media (max-width: 900px) and (min-width: 601px) {
+  .cms-shell .cms-sidebar { width: 226px; padding: 25px 14px 18px; }
+  .cms-shell .cms-main { margin-left: 226px; width: calc(100% - 226px); }
+  .cms-shell .cms-sidebar nav button,
+  .cms-shell .cms-sidebar nav a { font-size: 12px; justify-content: flex-start; gap: 10px; }
+  .cms-shell .cms-logo { font-size: 18px; justify-content: flex-start; }
+  .cms-shell .cms-sidebar nav button span { display: inline; }
+}
+@media (max-width: 600px) {
+  .cms-shell .cms-sidebar { flex-direction: column; align-items: stretch; gap: 12px; padding: 15px 17px; }
+  .cms-shell .cms-sidebar > .cms-logo { align-self: flex-start; }
+  .cms-shell .cms-sidebar nav { flex: none; margin: 0; display: flex; flex-wrap: wrap; overflow: visible; padding: 0; gap: 4px; }
+  .cms-shell .cms-sidebar nav > button,
+  .cms-shell .cms-sidebar nav > a { min-height: 36px; padding: 8px 9px; gap: 6px; font-size: 11px; }
+  .cms-shell .cms-sidebar nav > .cms-nav-group { width: 100%; }
+  .cms-shell .cms-sidebar nav .cms-nav-group-toggle { justify-content: flex-start; padding: 10px; font-size: 12px; }
+  .cms-shell .cms-nav-submenu { grid-template-columns: repeat(2,minmax(0,1fr)); margin: 0 0 4px 17px; padding-left: 9px; }
+  .cms-shell .cms-sidebar nav .cms-nav-submenu button { min-height: 36px; padding: 8px 5px; gap: 6px; font-size: 11px; }
+  .cms-shell .cms-sidebar nav .cms-nav-submenu button svg { width: 14px; height: 14px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .cms-shell .cms-nav-group-chevron { transition: none; }
+}
