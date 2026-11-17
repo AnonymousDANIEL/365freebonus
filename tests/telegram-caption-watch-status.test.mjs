@@ -142,3 +142,31 @@ test('next check respects the account rate-limit and lease deadlines',()=>{
     assert.equal(relayCaptionWatchStatus(db,now).nextCheckAt,now+120_000);
   } finally{db.close();}
 });
+
+
+test('independent window status excludes expired history and stops advertising checks when all windows end',()=>{
+  const db=database();
+  const cycle=require(path.join(fixture,'telegram-caption-watch-cycle.js'));
+  try{
+    db.exec(`ALTER TABLE telegram_promotion_settings ADD COLUMN relay_caption_serial_enabled INTEGER DEFAULT 1;
+      ALTER TABLE telegram_relay_outbox ADD COLUMN caption_watch_last_error TEXT DEFAULT '';
+      CREATE TABLE telegram_relay_state(id TEXT,revision TEXT,target_chat_id INTEGER);
+      INSERT INTO telegram_relay_state VALUES('primary','current',-10099);`);
+    cycle.ensureCaptionWatchCycleSchema(db);
+    add(db,1,'consistent'); add(db,2,'waiting'); add(db,3,'consistent');
+    db.prepare('UPDATE telegram_relay_outbox SET queued_at=? WHERE id=3').run(now-30*60000);
+    cycle.captionWatchFocus(db,now);
+    const before=db.prepare('SELECT * FROM telegram_relay_caption_watch_windows').all();
+    const value=relayCaptionWatchStatus(db,now);
+    assert.equal(value.cycle.mode,'overlapping');
+    assert.equal(value.cycle.active,2); assert.equal(value.watched,2);
+    assert.equal(value.consistent,1); assert.equal(value.waiting,1);
+    assert.ok(value.nextCheckAt>=now);
+    assert.equal(JSON.stringify(value).includes('PRIVATE_'),false);
+    assert.deepEqual(db.prepare('SELECT * FROM telegram_relay_caption_watch_windows').all(),before,'status read must not renew or mutate windows');
+    const ended=relayCaptionWatchStatus(db,now+20*60000);
+    assert.equal(ended.cycle.active,0); assert.equal(ended.watched,0);
+    assert.equal(ended.nextCheckAt,null);
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM telegram_relay_outbox').get().n,3,'delivery history remains');
+  }finally{db.close();}
+});

@@ -65,7 +65,7 @@ test.after(() => { if(oldData===undefined) delete process.env.DATA_DIR; else pro
 test('empty scheduler starts healthy and verifies all three destinations without sending', async () => {
  assert.deepEqual(status().plans, []); assert.equal(status().scheduler.workerHealthy, false);
  await tick(); assert.equal(status().scheduler.workerHealthy, true); assert.equal(sends().length, 0); assert.equal(status().targets.filter(t=>t.ready).length,3);
- assert.equal(db().prepare('PRAGMA user_version').get().user_version, 36);
+ assert.equal(db().prepare('PRAGMA user_version').get().user_version, 37);
 });
 
 test('disabled draft can be saved without credentials or outbound calls', async () => {

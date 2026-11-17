@@ -52,6 +52,8 @@ export function relayCaptionWatchStatus(db: DatabaseSync, now = Date.now()) {
       relay_caption_watch_interval_seconds: number;
     } | undefined;
   const active = preferences?.relay_enabled === 1 && preferences.relay_caption_watch_enabled === 1;
+  const cycle = captionWatchCycleStatus(db, now);
+  const windowed = cycle?.mode === "overlapping";
   const hasAccount = Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='telegram_personal_account'").get());
   const accountWait = hasAccount ? db.prepare("SELECT next_attempt_at,lease_until FROM telegram_personal_account WHERE id='primary'").get() as {
     next_attempt_at: number; lease_until: number;
@@ -79,6 +81,11 @@ export function relayCaptionWatchStatus(db: DatabaseSync, now = Date.now()) {
     WHERE o.revision=? AND o.status='sent' AND o.message_id>0
       AND (o.origin<>'bot' OR o.source_content_hash<>'invalid:source_inactive')
       AND (o.origin<>'account' OR ${accountScope})
+      ${windowed ? `AND EXISTS(SELECT 1 FROM telegram_relay_caption_watch_windows w
+        WHERE w.relay_revision=o.revision AND w.outbox_id=o.id AND w.source_version=o.source_version
+          AND w.target_chat_id=(SELECT target_chat_id FROM telegram_relay_state WHERE id='primary')
+          AND w.account_generation=${hasAccount ? "COALESCE((SELECT generation FROM telegram_personal_account WHERE id='primary'),'')" : "''"}
+          AND w.status='active' AND w.started_at<=? AND w.expires_at>?)` : ""}
   ) SELECT COUNT(*) AS watched,
     COALESCE(SUM(category='pending'),0) AS pending,COALESCE(SUM(category='checking'),0) AS checking,
     COALESCE(SUM(category='consistent'),0) AS consistent,COALESCE(SUM(category='mismatch'),0) AS mismatch,
@@ -86,11 +93,10 @@ export function relayCaptionWatchStatus(db: DatabaseSync, now = Date.now()) {
     MAX(caption_watch_checked_at) AS last_checked,
     COALESCE(SUM(can_check),0) AS runnable,
     MIN(CASE WHEN can_check THEN CASE WHEN category='pending' AND next_attempt_at IS NOT NULL THEN next_attempt_at ELSE caption_watch_next_at END END) AS next_check
-    FROM watched`).get(preferences?.relay_revision || "") as {
+    FROM watched`).get(preferences?.relay_revision || "", ...(windowed ? [now, now] : [])) as {
       watched: number; pending: number; checking: number; consistent: number; mismatch: number; waiting: number;
       last_checked: number | null; next_check: number | null; runnable: number;
     };
-  const cycle = captionWatchCycleStatus(db, now);
   const currentError = cycle?.currentStartedAt ? db.prepare(`SELECT o.caption_watch_last_error FROM telegram_relay_outbox o
     JOIN telegram_relay_caption_watch_cycle c ON c.current_outbox_id=o.id WHERE c.id='primary'`).get() as { caption_watch_last_error: string } | undefined : undefined;
   const safeCurrentError = currentError && Object.values(reasonLabels).includes(currentError.caption_watch_last_error)
@@ -100,7 +106,7 @@ export function relayCaptionWatchStatus(db: DatabaseSync, now = Date.now()) {
     consistent: aggregate.consistent, mismatch: aggregate.mismatch, waiting: aggregate.waiting,
     lastCheckedAt: aggregate.last_checked && aggregate.last_checked <= now ? aggregate.last_checked : null,
     cycle,
-    nextCheckAt: active && (aggregate.runnable > 0 || cycle?.enabled && cycle.total > 0)
+    nextCheckAt: active && (windowed ? cycle.enabled && cycle.active > 0 : aggregate.runnable > 0)
       ? Math.max(now, cycle?.enabled ? cycle.nextAttemptAt || now : aggregate.next_check || now, accountWait?.next_attempt_at || 0, accountWait?.lease_until || 0) : null,
     lastError: safeCurrentError || (aggregate.mismatch > 0 ? "发现文案、格式、Emoji 或按钮不一致，正在核对原消息。"
       : aggregate.waiting > 0 ? "部分消息等待连接、权限或文案资料核实；发送结果未确认的媒体不会重发。" : ""),

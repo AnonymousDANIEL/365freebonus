@@ -289,7 +289,7 @@ test('exact schema31 upgrade and replay preserve legacy six-hour schedule, file 
  for(const [table,columns] of Object.entries(additions))for(const column of columns)database.exec(`ALTER TABLE ${table} DROP COLUMN ${column}`);
  database.exec('PRAGMA user_version=31');assert.equal(database.prepare('PRAGMA user_version').get().user_version,31);
  assert.equal(database.prepare("SELECT 1 FROM sqlite_master WHERE name='telegram_hot_video_sources'").get(),undefined);
- close();const migrated=db();assert.equal(migrated.prepare('PRAGMA user_version').get().user_version, 36);
+ close();const migrated=db();assert.equal(migrated.prepare('PRAGMA user_version').get().user_version, 37);
  assert.equal(JSON.stringify(snapshot()),original);
  assert.deepEqual(migrated.prepare('SELECT chat_id FROM telegram_hot_video_sources WHERE selected=1').all(),[]);
  assert.equal(config().enabled,1);assert.equal(config().interval_hours,6);assert.equal(config().next_run_at,START+6*HOUR+12345);assert.equal(config().revision,revision);assert.equal(config().bot_id,12345678);
@@ -305,7 +305,7 @@ test('exact schema31 upgrade and replay preserve legacy six-hour schedule, file 
  migrated.prepare("INSERT INTO telegram_hot_video_sources(chat_id,title,selected,revision,backfill_before_id,last_message_id,backfill_done,last_synced_at) VALUES(?,'Unselected preserved source',0,'source-revision',89,240,0,?)").run(SOURCE,START-4000);
  const fullBefore=JSON.stringify({settings:migrated.prepare('SELECT * FROM telegram_hot_video_settings').all(),videos:migrated.prepare('SELECT * FROM telegram_hot_videos ORDER BY id').all(),
   jobs:migrated.prepare('SELECT * FROM telegram_hot_video_jobs ORDER BY id').all(),sources:migrated.prepare('SELECT * FROM telegram_hot_video_sources ORDER BY chat_id').all()});
- migrated.exec('PRAGMA user_version=31');close();const replayed=db();assert.equal(replayed.prepare('PRAGMA user_version').get().user_version, 36);
+ migrated.exec('PRAGMA user_version=31');close();const replayed=db();assert.equal(replayed.prepare('PRAGMA user_version').get().user_version, 37);
  const fullAfter=JSON.stringify({settings:replayed.prepare('SELECT * FROM telegram_hot_video_settings').all(),videos:replayed.prepare('SELECT * FROM telegram_hot_videos ORDER BY id').all(),
   jobs:replayed.prepare('SELECT * FROM telegram_hot_video_jobs ORDER BY id').all(),sources:replayed.prepare('SELECT * FROM telegram_hot_video_sources ORDER BY chat_id').all()});
  assert.equal(fullAfter,fullBefore);assert.equal(JSON.stringify(snapshot()),original);assert.equal(hot.hotVideoStatus(replayed,clock).sourceChannels.length,0);

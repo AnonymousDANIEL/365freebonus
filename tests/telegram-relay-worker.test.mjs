@@ -534,7 +534,7 @@ test('v17 migration preserves notes, credentials and existing queues while activ
     ALTER TABLE telegram_promotion_settings DROP COLUMN relay_revision;
     PRAGMA user_version=17;`);
   closeDatabase();const migrated=getSqlite();
-  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,36);
+  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,37);
   const current=migrated.prepare("SELECT * FROM telegram_promotion_settings WHERE id='primary'").get();
   assert.equal(current.relay_enabled,1);assert.equal(current.relay_started_at,now);assert.ok(current.relay_revision);
   assert.equal(current.relay_chat_id,'@join365freebonusgroup');
@@ -1900,7 +1900,7 @@ test('v18 upgrade preserves settings and PIN while seeding permanent image ident
   }
   db.exec('PRAGMA user_version=18');closeDatabase();
   const migrated=getSqlite();
-  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,36);
+  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,37);
   assert.deepEqual({...migrated.prepare("SELECT * FROM telegram_promotion_settings WHERE id='primary'").get()},settingsBefore);
   assert.deepEqual({...migrated.prepare("SELECT * FROM notes_vault_settings WHERE id='primary'").get()},vaultBefore);
   assert.deepEqual({...migrated.prepare("SELECT * FROM telegram_relay_state WHERE id='primary'").get()},stateBefore);
@@ -1947,7 +1947,7 @@ test('v19 upgrade preserves queued media bytes, permanent identities, settings a
   assert.throws(()=>db.prepare(`INSERT INTO telegram_relay_outbox(source_chat_id,source_message_id,fingerprint,
     queued_at,revision,media_kind,file_id,file_unique_id,caption) VALUES(? ,9999,'before-video',?,'relay-revision','video','v','vu','Video')`).run(source,now),/CHECK/);
   closeDatabase();const migrated=getSqlite();
-  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,36);
+  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,37);
   assert.deepEqual(jobs().map(({caption_entities,...row})=>({...row})),rowsBefore);
   assert.ok(jobs().every(row=>row.caption_entities===''));
   assert.deepEqual(migrated.prepare('SELECT * FROM telegram_relay_media_keys ORDER BY media_key').all().map(row=>({...row})),keysBefore);
@@ -1979,7 +1979,7 @@ test('v20 upgrade marks unavailable legacy caption entities without changing job
   restoreLegacyMediaKeys(db);
   db.exec('DROP INDEX telegram_relay_caption_edits; ALTER TABLE telegram_relay_outbox DROP COLUMN caption_edit_attempted_at; ALTER TABLE telegram_relay_outbox DROP COLUMN caption_edit_outcome; ALTER TABLE telegram_relay_outbox DROP COLUMN caption_entities; PRAGMA user_version=20');
   closeDatabase();const migrated=getSqlite();
-  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,36);
+  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,37);
   assert.deepEqual(jobs().map(({caption_entities,...row})=>({...row})),beforeJobs);
   assert.ok(jobs().every(row=>row.caption_entities===''),'old queues mark unavailable original custom emoji metadata instead of fabricating an empty entity list');
   assert.deepEqual(migrated.prepare('SELECT * FROM telegram_relay_media_keys ORDER BY media_key').all().map(row=>({...row})),beforeKeys);
@@ -2008,7 +2008,7 @@ test('v21 upgrade preserves sent messages, pending media, identities, settings a
   restoreLegacyMediaKeys(db);
   db.exec('DROP INDEX telegram_relay_caption_edits; ALTER TABLE telegram_relay_outbox DROP COLUMN caption_edit_attempted_at; ALTER TABLE telegram_relay_outbox DROP COLUMN caption_edit_outcome; PRAGMA user_version=21');
   closeDatabase();const migrated=getSqlite();
-  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,36);
+  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,37);
   assert.deepEqual(jobs().map(({caption_edit_attempted_at,caption_edit_outcome,...row})=>({...row})),beforeJobs);
   assert.ok(jobs().every(row=>row.caption_edit_attempted_at===0&&row.caption_edit_outcome===''));
   assert.deepEqual(migrated.prepare('SELECT * FROM telegram_relay_media_keys ORDER BY media_key').all().map(row=>({...row})),beforeKeys);
@@ -2035,7 +2035,7 @@ test('v22 upgrade removes only album uniqueness and preserves messages, media ke
   restoreLegacyMediaKeys(db);
   db.exec("DROP INDEX telegram_relay_album; CREATE UNIQUE INDEX telegram_relay_album ON telegram_relay_outbox(source_chat_id,media_group_id) WHERE media_group_id<>''; PRAGMA user_version=22");
   closeDatabase();const migrated=getSqlite();
-  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,36);
+  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,37);
   assert.deepEqual(jobs().map(row=>({...row})),beforeJobs);
   assert.deepEqual(migrated.prepare('SELECT * FROM telegram_relay_media_keys ORDER BY media_key').all().map(row=>({...row})),beforeKeys);
   assert.deepEqual({...migrated.prepare("SELECT * FROM telegram_promotion_settings WHERE id='primary'").get()},beforeSettings);
@@ -2072,7 +2072,7 @@ test('v23 upgrade dates every legacy key without changing outbox data, cursors, 
   const legacy=[['legacy-sent-key',101],['legacy-pending-key',102],['legacy-unknown-key',103],['legacy-sending-key',104],['orphan-legacy-key',99999]];
   for(const [key,id] of legacy)db.prepare('INSERT INTO telegram_relay_media_keys(media_key,outbox_id) VALUES(?,?)').run(key,id);
   db.exec('PRAGMA user_version=23');closeDatabase();const migrated=getSqlite();
-  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,36);
+  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,37);
   assert.deepEqual(jobs().map(row=>({...row})),beforeJobs);
   assert.deepEqual({...migrated.prepare("SELECT * FROM telegram_promotion_settings WHERE id='primary'").get()},beforeSettings);
   assert.deepEqual({...migrated.prepare("SELECT * FROM telegram_relay_state WHERE id='primary'").get()},beforeState);
@@ -2106,7 +2106,7 @@ test('v24 upgrade adds a zero recovery counter without changing existing media, 
   const db=getSqlite(),before=jobs().map(({caption_edit_recheck_count,...row})=>({...row}));
   const keys=db.prepare('SELECT * FROM telegram_relay_media_keys ORDER BY day_key,media_key').all().map(row=>({...row}));
   const runtime={...state()};db.exec('ALTER TABLE telegram_relay_outbox DROP COLUMN caption_edit_recheck_count; PRAGMA user_version=24');
-  closeDatabase();const migrated=getSqlite();assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,36);
+  closeDatabase();const migrated=getSqlite();assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,37);
   assert.deepEqual(jobs().map(({caption_edit_recheck_count,...row})=>({...row})),before);
   assert.ok(jobs().every(job=>job.caption_edit_recheck_count===0));assert.deepEqual({...state()},runtime);
   assert.deepEqual(migrated.prepare('SELECT * FROM telegram_relay_media_keys ORDER BY day_key,media_key').all().map(row=>({...row})),keys);
@@ -2275,7 +2275,7 @@ test('schema27 additively preserves v26 source identities, metadata repair termi
   const db=getSqlite(),before=jobs().map(({source_version,source_content_hash,...job})=>({...job}));
   const keys=db.prepare('SELECT * FROM telegram_relay_media_keys').all().map(row=>({...row}));
   db.exec('DROP TABLE telegram_relay_source_edits; DROP TABLE telegram_personal_source_posts; ALTER TABLE telegram_relay_outbox DROP COLUMN source_version; ALTER TABLE telegram_relay_outbox DROP COLUMN source_content_hash; PRAGMA user_version=26');
-  closeDatabase();const migrated=getSqlite();assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,36);
+  closeDatabase();const migrated=getSqlite();assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,37);
   assert.deepEqual(jobs().map(({source_version,source_content_hash,...job})=>({...job})),before);
   assert.deepEqual(migrated.prepare('SELECT * FROM telegram_relay_media_keys').all().map(row=>({...row})),keys);
   assert.equal(jobs()[0].source_version,0);assert.equal(jobs()[0].source_content_hash,'');
@@ -2398,7 +2398,7 @@ test('schema28 adds only a zero metadata recovery budget while preserving source
     vault:{...db.prepare("SELECT * FROM notes_vault_settings WHERE id='primary'").get()},
     settings:{...db.prepare("SELECT * FROM telegram_promotion_settings WHERE id='primary'").get()}};
   db.exec('ALTER TABLE telegram_relay_outbox DROP COLUMN caption_metadata_recovery_count; PRAGMA user_version=27');closeDatabase();
-  const migrated=getSqlite();assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,36);
+  const migrated=getSqlite();assert.equal(migrated.prepare('PRAGMA user_version').get().user_version,37);
   assert.deepEqual(jobs().map(({caption_metadata_recovery_count,...row})=>({...row})),snapshots.outbox);
   assert.ok(jobs().every(job=>job.caption_metadata_recovery_count===0));assert.deepEqual({...state()},snapshots.state);
   assert.deepEqual(migrated.prepare('SELECT * FROM telegram_relay_media_keys ORDER BY day_key,media_key').all().map(row=>({...row})),snapshots.keys);
@@ -2517,57 +2517,94 @@ async function readySerialCycle(t) {
   return jobs();
 }
 
-test('hourly serial checks retain A until exact readback, then B, and restart the next round without resending',async t=>{
+function captionWindows() {
+  return getSqlite().prepare('SELECT * FROM telegram_relay_caption_watch_windows ORDER BY outbox_id,source_version').all();
+}
+
+test('overlapping caption windows let B proceed after A fails and check each copy again on its next minute',async t=>{
   const [a,b]=await readySerialCycle(t);
   personalEdit.watchResults.push({state:'ok',attempted:false,outcome:'invalid',reason:'identity_unverified'});
   await deliver(now+8000);
-  assert.equal(getSqlite().prepare('SELECT current_outbox_id FROM telegram_relay_caption_watch_cycle').get().current_outbox_id,a.id);
   assert.match(jobs()[0].caption_watch_last_error,/媒体身份/);
-  await deliver(now+30000);assert.equal(personalEdit.freshCalls.length,1);
+  const originalDeadlines=captionWindows().map(row=>[row.started_at,row.expires_at]);
+  personalEdit.watchResults.push({state:'ok',attempted:false,outcome:'preserved'});
+  await deliver(now+19000);
+  assert.deepEqual(personalEdit.freshCalls.map(call=>call.outboxId),[a.id,b.id]);
+  assert.equal(jobs()[1].caption_watch_outcome,'consistent');
+  await deliver(now+30000);assert.equal(personalEdit.freshCalls.length,2);
   personalEdit.watchResults.push({state:'ok',attempted:false,outcome:'preserved'});
   await poll(now+68000);await deliver(now+68000);
-  assert.equal(personalEdit.watchCalls.length,2);
   personalEdit.watchResults.push({state:'ok',attempted:false,outcome:'preserved'});
   await deliver(now+79000);
-  assert.equal(personalEdit.freshCalls.length,2);await deliver(now+89000);
-  assert.deepEqual(personalEdit.freshCalls.map(call=>call.outboxId),[a.id,a.id,b.id]);
-  const finished=getSqlite().prepare('SELECT * FROM telegram_relay_caption_watch_cycle').get();
-  assert.equal(finished.completed_count,2);assert.equal(finished.current_outbox_id,0);
-  assert.equal(finished.next_cycle_at,now+8000+3600000);
-  await poll(finished.next_cycle_at-1);await deliver(finished.next_cycle_at-1);assert.equal(personalEdit.freshCalls.length,3);
-  personalEdit.watchResults.push({state:'ok',attempted:false,outcome:'preserved'});
-  await deliver(finished.next_cycle_at);assert.equal(personalEdit.freshCalls[3].outboxId,a.id);
+  assert.deepEqual(personalEdit.freshCalls.map(call=>call.outboxId),[a.id,b.id,b.id,a.id]);
+  const windows=captionWindows();assert.equal(windows.length,2);
+  assert.ok(windows.every(row=>row.status==='active'&&row.expires_at-row.started_at===20*60_000));
+  assert.deepEqual(windows.map(row=>row.verified_count),[1,2]);
+  assert.deepEqual(windows.map(row=>[row.started_at,row.expires_at]),originalDeadlines);
   assert.equal(sends().length,2);assert.equal(jobs().filter(job=>job.status==='sent').length,2);
 });
 
-test('serial source freshness is version-bound and never applies another queued caption ahead of focus',async t=>{
-  const [a,b]=await readySerialCycle(t);
-  observeAccount({sourceMessageId:2002,sourceMediaId:'serial-second',caption:'Second queued edit'});
-  personalEdit.freshResults.push(()=>{observeAccount({caption:'First changed during source read'});return {state:'ok',sourceVersion:0,verifiedAt:now+8000};});
-  await deliver(now+8000);
-  assert.equal(personalEdit.calls.length,0);assert.equal(personalEdit.watchCalls.length,0);
-  assert.equal(getSqlite().prepare('SELECT current_outbox_id FROM telegram_relay_caption_watch_cycle').get().current_outbox_id,a.id);
-  assert.equal(sourceEdits().find(edit=>edit.outbox_id===b.id).status,'pending');
-  personalEdit.results.push({state:'ok',attempted:true,outcome:'preserved'});
-  await deliver(now+19000);
-  assert.equal(personalEdit.calls.length,1);assert.equal(personalEdit.calls[0].messageId,a.message_id);
-  assert.equal(sourceEdits().find(edit=>edit.outbox_id===b.id).status,'pending');
+test('independent copy windows survive restart and expire after twenty minutes without renewal or media replay',async t=>{
+  await readySerialCycle(t);
+  personalEdit.watchResults.push({state:'ok',attempted:false,outcome:'preserved'});await deliver(now+8000);
+  personalEdit.watchResults.push({state:'ok',attempted:false,outcome:'preserved'});await deliver(now+19000);
+  const before=captionWindows().map(row=>({id:row.outbox_id,version:row.source_version,start:row.started_at,end:row.expires_at}));
+  closeDatabase();
+  assert.deepEqual(captionWindows().map(row=>({id:row.outbox_id,version:row.source_version,start:row.started_at,end:row.expires_at})),before);
+  const end=Math.max(...before.map(row=>row.end));
+  await poll(end+1);await deliver(end+1);
+  const checks=personalEdit.watchCalls.length,fresh=personalEdit.freshCalls.length;
+  assert.ok(captionWindows().every(row=>row.status==='expired'));
+  closeDatabase();await poll(end+60_000);await deliver(end+60_000);
+  assert.equal(personalEdit.watchCalls.length,checks);assert.equal(personalEdit.freshCalls.length,fresh);
+  assert.deepEqual(captionWindows().map(row=>({id:row.outbox_id,version:row.source_version,start:row.started_at,end:row.expires_at})),before);
   assert.equal(sends().length,2);
 });
 
-test('a waiting serial focus honors source backoff while new media still sends and unknown edits remain read-only',async t=>{
+test('repeated invalid source media observations create one version window without extending its expiry',async t=>{
   const [a]=await readySerialCycle(t);
+  await deliver(now+8000);
+  assert.equal(observeAccount({sourceMediaId:'different-source-media'}),true);
+  const first=captionWindows().filter(row=>row.outbox_id===a.id);
+  assert.equal(jobs()[0].source_version,1);assert.equal(first.length,2);
+  assert.equal(first.find(row=>row.source_version===0).status,'superseded');
+  assert.equal(observeAccount({sourceMediaId:'different-source-media'}),true);
+  assert.equal(jobs()[0].source_version,1);
+  assert.deepEqual(captionWindows().filter(row=>row.outbox_id===a.id),first);
+  assert.equal(sends().length,2);
+});
+
+test('source freshness remains version-bound while another copy continues independently',async t=>{
+  const [a,b]=await readySerialCycle(t);
+  personalEdit.freshResults.push(()=>{observeAccount({caption:'First changed during source read'});return {state:'ok',sourceVersion:0,verifiedAt:now+8000};});
+  await deliver(now+8000);
+  assert.equal(personalEdit.calls.length,0);assert.equal(personalEdit.watchCalls.length,0);
+  assert.equal(jobs()[0].source_version,1);assert.equal(sourceEdits()[0].status,'pending');
+  personalEdit.results.push(...Array.from({length:3},()=>({state:'ok',attempted:true,outcome:'preserved'})));
+  personalEdit.watchResults.push(...Array.from({length:3},()=>({state:'ok',attempted:false,outcome:'preserved'})));
+  for(const at of [19000,30000,41000])await deliver(now+at);
+  assert.ok(personalEdit.freshCalls.some(call=>call.outboxId===b.id));
+  assert.ok(personalEdit.calls.some(call=>call.messageId===a.message_id&&call.caption==='First changed during source read'));
+  assert.equal(jobs()[0].caption,'First changed during source read');
+  assert.equal(sourceEdits()[0].status,'confirmed');assert.equal(sends().length,2);
+});
+
+test('one copy source backoff leaves other checks and media runnable without rearming uncertain edits',async t=>{
+  const [a,b]=await readySerialCycle(t);
   personalEdit.freshResults.push({state:'backoff',reason:'source_backoff',retryAt:now+180000});
   await deliver(now+8000);
   await relay.enqueuePersonalRelayMedia(accountPhoto({sourceMessageId:2003,sourceMediaId:'third-media',bytes:Buffer.from('third-media')}));
   await deliver(now+12000);
   assert.equal(sends().length,3);assert.equal(personalEdit.freshCalls.length,1);
+  personalEdit.watchResults.push({state:'ok',attempted:false,outcome:'preserved'});await deliver(now+19000);
+  assert.equal(personalEdit.watchCalls[0].messageId,b.message_id);
   getSqlite().prepare('UPDATE telegram_relay_outbox SET caption_watch_edit_attempted_at=? WHERE id=?').run(now,a.id);
-  personalEdit.watchResults.push({state:'ok',attempted:false,outcome:'invalid',reason:'watch_readonly'});
-  await poll(now+180000);await deliver(now+180000);
-  assert.equal(personalEdit.watchCalls[0].watch.allowRepair,false);
+  personalEdit.watchResults.push(...Array.from({length:4},()=>({state:'ok',attempted:false,outcome:'invalid',reason:'watch_readonly'})));
+  await poll(now+180000);
+  for(const at of [180000,191000,202000,213000])await deliver(now+at);
+  const check=personalEdit.watchCalls.find(call=>call.messageId===a.message_id);
+  assert.ok(check);assert.equal(check.watch.allowRepair,false);
   assert.equal(jobs()[0].caption_watch_edit_attempted_at,now);
-  assert.equal(getSqlite().prepare('SELECT current_outbox_id FROM telegram_relay_caption_watch_cycle').get().current_outbox_id,a.id);
   assert.equal(sends().length,3);
 });
 
@@ -2594,36 +2631,39 @@ async function readyMixedSerial(t) {
   return jobs();
 }
 
-test('a mixed Bot and account cycle drains events, applies the focused Bot edit, then advances to account readback',async t=>{
+test('mixed Bot and account windows drain events and independently verify both copies without replay',async t=>{
   const [bot,account]=await readyMixedSerial(t);
   await deliver(now+9000);assert.equal(personalEdit.freshCalls.length,0);assert.equal(personalEdit.watchCalls.length,0);
-  assert.equal(getSqlite().prepare('SELECT current_outbox_id FROM telegram_relay_caption_watch_cycle').get().current_outbox_id,bot.id);
+  assert.equal(captionWindows().find(row=>row.outbox_id===bot.id).last_reason,'bot_updates_pending');
   const edited=photo(91,{caption:'Latest Bot event copy https://other.example/offer'}).message;
   await poll(now+10000,[{update_id:92,edited_channel_post:edited}]);
   assert.equal(sourceEdits().at(-1).outbox_id,bot.id);assert.equal(state().bot_updates_drained_at,0);
   await poll(now+11000);
   personalEdit.results.push({state:'ok',attempted:true,outcome:'preserved'});await deliver(now+15000);
-  assert.equal(personalEdit.calls[0].messageId,bot.message_id);assert.equal(personalEdit.freshCalls.length,0);
-  assert.equal(getSqlite().prepare('SELECT current_outbox_id FROM telegram_relay_caption_watch_cycle').get().current_outbox_id,bot.id);
-  personalEdit.watchResults.push({state:'ok',attempted:false,outcome:'preserved'});await deliver(now+26000);
-  personalEdit.watchResults.push({state:'ok',attempted:false,outcome:'preserved'});await deliver(now+37000);
-  assert.equal(personalEdit.freshCalls.length,0);await deliver(now+47000);
+  assert.equal(personalEdit.calls[0].messageId,bot.message_id);
+  personalEdit.watchResults.push(...Array.from({length:2},()=>({state:'ok',attempted:false,outcome:'preserved'})));
+  await deliver(now+26000);await deliver(now+37000);await deliver(now+47000);
   assert.deepEqual(personalEdit.freshCalls.map(call=>call.outboxId),[account.id]);
-  assert.deepEqual(personalEdit.watchCalls.map(call=>call.messageId),[bot.message_id,account.message_id]);
-  assert.equal(getSqlite().prepare('SELECT completed_count FROM telegram_relay_caption_watch_cycle').get().completed_count,2);
+  assert.deepEqual(personalEdit.watchCalls.map(call=>call.messageId).toSorted((a,b)=>a-b),[bot.message_id,account.message_id].toSorted((a,b)=>a-b));
+  assert.equal(captionWindows().filter(row=>row.status==='active'&&row.verified_count===1).length,2);
+  assert.equal(captionWindows().find(row=>row.outbox_id===bot.id&&row.source_version===0).status,'superseded');
   assert.equal(sends().length,2);
 });
 
-test('a new Bot source version arriving during target readback cannot advance the old focused version',async t=>{
-  const [bot]=await readyMixedSerial(t);await deliver(now+9000);await poll(now+10000);
+test('a new Bot source version during target readback cannot verify the superseded copy window',async t=>{
+  const [bot,account]=await readyMixedSerial(t);await deliver(now+9000);
+  getSqlite().prepare('UPDATE telegram_relay_caption_watch_windows SET retry_at=? WHERE outbox_id=?').run(now+100000,account.id);
+  await poll(now+10000);
   personalEdit.watchResults.push(()=>{
     relay.observeRelaySourceCaption({sourceChatId:source,sourceMessageId:bot.source_message_id,sourceDate:now/1000,
       mediaKind:'photo',sourceMediaId:bot.file_unique_id,caption:'New Bot version during readback',captionEntities:[],origin:'bot',relayRevision:'relay-revision'});
     return {state:'ok',attempted:false,outcome:'preserved'};
   });
   await deliver(now+15000);
+  assert.equal(personalEdit.watchCalls[0].messageId,bot.message_id);
   assert.notEqual(jobs()[0].caption_watch_outcome,'consistent');
-  assert.equal(getSqlite().prepare('SELECT current_outbox_id FROM telegram_relay_caption_watch_cycle').get().current_outbox_id,bot.id);
+  assert.equal(captionWindows().find(row=>row.outbox_id===bot.id&&row.source_version===0).status,'superseded');
+  assert.equal(captionWindows().find(row=>row.outbox_id===bot.id&&row.source_version===1).verified_count,0);
   assert.equal(sourceEdits().at(-1).status,'pending');assert.equal(sends().length,2);
 });
 
@@ -2634,7 +2674,9 @@ for(const gap of ['missing-baseline','retention'])test('Bot '+gap+' update gaps 
   const at=gap==='retention'?now+25*60*60_000:now+4000;
   await poll(at);assert.equal(state().bot_updates_gap,1);
   const before=jobs().map(job=>({id:job.id,status:job.status,message_id:job.message_id}));
-  await deliver(at);assert.match(jobs()[0].caption_watch_last_error,/断线|遗漏|保留|核实|更新/);
+  await deliver(at);
+  if(gap==='missing-baseline')assert.match(jobs()[0].caption_watch_last_error,/断线|遗漏|保留|核实|更新/);
+  else assert.ok(captionWindows().every(row=>row.status==='historical'&&row.expires_at<=at));
   assert.equal(personalEdit.freshCalls.length,0);assert.equal(personalEdit.watchCalls.length,0);
   assert.equal(edits().length,0);assert.equal(sends().length,1);
   await poll(at+2000);assert.equal(state().bot_updates_gap,1);
@@ -2644,16 +2686,18 @@ for(const gap of ['missing-baseline','retention'])test('Bot '+gap+' update gaps 
   assert.deepEqual(jobs().map(job=>({id:job.id,status:job.status,message_id:job.message_id})),before);
 });
 
-test('without a personal account, the current Bot caption alone retains its one-shot Bot API restoration',async()=>{
+test('without a personal account, each Bot window retains its independent one-shot Bot API restoration',async()=>{
   configure();await poll(now,[photo(1),photo(2)]);await deliver();await deliver(now+4000);
   getSqlite().prepare('UPDATE telegram_relay_outbox SET last_error=?').run('Telegram 返回的文案与提交原文不一致，请检查原消息格式。该消息不会自动重发。');
   getSqlite().exec('UPDATE telegram_promotion_settings SET relay_caption_serial_enabled=1');recurringWatchTest=true;
   await deliver(now+8000);assert.equal(edits().length,0);
   await poll(now+9000);await deliver(now+14000);
-  assert.equal(edits().length,1);assert.equal(edits()[0].parameters.message_id,jobs()[0].message_id);
-  assert.equal(jobs()[1].caption_edit_attempted_at,0);assert.equal(sends().length,2);
+  await poll(now+20000);await deliver(now+25000);
+  assert.equal(edits().length,2);
+  assert.deepEqual(edits().map(call=>call.parameters.message_id).toSorted((a,b)=>a-b),jobs().map(job=>job.message_id).toSorted((a,b)=>a-b));
+  assert.ok(jobs().every(job=>job.caption_edit_attempted_at>0));assert.equal(sends().length,2);
   assert.equal(personalEdit.freshCalls.length,0);
-  assert.equal(getSqlite().prepare('SELECT current_outbox_id FROM telegram_relay_caption_watch_cycle').get().current_outbox_id,jobs()[0].id);
+  assert.ok(captionWindows().every(row=>row.status==='active'&&row.verified_count===0));
 });
 
 test('target verification distinguishes transient member API failure from denied permissions',async()=>{

@@ -12,7 +12,7 @@ export function getDataDirectory(): string {
 function migrate(db: DatabaseSync) {
   if (migrated.has(db)) return;
   const readVersion = () => (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
-  if (readVersion() < 36) {
+  if (readVersion() < 37) {
     db.exec("BEGIN IMMEDIATE");
     try {
       // Read again inside the write lock, so concurrent process starts cannot
@@ -666,6 +666,17 @@ function migrate(db: DatabaseSync) {
           retry_at INTEGER NOT NULL DEFAULT 0,completed_count INTEGER NOT NULL DEFAULT 0,last_reason TEXT NOT NULL DEFAULT ''
         ); PRAGMA user_version=36;`);
       }
+      if (version < 37) db.exec(`CREATE TABLE IF NOT EXISTS telegram_relay_caption_watch_windows (
+        relay_revision TEXT NOT NULL,target_chat_id INTEGER NOT NULL,account_generation TEXT NOT NULL,
+        outbox_id INTEGER NOT NULL,source_version INTEGER NOT NULL,started_at INTEGER NOT NULL,expires_at INTEGER NOT NULL,
+        next_check_at INTEGER NOT NULL,retry_at INTEGER NOT NULL DEFAULT 0,attempt_started_at INTEGER NOT NULL DEFAULT 0,
+        check_count INTEGER NOT NULL DEFAULT 0,verified_count INTEGER NOT NULL DEFAULT 0,last_verified_at INTEGER NOT NULL DEFAULT 0,
+        last_reason TEXT NOT NULL DEFAULT '',status TEXT NOT NULL DEFAULT 'active',
+        PRIMARY KEY(relay_revision,target_chat_id,account_generation,outbox_id,source_version)
+      );
+      CREATE INDEX IF NOT EXISTS telegram_relay_caption_watch_windows_due ON telegram_relay_caption_watch_windows
+        (relay_revision,target_chat_id,account_generation,status,next_check_at,retry_at);
+      PRAGMA user_version=37;`);
       db.exec("COMMIT");
     } catch (error) { db.exec("ROLLBACK"); throw error; }
   }

@@ -1813,6 +1813,48 @@ async function readyCaptionObservation({custom=true}={}) {
   return {...input,watch:{leaseId:lease,sourceVersion:0,allowRepair:true}};
 }
 
+function attachCaptionWindow(input, remainingMs = 1000) {
+  const reference=db().prepare('SELECT id,source_version FROM telegram_relay_outbox WHERE message_id=?').get(input.messageId);
+  db().exec('UPDATE telegram_promotion_settings SET relay_caption_serial_enabled=1');
+  assert.equal(cycle.registerCaptionWatchWindow(db(),reference.id,Date.now()-20*60000+remainingMs),true);
+  const focus=cycle.captionWatchFocus(db(),Date.now());
+  assert.equal(focus.outboxId,reference.id);
+  input.window={outboxId:reference.id,sourceVersion:reference.source_version,startedAt:focus.currentStartedAt};
+  return focus;
+}
+
+for(const mode of ['edit','watch'])test('caption '+mode+' stops if its observation window expires during preflight',async t=>{
+  let at=Date.now();t.mock.method(Date,'now',()=>at);
+  const input=mode==='watch'?await readyCaptionObservation():await readyAccountEdit();
+  const focus=attachCaptionWindow(input);
+  telegram.state.onEntity=()=>{at=focus.windowEndsAt;};
+  const result=await account[mode==='watch'?'observeVerifiedRelayCaptionWithAccount':'editVerifiedRelayCaptionWithAccount'](input);
+  assert.deepEqual(result,{state:'unavailable',attempted:false,outcome:'unavailable'});
+  assert.equal(telegram.state.calls.filter(call=>call.method==='EditMessage').length,0);
+  assert.equal(stored().lease_until,0);
+});
+
+for(const mode of ['edit','watch'])test('caption '+mode+' completes readback after an accepted edit crosses its window expiry',async t=>{
+  let at=Date.now();t.mock.method(Date,'now',()=>at);
+  const input=mode==='watch'?await readyCaptionObservation():await readyAccountEdit();
+  const focus=attachCaptionWindow(input);
+  telegram.state.onEdit=()=>{at=focus.windowEndsAt+1;};
+  const result=await account[mode==='watch'?'observeVerifiedRelayCaptionWithAccount':'editVerifiedRelayCaptionWithAccount'](input);
+  assert.deepEqual(result,{state:'ok',attempted:true,outcome:'preserved'});
+  assert.equal(telegram.state.calls.filter(call=>call.method==='EditMessage').length,1);
+  assert.ok(telegram.state.calls.filter(call=>call.method==='getMessages').length>=2);
+  if(mode==='watch')assert.ok(db().prepare('SELECT caption_watch_edit_attempted_at AS at FROM telegram_relay_outbox').get().at>0);
+  assert.equal(stored().lease_until,0);
+});
+
+test('caption window identity cannot authorize an unrelated target reference',async()=>{
+  const input=await readyCaptionObservation();attachCaptionWindow(input);
+  input.window.outboxId++;
+  const before=telegram.state.calls.length;
+  assert.deepEqual(await account.observeVerifiedRelayCaptionWithAccount(input),{state:'unavailable',attempted:false,outcome:'unavailable'});
+  assert.equal(telegram.state.calls.length,before);
+});
+
 test('recurring observation repairs original custom artwork and leaves one-shot terminals intact',async()=>{
   const input=await readyCaptionObservation();
   const result=await account.observeVerifiedRelayCaptionWithAccount(input);
@@ -1919,6 +1961,35 @@ test('focused source refresh captures the exact latest version without downloadi
   assert.equal(db().prepare('SELECT source_date FROM telegram_personal_source_posts').get().source_date,message.date);
 });
 
+test('focused source refresh does not capture a snapshot after its observation expires',async t=>{
+  let at=Date.now();t.mock.method(Date,'now',()=>at);
+  const {input}=await readyFocusedSourceRefresh();
+  db().exec('UPDATE telegram_promotion_settings SET relay_caption_serial_enabled=1');
+  cycle.registerCaptionWatchWindow(db(),input.outboxId,at-20*60000+1000);
+  const focus=cycle.captionWatchFocus(db(),at);
+  input.window={outboxId:input.outboxId,sourceVersion:focus.sourceVersion,startedAt:focus.currentStartedAt};
+  telegram.state.onGetMessages=()=>{at=focus.windowEndsAt;};
+  const result=await account.refreshRelayCaptionSourceWithAccount(input);
+  assert.equal(result.state,'waiting');assert.equal(result.verifiedAt,undefined);
+  assert.equal(telegram.state.observations.length,0);assert.equal(stored().lease_until,0);
+});
+
+test('focused source capture returns a new version for its own window when it supersedes the previous version',async t=>{
+  const {input}=await readyFocusedSourceRefresh();
+  db().exec('UPDATE telegram_promotion_settings SET relay_caption_serial_enabled=1');
+  cycle.registerCaptionWatchWindow(db(),input.outboxId,Date.now());
+  const focus=cycle.captionWatchFocus(db(),Date.now());
+  input.window={outboxId:input.outboxId,sourceVersion:focus.sourceVersion,startedAt:focus.currentStartedAt};
+  telegram.state.onObserve=()=>{
+    db().prepare("UPDATE telegram_relay_outbox SET source_version=2,source_content_hash='fresh'").run();
+    cycle.registerCaptionWatchWindow(db(),input.outboxId,Date.now());
+  };
+  const result=await account.refreshRelayCaptionSourceWithAccount(input);
+  assert.equal(result.state,'ok');assert.equal(result.sourceVersion,2);
+  assert.equal(cycle.isCaptionWatchFocusCurrent(db(),focus.outboxId,focus.sourceVersion,focus.currentStartedAt,Date.now()),false);
+  assert.equal(cycle.captionWatchFocus(db(),Date.now()).sourceVersion,2);
+});
+
 for(const kind of ['empty','media','peer','date','selection','unknown'])test('focused source refresh waits safely for '+kind,async()=>{
   const {message,input}=await readyFocusedSourceRefresh();const beforeCursor=cursor();
   if(kind==='empty')message.message=' ';
@@ -2002,6 +2073,22 @@ test('a deferred serial focus cannot reserve receive while its source edit is al
   assert.ok(telegram.state.calls.some(call=>call.method==='connect'));
   assert.equal(db().prepare('SELECT status FROM telegram_relay_source_edits').get().status,'pending');
   assert.equal(cycle.captionWatchFocus(db(),Date.now()).outboxId,input.outboxId);
+});
+
+test('an overdue caption edit cannot reserve receive beyond the bounded account priority slot',async t=>{
+  let at=Date.now();t.mock.method(Date,'now',()=>at);
+  const {input}=await readyFocusedSourceRefresh();
+  db().exec('UPDATE telegram_promotion_settings SET relay_caption_serial_enabled=1');
+  const focus=cycle.captionWatchFocus(db(),at);
+  assert.equal(focus.outboxId,input.outboxId);
+  db().prepare(`INSERT INTO telegram_relay_source_edits(outbox_id,source_version,caption,caption_entities,baseline_caption,baseline_entities,created_at)
+    VALUES(?,1,'updated','[]','old','[]',?)`).run(input.outboxId,at);
+  telegram.state.calls=[];await account.pollTelegramAccountOnce();
+  assert.equal(telegram.state.calls.some(call=>call.method==='connect'),false);
+  at+=15000;telegram.state.calls=[];
+  await account.pollTelegramAccountOnce();
+  assert.ok(telegram.state.calls.some(call=>call.method==='connect'));
+  assert.equal(db().prepare('SELECT status FROM telegram_relay_source_edits').get().status,'pending');
 });
 
 test('due caption priority makes receive, Hot scanning and all startup audits yield without changing business state',async()=>{

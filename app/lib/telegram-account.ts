@@ -4,7 +4,7 @@ import { Api, Logger, TelegramClient, utils } from "teleproto";
 import { StringSession } from "teleproto/sessions";
 import bigInt from "big-integer";
 import { getSqlite } from "./sqlite";
-import { captionWatchAccountPriority } from "./telegram-caption-watch-cycle";
+import { captionWatchAccountPriority, isCaptionWatchFocusCurrent } from "./telegram-caption-watch-cycle";
 import { inspectRelayDelivery, isRelayCustomEmojiId, normalizeRelayCaptionEntities, relayCaptionEntitiesMatch, relayCaptionFormattingMatches, relayKeyboard, type RelayCaptionEntity } from "./telegram-relay-content";
 
 type Stage = "disconnected" | "code" | "password" | "connected";
@@ -861,6 +861,7 @@ export async function inspectBlockedRelayCaptionPreflights(): Promise<{
 
 type VerifiedCaptionInput = {
   targetChatId: number; relayRevision: string; messageId: number; caption: string; captionEntities: RelayCaptionEntity[];
+  window?: { outboxId: number; sourceVersion: number; startedAt: number };
   sourceEdit?: { id: number; version: number; leaseId: string; expectedCaption: string; expectedCaptionEntities: RelayCaptionEntity[] };
   watch?: { leaseId: string; sourceVersion: number; sourceEditId?: number; allowRepair: boolean };
 };
@@ -937,6 +938,11 @@ async function runVerifiedRelayCaptionWithAccount(input: VerifiedCaptionInput,
     .all(input.relayRevision, input.messageId) as EditReference[];
   const settings = configuration(), target = runtime(), storedReferences = references();
   const reference = storedReferences.length === 1 ? storedReferences[0] : undefined;
+  const windowAllowed = () => !input.window || Number.isSafeInteger(input.window.outboxId) && input.window.outboxId > 0
+    && Number.isSafeInteger(input.window.sourceVersion) && input.window.sourceVersion >= 0
+    && Number.isSafeInteger(input.window.startedAt) && input.window.startedAt > 0
+    && reference?.id === input.window.outboxId && reference.source_version === input.window.sourceVersion
+    && isCaptionWatchFocusCurrent(db, input.window.outboxId, input.window.sourceVersion, input.window.startedAt, Date.now());
   type SourceEditReference = { id: number; outbox_id: number; source_version: number; status: string; outcome: string;
     caption: string; caption_entities: string; baseline_caption: string; baseline_entities: string;
     attempted_at: number; lease_id: string; lease_until: number };
@@ -997,7 +1003,7 @@ async function runVerifiedRelayCaptionWithAccount(input: VerifiedCaptionInput,
     || sourceEdit && (settings.relay_caption_watch_enabled !== 1 || phase !== "account_attempting" || reference.source_version !== sourceEdit.version || !sourceEditMatches(originalSourceEdit))
     || watch && (settings.relay_caption_watch_enabled !== 1 || !watchMatches(reference))
     || !activeLeaseId || target.send_lease_id !== activeLeaseId || target.send_lease_until <= now
-    || !sourceAllowed(reference)) return unavailable();
+    || !sourceAllowed(reference) || !windowAllowed()) return unavailable();
   let legacyBaselineInvalid = false;
   try {
     const storedEntities: unknown = JSON.parse(reference.caption_entities);
@@ -1026,7 +1032,7 @@ async function runVerifiedRelayCaptionWithAccount(input: VerifiedCaptionInput,
   const allowed = () => {
     const latest = configuration(), latestTarget = runtime(), account = row(db), matches = references();
     const latestReference = matches.length === 1 ? matches[0] : undefined;
-    return Date.now() < deadline && owns(db, claim) && account.stage === "connected"
+    return Date.now() < deadline && (attempted || windowAllowed()) && owns(db, claim) && account.stage === "connected"
       && account.config_ciphertext === current.config_ciphertext && account.session_ciphertext === current.session_ciphertext
       && latest?.relay_enabled === 1 && latest.relay_chat_id === settings.relay_chat_id
       && latest.relay_revision === settings.relay_revision && latest.token_ciphertext === settings.token_ciphertext
@@ -1201,6 +1207,7 @@ async function runVerifiedRelayCaptionWithAccount(input: VerifiedCaptionInput,
     // Deliberately omit replyMarkup/media. The actual readback, not the RPC
     // response, must prove Telegram preserved the original media and keyboard.
     const request = new Api.messages.EditMessage({ peer: entity, id: input.messageId, message: input.caption, entities });
+    if (!allowed()) return unavailable();
     attempted = true;
     await bounded(client, client.invoke(request, undefined, { maxRetryCount: 0, floodSleepThreshold: 0, timeout: remaining() }), remaining());
     editReturned = true;
@@ -1530,6 +1537,7 @@ export type RelayCaptionSourceRefresh = {
 /** Refresh exactly one known delivered source; never discover/replay media or advance a cursor. */
 export async function refreshRelayCaptionSourceWithAccount(input: {
   outboxId: number; relayRevision: string; targetChatId: number;
+  window?: { outboxId: number; sourceVersion: number; startedAt: number };
 }): Promise<RelayCaptionSourceRefresh> {
   const waiting = (reason: RelayCaptionSourceRefresh["reason"]): RelayCaptionSourceRefresh => ({ state: "waiting", reason });
   if (!Number.isSafeInteger(input.outboxId) || input.outboxId <= 0 || typeof input.relayRevision !== "string" || !input.relayRevision
@@ -1548,6 +1556,10 @@ export async function refreshRelayCaptionSourceWithAccount(input: {
     target_chat_id: number; revision: string; bot_id: number;
   } | undefined;
   const job = reference(), settings = configuration(), target = runtime();
+  const windowAllowed = () => !input.window || input.window.outboxId === input.outboxId
+    && Number.isSafeInteger(input.window.sourceVersion) && input.window.sourceVersion >= 0
+    && Number.isSafeInteger(input.window.startedAt) && input.window.startedAt > 0
+    && isCaptionWatchFocusCurrent(db, input.window.outboxId, input.window.sourceVersion, input.window.startedAt, Date.now());
   const source = job && db.prepare("SELECT * FROM telegram_personal_sources WHERE chat_id=?").get(job.source_chat_id) as SourceRow | undefined;
   const post = job && db.prepare(`SELECT * FROM telegram_personal_source_posts WHERE source_chat_id=? AND source_message_id=?`)
     .get(job.source_chat_id, job.source_message_id) as SourcePostRow | undefined;
@@ -1558,7 +1570,8 @@ export async function refreshRelayCaptionSourceWithAccount(input: {
     || !target || target.target_chat_id !== input.targetChatId || target.revision !== input.relayRevision || !Number.isSafeInteger(target.bot_id) || target.bot_id <= 0
     || !source || source.selected !== 1 || source.joined !== 1 || source.blocked !== 0 || source.selected_at > job.queued_at
     || !post || post.account_generation !== current.generation || post.relay_revision !== input.relayRevision
-    || post.selected_at !== source.selected_at || !/^[a-f0-9]{64}$/.test(job.file_unique_id) || post.media_id_hash !== job.file_unique_id) return waiting("source_inactive");
+    || post.selected_at !== source.selected_at || !/^[a-f0-9]{64}$/.test(job.file_unique_id) || post.media_id_hash !== job.file_unique_id
+    || !windowAllowed()) return waiting("source_inactive");
   if (current.stage !== "connected" || !current.session_ciphertext) return { state: "disconnected", reason: "source_inactive", retryAt: now + RETRY_MS };
   if (current.lease_until > now) return { state: "busy", reason: "source_busy", retryAt: current.lease_until };
   if (current.next_attempt_at > now) return { state: "backoff", reason: "source_backoff", retryAt: current.next_attempt_at };
@@ -1570,12 +1583,12 @@ export async function refreshRelayCaptionSourceWithAccount(input: {
   }
   const deadline = Date.now() + 40_000;
   const remaining = () => Math.max(1, Math.min(REQUEST_MS, deadline - Date.now()));
-  const active = () => {
+  const active = (checkWindow = true) => {
     const latest = reference(), config = configuration(), state = runtime(), account = row(db);
     const peer = db.prepare("SELECT selected,joined,blocked,selected_at FROM telegram_personal_sources WHERE chat_id=?").get(source.chat_id) as SourceRow | undefined;
     const watched = db.prepare(`SELECT account_generation,relay_revision,selected_at,media_id_hash FROM telegram_personal_source_posts
       WHERE source_chat_id=? AND source_message_id=?`).get(source.chat_id, job.source_message_id) as SourcePostRow | undefined;
-    return Date.now() < deadline && owns(db, claim) && account.stage === "connected" && account.generation === current.generation
+    return Date.now() < deadline && (!checkWindow || windowAllowed()) && owns(db, claim) && account.stage === "connected" && account.generation === current.generation
       && account.config_ciphertext === current.config_ciphertext && account.session_ciphertext === current.session_ciphertext
       && config?.relay_enabled === 1 && config.relay_caption_watch_enabled === 1 && config.relay_revision === settings.relay_revision
       && config.relay_started_at === settings.relay_started_at && config.token_ciphertext === settings.token_ciphertext
@@ -1617,7 +1630,9 @@ export async function refreshRelayCaptionSourceWithAccount(input: {
       sourceDate: message.date, mediaKind: media.mediaKind, sourceMediaId: media.mediaId, caption: message.message,
       captionEntities: captionEntities(message.entities), expectedCustomEmojiCount: (message.entities || []).filter(entity => entity.className === "MessageEntityCustomEmoji").length,
       origin: "account", accountGeneration: current.generation, relayRevision: input.relayRevision });
-    if (!active()) return waiting("source_inactive");
+    // A captured edit may supersede this window; retain the new source version
+    // for its own independently registered observation rather than rejecting it.
+    if (!active(false)) return waiting("source_inactive");
     const latest = reference();
     if (!accepted || !latest || latest.source_content_hash.startsWith("invalid:")) return waiting("source_capture_waiting");
     const verifiedAt = Date.now();
@@ -1653,7 +1668,9 @@ export async function pollTelegramAccountOnce() {
   // Reserve the next lease window after a source-caption preflight has already
   // waited. Otherwise receive can reacquire the account just before its retry
   // and repeatedly exhaust a healthy version's bounded busy waits.
-  if (ready && relay.relay_caption_watch_enabled === 1 && (!serialWatch || focus && focus.retryAt <= repairNow) && db.prepare(`SELECT 1 FROM telegram_relay_source_edits e JOIN telegram_relay_outbox o ON o.id=e.outbox_id
+  if (ready && relay.relay_caption_watch_enabled === 1
+    && (!serialWatch || focus && focus.retryAt <= repairNow && captionWatchAccountPriority(db, repairNow))
+    && db.prepare(`SELECT 1 FROM telegram_relay_source_edits e JOIN telegram_relay_outbox o ON o.id=e.outbox_id
     WHERE e.status='pending' AND (e.next_attempt_at<=? OR (e.preflight_waits>0 AND e.next_attempt_at<=?))
     AND e.source_version=o.source_version AND o.status='sent' AND o.message_id>0 AND o.revision=?${serialWatch ? " AND e.outbox_id=?" : ""} LIMIT 1`)
     .get(repairNow, repairNow + LEASE_MS, relay.relay_revision, ...(serialWatch ? [focus!.outboxId] : []))) return;

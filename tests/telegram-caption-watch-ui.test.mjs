@@ -61,12 +61,14 @@ function harness(initial = snapshot()) {
   };
 }
 
-test('hourly serial observation saves its switch without changing source capture frequency or sending a message', async () => {
+test('overlapping observation saves its switch without changing source capture frequency or sending a message', async () => {
   const h = harness();
   try {
     await h.ready();
     assert.equal(h.field('观察并同步来源文案').props.checked, true);
-    assert.match(h.text(), /每 60 分钟一轮 · 逐条核对文案/);
+    assert.match(h.text(), /每条独立检查 20 分钟 · 每 1 分钟核对一次/);
+    assert.match(h.text(), /A 仍在检查时出现 B，B 会立即加入/);
+    assert.doesNotMatch(h.text(), /当前条确认一致后才检查下一条|60 分钟循环|本轮已通过/);
     h.field('观察并同步来源文案').props.onChange({ target: { checked: false } }); h.render();
     await h.form().props.onSubmit({ preventDefault() {} }); h.render();
     const saved = h.calls.find(call => call.method === 'PUT');
@@ -85,13 +87,18 @@ test('periodic status refresh preserves unsaved copy and preferences while showi
     h.field('品牌通知文案', 'textarea').props.onChange({ target: { value: copy } }); h.render();
     h.field('观察并同步来源文案').props.onChange({ target: { checked: false } }); h.render();
     const status = snapshot(); status.relay.captionWatch = { ...status.relay.captionWatch, pending: 0, consistent: 1, lastCheckedAt: at,
-      cycle:{enabled:true,cycleNumber:2,position:2,total:4,completed:1,currentStartedAt:at,cycleStartedAt:at-30000,nextCycleAt:at+3600000,nextAttemptAt:at,currentState:'waiting',lastReason:'waiting'} };
+      cycle:{enabled:true,mode:'overlapping',windowMinutes:20,checkIntervalSeconds:60,active:2,completed:1,verifiedChecks:7,expiredUnverified:1,superseded:0,
+        nextExpiryAt:at+600000,cycleNumber:2,position:2,total:4,currentStartedAt:at,cycleStartedAt:at-30000,nextCycleAt:at+60000,nextAttemptAt:at,currentState:'waiting',lastReason:'waiting'} };
     h.setSnapshot(status); await h.poll();
     assert.equal(h.field('品牌通知文案', 'textarea').props.value, copy);
     assert.equal(h.field('观察并同步来源文案').props.checked, false);
     assert.match(h.text(), /上次核对一致1/);
-    assert.match(h.text(), /第 2 \/ 4 条/);
-    assert.match(h.text(), /本轮已通过1/);
+    assert.match(h.text(), /独立观察中2/);
+    assert.match(h.text(), /已结束观察1/);
+    assert.match(h.text(), /核对通过次数7/);
+    assert.match(h.text(), /到期仍未核实1/);
+    assert.match(h.text(), /观察时间结束仅表示本条计时结束，不代表所有检查都通过/);
+    assert.match(h.text(), /下个观察到期（MYT）2026\/11\/16 20:40:00/);
     assert.match(h.text(), /2026\/11\/16 20:30:00/);
     assert.ok(h.calls.every(call => call.method === 'GET'));
     h.document.visibilityState = 'hidden'; const count = h.calls.length; await h.poll();

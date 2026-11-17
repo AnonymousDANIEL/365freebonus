@@ -692,7 +692,7 @@ test('schema35 adds observation defaults while retaining existing private settin
   database.exec('ALTER TABLE telegram_promotion_settings DROP COLUMN relay_caption_watch_enabled; ALTER TABLE telegram_promotion_settings DROP COLUMN relay_caption_watch_interval_seconds; PRAGMA user_version=34');
   const filename = path.join(process.env.DATA_DIR, 'directory.sqlite');
   database.close(); globalThis.__directorySqlite.delete(filename); database = getSqlite();
-  assert.equal(database.prepare('PRAGMA user_version').get().user_version, 36);
+  assert.equal(database.prepare('PRAGMA user_version').get().user_version, 37);
   const migratedSettings = settingsRow();
   assert.equal(migratedSettings.relay_caption_watch_enabled, 1); assert.equal(migratedSettings.relay_caption_watch_interval_seconds, 30);
   delete migratedSettings.relay_caption_watch_enabled; delete migratedSettings.relay_caption_watch_interval_seconds;
@@ -706,6 +706,28 @@ test('schema35 adds observation defaults while retaining existing private settin
     const saved = { ...row }; for (const name of watcherColumns) delete saved[name]; return saved;
   });
   assert.deepEqual(migratedJobs, beforeJobs);
+});
+
+test('schema37 upgrades a schema36 database without changing relay records, source edits, settings or serial progress', async () => {
+  await put(relayOnlyConfig);
+  relayJob(); relayJob({ messageId: 902, status: 'unknown' }); relayJob({ messageId: 903, status: 'sent' });
+  const revision = settingsRow().relay_revision;
+  database.prepare("UPDATE telegram_relay_state SET revision=?,next_offset=147,next_send_at=54321 WHERE id='primary'").run(revision);
+  database.prepare(`INSERT INTO telegram_relay_source_edits(outbox_id,source_version,caption,caption_entities,baseline_caption,baseline_entities,created_at)
+    SELECT id,1,'Preserved newer source copy','[]',caption,caption_entities,12345 FROM telegram_relay_outbox WHERE source_message_id=903`).run();
+  database.prepare(`INSERT INTO telegram_relay_caption_watch_cycle(id,relay_revision,target_chat_id,cycle_number,current_outbox_id,current_started_at,retry_at,last_reason)
+    SELECT 'primary',?,-1001234567891,4,id,12000,18000,'busy' FROM telegram_relay_outbox WHERE source_message_id=903`).run(revision);
+  const tables = ['telegram_promotion_settings', 'telegram_relay_state', 'telegram_relay_outbox', 'telegram_relay_source_edits', 'telegram_relay_caption_watch_cycle'];
+  const before = Object.fromEntries(tables.map(table => [table, database.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all().map(row => ({ ...row }))]));
+  database.exec('DROP TABLE telegram_relay_caption_watch_windows; PRAGMA user_version=36');
+  const filename = path.join(process.env.DATA_DIR, 'directory.sqlite');
+  database.close(); globalThis.__directorySqlite.delete(filename); telegram.calls.length = 0;
+  database = getSqlite();
+  assert.equal(database.prepare('PRAGMA user_version').get().user_version, 37);
+  assert.equal(database.prepare('SELECT COUNT(*) AS count FROM telegram_relay_caption_watch_windows').get().count, 0);
+  assert.ok(database.prepare("SELECT 1 FROM sqlite_master WHERE type='index' AND name='telegram_relay_caption_watch_windows_due'").get());
+  for (const table of tables) assert.deepEqual(database.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all().map(row => ({ ...row })), before[table], table);
+  assert.equal(telegram.calls.length, 0, 'migration never sends messages or calls Telegram');
 });
 
 test('relay status is aggregate-only and same-bot credential rotation leaves its private cursor and queue intact', async () => {

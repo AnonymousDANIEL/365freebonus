@@ -10,6 +10,8 @@ type CaptionWatchStatus = {
   watched: number; lastCheckedAt: number | null; nextCheckAt: number | null;
   pending: number; checking: number; consistent: number; mismatch: number; waiting: number; lastError: string;
   cycle?: { enabled: boolean; cycleNumber: number; position: number; total: number; completed: number;
+    mode?: "overlapping"; windowMinutes?: number; checkIntervalSeconds?: number; active?: number; nextExpiryAt?: number | null;
+    verifiedChecks?: number; expiredUnverified?: number; superseded?: number; due?: number; overdue?: number;
     currentStartedAt: number | null; cycleStartedAt: number | null; nextCycleAt: number | null;
     nextAttemptAt: number | null; currentState: string; lastReason: string; sourceEvidence?: "source_read" | "bot_updates" | null } | null;
 };
@@ -483,9 +485,9 @@ export default function TelegramGroupSettings({ request, signInPath }: AdminProp
                 onChange={event => setDraft({ ...draft, relay: { ...draft.relay, captionWatchEnabled: event.target.checked } })} />
               观察并同步来源文案
             </label>
-            <div className="cms-telegram-followup-note" aria-label="文案循环检查安排">
-              <p>每 60 分钟一轮 · 逐条核对文案</p>
-              <small>个人账号来源先重读原文；机器人来源按最新收到的编辑更新核对。随后检查目标原帖的文字、格式、Emoji 和按钮。当前条确认一致后才检查下一条；未确认的保留重试。整轮完成后按时间继续循环，关闭网页或重启也会保留进度。</small>
+            <div className="cms-telegram-followup-note" aria-label="文案独立检查安排">
+              <p>每条独立检查 20 分钟 · 每 1 分钟核对一次</p>
+              <small>新文案各自开始计时；A 仍在检查时出现 B，B 会立即加入，A 继续到自己的 20 分钟结束。个人账号来源先重读原文；机器人来源按最新收到的编辑更新核对，再检查目标原帖的文字、格式、Emoji 和按钮。关闭网页或重启会保留计时和进度；观察结束不会改变下一条文案的发送时间。</small>
             </div>
             <small>处理开启后识别到的照片／视频／GIF＋文案。来源先发媒体、之后才补文案时，会在后续检查发现后转发；已转发的来源再编辑文案，会更新目标原贴。纯文字及禁止转发的内容会跳过。原文链接和原按钮会换成以下固定入口：</small>
             <small>🌐 Visit website — https://365freebonus.com/</small>
@@ -497,14 +499,19 @@ export default function TelegramGroupSettings({ request, signInPath }: AdminProp
             <small>按马来西亚日期（UTC+8）每天 00:00 重新计算媒体去重：同一天相同图片身份或内容会跳过，第二天新收到相同媒体可以再转发。文案相同不会单独去重，不同媒体仍可分别发送；纯文字不转发，未带文案的媒体暂不发送；后补文案仍须符合当天媒体去重。当天记录在重新开启和重启后保留，历史消息不会在午夜自动重发；跨午夜仍在发送或结果未确认的请求会保留防重保护。</small>
             <small>保留原文换行、文字格式和自定义 Emoji 资料；正文链接改为本站，按钮统一为上方三项。来源的新文案版本会排队更新目标原贴，并回读核对文字、格式、表情及按钮。已连接个人账号须具备频道编辑权限；带自定义 Emoji 的版本另须 Premium。无法确认权限、原媒体身份或编辑结果时显示等待核实；未知发送结果不会重新发送媒体。</small>
             <div className="cms-telegram-followup-note" aria-label="文案一致性观察">
-              <p>文案一致性观察 · {config.relay.enabled && config.relay.captionWatchEnabled ? "已启用" : "已暂停"} · 60 分钟循环 · 状态每 30 秒自动刷新</p>
-              <dl className="cms-telegram-counts" aria-label="本轮文案检查进度">
-                <div><dt>当前轮次</dt><dd>{captionWatch?.cycle?.cycleNumber || "等待开始"}</dd></div>
-                <div><dt>当前文案</dt><dd>{captionWatch?.cycle?.position ? `第 ${captionWatch.cycle.position} / ${captionWatch.cycle.total} 条` : captionWatch?.cycle?.currentState === "scheduled" ? "本轮已完成" : "等待安排"}</dd></div>
-                <div><dt>本轮已通过</dt><dd>{captionWatch?.cycle?.completed ?? 0}</dd></div>
+              <p>文案一致性观察 · {config.relay.enabled && config.relay.captionWatchEnabled ? "已启用" : "已暂停"} · 每条 20 分钟 / 每 1 分钟检查 · 状态每 30 秒自动刷新</p>
+              <dl className="cms-telegram-counts" aria-label="各条文案检查进度">
+                <div><dt>独立观察中</dt><dd>{captionWatch?.cycle?.active ?? 0}</dd></div>
+                <div><dt>已到检查时间</dt><dd>{captionWatch?.cycle?.due ?? 0}</dd></div>
+                <div><dt>检查延后超过1分钟</dt><dd>{captionWatch?.cycle?.overdue ?? 0}</dd></div>
+                <div><dt>当前检查</dt><dd>{captionWatch?.cycle?.currentStartedAt ? captionWatch.cycle.currentState === "checking" ? "正在核对" : "等待核实" : "等待下次检查"}</dd></div>
+                <div><dt>已结束观察</dt><dd>{captionWatch?.cycle?.completed ?? 0}</dd></div>
+                <div><dt>核对通过次数</dt><dd>{captionWatch?.cycle?.verifiedChecks ?? 0}</dd></div>
+                <div><dt>到期仍未核实</dt><dd>{captionWatch?.cycle?.expiredUnverified ?? 0}</dd></div>
+                <div><dt>已有更新版本</dt><dd>{captionWatch?.cycle?.superseded ?? 0}</dd></div>
                 <div><dt>当前来源依据</dt><dd>{captionWatch?.cycle?.sourceEvidence === "source_read" ? "重新读取来源原文" : captionWatch?.cycle?.sourceEvidence === "bot_updates" ? "机器人已收到的编辑更新" : "等待核实"}</dd></div>
-                <div><dt>当前条开始（MYT）</dt><dd>{captionWatch?.cycle?.currentStartedAt ? pollTimeFormat.format(captionWatch.cycle.currentStartedAt) : "尚未开始"}</dd></div>
-                <div><dt>下轮计划（MYT）</dt><dd>{captionWatch?.cycle?.nextCycleAt ? pollTimeFormat.format(captionWatch.cycle.nextCycleAt) : "等待安排"}</dd></div>
+                <div><dt>当前检查开始（MYT）</dt><dd>{captionWatch?.cycle?.currentStartedAt ? pollTimeFormat.format(captionWatch.cycle.currentStartedAt) : "尚未开始"}</dd></div>
+                <div><dt>下个观察到期（MYT）</dt><dd>{captionWatch?.cycle?.nextExpiryAt ? pollTimeFormat.format(captionWatch.cycle.nextExpiryAt) : "暂无观察中窗口"}</dd></div>
               </dl>
               <dl className="cms-telegram-counts">
                 <div><dt>观察中</dt><dd>{captionWatch?.watched ?? 0}</dd></div>
@@ -516,7 +523,7 @@ export default function TelegramGroupSettings({ request, signInPath }: AdminProp
                 <div><dt>文案最近检查（MYT）</dt><dd>{captionWatch?.lastCheckedAt ? pollTimeFormat.format(captionWatch.lastCheckedAt) : "尚未检查"}</dd></div>
                 <div><dt>文案下次检查（MYT）</dt><dd>{captionWatch?.nextCheckAt ? pollTimeFormat.format(captionWatch.nextCheckAt) : "等待安排"}</dd></div>
               </dl>
-              <small>「本轮已通过」必须先取得本轮来源依据并实际回读目标才增加；历史核对数量仅表示各条上次结果。机器人更新不能证明长期离线期间没有遗漏编辑。限流、权限或媒体身份未核实会保留当前条，并显示原因及下次检查时间。</small>
+              <small>各条文案分别安排检查，等待核实的一条不会阻止其他文案继续。观察时间结束仅表示本条计时结束，不代表所有检查都通过；一致、不一致及等待核实会分别保留。机器人更新不能证明长期离线期间没有遗漏编辑。Telegram 限流、连接或权限问题可能延后实际核对，后台会显示原因与下次检查时间。</small>
               {captionWatch?.lastError && <p className="cms-telegram-last-error">文案检查提示 · {captionWatch.lastError}</p>}
             </div>
             <dl className="cms-telegram-counts" aria-label="群图片转发记录">
