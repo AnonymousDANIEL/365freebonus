@@ -2544,6 +2544,24 @@ test('overlapping caption windows let B proceed after A fails and check each cop
   assert.equal(sends().length,2);assert.equal(jobs().filter(job=>job.status==='sent').length,2);
 });
 
+test('an item lease defers only A while the free account checks B without replaying media',async t=>{
+  const [a,b]=await readySerialCycle(t),until=now+120000;
+  getSqlite().prepare("UPDATE telegram_relay_outbox SET lease_id='other-caption-worker',lease_until=? WHERE id=?").run(until,a.id);
+  assert.equal(state().send_lease_until,0);
+  await deliver(now+8000);
+  const waiting=captionWindows().find(row=>row.outbox_id===a.id);
+  assert.equal(waiting.retry_at,until);assert.equal(waiting.last_reason,'waiting');assert.equal(waiting.attempt_started_at,0);
+  assert.equal(personalEdit.freshCalls.length,0);assert.equal(personalEdit.watchCalls.length,0);
+  personalEdit.watchResults.push({state:'ok',attempted:false,outcome:'preserved'});
+  await deliver(now+9000);
+  assert.deepEqual(personalEdit.freshCalls.map(call=>call.outboxId),[b.id]);
+  assert.deepEqual(personalEdit.watchCalls.map(call=>call.messageId),[b.message_id]);
+  assert.equal(jobs()[1].caption_watch_outcome,'consistent');
+  assert.equal(jobs()[0].lease_id,'other-caption-worker');assert.equal(jobs()[0].lease_until,until);
+  assert.equal(captionWindows().find(row=>row.outbox_id===a.id).retry_at,until);
+  assert.equal(sends().length,2);
+});
+
 test('independent copy windows survive restart and expire after twenty minutes without renewal or media replay',async t=>{
   await readySerialCycle(t);
   personalEdit.watchResults.push({state:'ok',attempted:false,outcome:'preserved'});await deliver(now+8000);

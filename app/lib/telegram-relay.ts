@@ -1186,7 +1186,13 @@ async function processCaptionWatchWindow(token: string, identity: number, snapsh
   if (!focus || focus.retryAt > now || (captionWatchWorkAt.get(db) || 0) > now) return false;
   const active = db.prepare("SELECT lease_until,origin,source_version,source_content_hash FROM telegram_relay_outbox WHERE id=? AND status='sent'")
     .get(focus.outboxId) as { lease_until: number; origin: string; source_version: number; source_content_hash: string } | undefined;
-  if (!active || active.lease_until > now) return false;
+  if (!active) return false;
+  if (active.lease_until > now) {
+    // A per-message lease must not pin the selector while other windows are due.
+    // This is separate from the shared account lease, whose early-release rule does not apply here.
+    deferCaptionWatchFocus(db, focus.outboxId, active.lease_until, "waiting", focus.sourceVersion);
+    return false;
+  }
   captionWatchWorkAt.set(db, now + 10_000);
   let fresh: { state: string; sourceVersion?: number; verifiedAt?: number; retryAt?: number; reason?: string;
     botDrainedAt?: number; botFocusStartedAt?: number; botTargetChatId?: number };
