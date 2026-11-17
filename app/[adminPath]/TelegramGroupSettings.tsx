@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Check, LoaderCircle, Pencil, Plus, Trash2 } from "lucide-react";
 import "./telegram-keywords-admin.css";
+import "./telegram-relay-admin.css";
 import TelegramPersonalAccount from "./TelegramPersonalAccount";
 import TelegramJoinGate from "./TelegramJoinGate";
 
@@ -500,80 +501,147 @@ export default function TelegramGroupSettings({ request, signInPath, view = "all
             {config.lastError && <p className="cms-telegram-last-error">最近发送异常 · {config.lastError}</p>}
           </div>
         </section>}
-        {show("relay") && <section className="cms-settings-panel" aria-labelledby="telegram-relay-title">
-          <div>
-            <h2 id="telegram-relay-title">图片自动转发</h2>
-            <p>将来源群、频道的照片、视频或 GIF＋文案整理后，由 @FreeBonus365Bot 发送到你的群或频道。个人账号来源在“个人账号来源频道”中单独选择。</p>
-            <span className={`cms-telegram-status${config.relay.enabled && config.relay.ready ? " cms-telegram-enabled" : ""}`}>{config.relay.enabled ? config.relay.ready ? "目标已连接" : "等待连接" : "已停用"}</span>
+        {show("relay") && <section className="cms-settings-panel cms-relay-panel" aria-labelledby="telegram-relay-title">
+          <header className="cms-relay-header">
+            <div>
+              <h2 id="telegram-relay-title">图片自动转发</h2>
+              <p>集中管理照片、视频与 GIF 转发，查看文案核对和发送进度。</p>
+            </div>
+            <span className={"cms-relay-pill" + (config.relay.enabled && config.relay.ready ? " is-connected" : "")}>
+              <i aria-hidden="true" />{config.relay.enabled ? config.relay.ready ? "目标已连接" : "等待连接" : "已停用"}
+            </span>
+          </header>
+
+          <div className="cms-relay-settings-grid">
+            <section className="cms-relay-card" aria-labelledby="relay-connection-title">
+              <div className="cms-relay-card-heading"><h3 id="relay-connection-title">连接与转发设置</h3><span>@FreeBonus365Bot</span></div>
+              <label className="cms-relay-toggle">
+                <span><strong>启用图片自动转发</strong><small>转发新识别到的带文案媒体</small></span>
+                <input type="checkbox" role="switch" checked={draft.relay.enabled}
+                  onChange={event => setDraft({ ...draft, relay: { ...draft.relay, enabled: event.target.checked } })} />
+              </label>
+              <label className="cms-relay-field">转发目标群组或频道
+                <input type="text" autoComplete="off" spellCheck={false} maxLength={80} required={draft.relay.enabled}
+                  value={draft.relay.chatId} placeholder="https://t.me/join365freebonusgroup"
+                  onChange={event => setDraft({ ...draft, relay: { ...draft.relay, chatId: event.target.value } })} />
+                <small>支持群组或频道；机器人需有发送媒体或频道发布权限。</small>
+              </label>
+              <p className="cms-relay-hint">来源在「个人账号来源频道」选择，此处目标独立于「品牌通知」。</p>
+              {view === "relay" && <details className="cms-relay-disclosure cms-relay-credentials" open={!config.hasToken}>
+                <summary><strong>机器人凭据</strong><span>{config.hasToken ? "已配置 · 按需更换" : "请配置 Token"}</span></summary>
+                <div className="cms-relay-disclosure-body">
+                  <label className="cms-relay-field">@FreeBonus365Bot Token（品牌通知／群图片转发）
+                    <input type="password" autoComplete="new-password" spellCheck={false} maxLength={160} value={draft.token}
+                      required={draft.relay.enabled && !config.hasToken} onChange={event => setDraft({ ...draft, token: event.target.value })} />
+                    <small>{config.hasToken ? "已保存通知机器人的 Token。留空继续使用。" : "填写 BotFather 提供的 @FreeBonus365Bot Token。"}</small>
+                  </label>
+                </div>
+              </details>}
+            </section>
+
+            <section className="cms-relay-card" aria-labelledby="relay-sync-title">
+              <div className="cms-relay-card-heading"><h3 id="relay-sync-title">文案同步与核对</h3><span>保留原帖</span></div>
+              <label className="cms-relay-toggle">
+                <span><strong>观察并同步来源文案</strong><small>核对文字、格式、Emoji 和按钮</small></span>
+                <input type="checkbox" role="switch" checked={draft.relay.captionWatchEnabled}
+                  onChange={event => setDraft({ ...draft, relay: { ...draft.relay, captionWatchEnabled: event.target.checked } })} />
+              </label>
+              <div className="cms-relay-window" aria-label="文案独立检查安排">
+                <div><strong>20<span>分钟</span></strong><small>每条观察时长</small></div>
+                <div><strong>1<span>分钟</span></strong><small>核对间隔</small></div>
+              </div>
+              <p className="cms-relay-hint">每条独立检查 20 分钟 · 每 1 分钟核对一次。A 仍在检查时出现 B，B 会立即加入，A 继续到期。</p>
+              <p className="cms-relay-hint">来源文案变动时更新目标原帖。关闭网页或重启会保留计时和进度，待确认的媒体不会重复发送。</p>
+            </section>
           </div>
-          <div className="cms-settings-fields">
-            {view === "relay" && <label>@FreeBonus365Bot Token（品牌通知／群图片转发）
-              <input type="password" autoComplete="new-password" spellCheck={false} maxLength={160} value={draft.token}
-                required={draft.relay.enabled && !config.hasToken} onChange={event => setDraft({ ...draft, token: event.target.value })} />
-              <small>{config.hasToken ? "已保存通知机器人的 Token。留空继续使用。" : "填写 BotFather 提供的 @FreeBonus365Bot Token。"}</small>
-            </label>}
-            <label className="cms-telegram-switch">
-              <input type="checkbox" role="switch" checked={draft.relay.enabled} onChange={event => setDraft({ ...draft, relay: { ...draft.relay, enabled: event.target.checked } })} />
-              启用图片自动转发
-            </label>
-            <label>转发目标群组或频道
-              <input type="text" autoComplete="off" spellCheck={false} maxLength={80} required={draft.relay.enabled}
-                value={draft.relay.chatId} placeholder="https://t.me/join365freebonusgroup"
-                onChange={event => setDraft({ ...draft, relay: { ...draft.relay, chatId: event.target.value } })} />
-              <small>将 @FreeBonus365Bot 加入目标群并允许发送照片、视频和 GIF；频道需要管理员发布权限。此目标独立于“品牌通知”的发送目标。</small>
-            </label>
-            <label className="cms-telegram-switch">
-              <input type="checkbox" role="switch" checked={draft.relay.captionWatchEnabled}
-                onChange={event => setDraft({ ...draft, relay: { ...draft.relay, captionWatchEnabled: event.target.checked } })} />
-              观察并同步来源文案
-            </label>
-            <div className="cms-telegram-followup-note" aria-label="文案独立检查安排">
-              <p>每条独立检查 20 分钟 · 每 1 分钟核对一次</p>
-              <small>新文案各自开始计时；A 仍在检查时出现 B，B 会立即加入，A 继续到自己的 20 分钟结束。个人账号来源先重读原文；机器人来源按最新收到的编辑更新核对，再检查目标原帖的文字、格式、Emoji 和按钮。关闭网页或重启会保留计时和进度；观察结束不会改变下一条文案的发送时间。</small>
+
+          <section className="cms-relay-card" aria-labelledby="relay-delivery-title">
+            <div className="cms-relay-card-heading">
+              <h3 id="relay-delivery-title">转发概况</h3>
+              <span>最近检查（MYT） · {config.relay.lastPolledAt === null ? "尚未检查" : pollTimeFormat.format(config.relay.lastPolledAt)}</span>
             </div>
-            <small>处理开启后识别到的照片／视频／GIF＋文案。来源先发媒体、之后才补文案时，会在后续检查发现后转发；已转发的来源再编辑文案，会更新目标原贴。纯文字及禁止转发的内容会跳过。原文链接和原按钮会换成以下固定入口：</small>
-            <small>🌐 Visit website — https://365freebonus.com/</small>
-            <small>🎁 365 Free Bonus Official — https://t.me/join365freebonus</small>
-            <small>💬 NEED HELP? — https://t.me/FreeBonus365ChatBot</small>
-            <small>个人账号会轮询已追踪的媒体，检测后补或修改的文案。已转发的来源持续保留观察；尚未转发的候选媒体每个来源保留最近 512 条、所有来源合计最多 4,096 条。未被追踪的历史媒体不会自动补发；Telegram 限流或队列忙碌时会延后检查。</small>
-            <small>来源群需允许机器人接收普通消息：将机器人设为管理员，或在 BotFather 关闭 Group Privacy。其他机器人发出的消息还可能需要开启 Bot-to-Bot Communication Mode。</small>
-            <small>不要同时为此机器人使用其他 Webhook 或轮询接收服务。系统会去重、限速，并忽略自己的消息和目标群消息。</small>
-            <small>按马来西亚日期（UTC+8）每天 00:00 重新计算媒体去重：同一天相同图片身份或内容会跳过，第二天新收到相同媒体可以再转发。文案相同不会单独去重，不同媒体仍可分别发送；纯文字不转发，未带文案的媒体暂不发送；后补文案仍须符合当天媒体去重。当天记录在重新开启和重启后保留，历史消息不会在午夜自动重发；跨午夜仍在发送或结果未确认的请求会保留防重保护。</small>
-            <small>保留原文换行、文字格式和自定义 Emoji 资料；正文链接改为本站，按钮统一为上方三项。来源的新文案版本会排队更新目标原贴，并回读核对文字、格式、表情及按钮。已连接个人账号须具备频道编辑权限；带自定义 Emoji 的版本另须 Premium。无法确认权限、原媒体身份或编辑结果时显示等待核实；未知发送结果不会重新发送媒体。</small>
-            <div className="cms-telegram-followup-note" aria-label="文案一致性观察">
-              <p>文案一致性观察 · {config.relay.enabled && config.relay.captionWatchEnabled ? "已启用" : "已暂停"} · 每条 20 分钟 / 每 1 分钟检查 · 状态每 30 秒自动刷新</p>
-              <dl className="cms-telegram-counts" aria-label="各条文案检查进度">
-                <div><dt>独立观察中</dt><dd>{captionWatch?.cycle?.active ?? 0}</dd></div>
-                <div><dt>已到检查时间</dt><dd>{captionWatch?.cycle?.due ?? 0}</dd></div>
-                <div><dt>检查延后超过1分钟</dt><dd>{captionWatch?.cycle?.overdue ?? 0}</dd></div>
-                <div><dt>当前检查</dt><dd>{captionWatch?.cycle?.currentStartedAt ? captionWatch.cycle.currentState === "checking" ? "正在核对" : "等待核实" : "等待下次检查"}</dd></div>
-                <div><dt>已结束观察</dt><dd>{captionWatch?.cycle?.completed ?? 0}</dd></div>
-                <div><dt>核对通过次数</dt><dd>{captionWatch?.cycle?.verifiedChecks ?? 0}</dd></div>
-                <div><dt>到期仍未核实</dt><dd>{captionWatch?.cycle?.expiredUnverified ?? 0}</dd></div>
-                <div><dt>已有更新版本</dt><dd>{captionWatch?.cycle?.superseded ?? 0}</dd></div>
-                <div><dt>当前来源依据</dt><dd>{captionWatch?.cycle?.sourceEvidence === "source_read" ? "重新读取来源原文" : captionWatch?.cycle?.sourceEvidence === "bot_updates" ? "机器人已收到的编辑更新" : "等待核实"}</dd></div>
-                <div><dt>当前检查开始（MYT）</dt><dd>{captionWatch?.cycle?.currentStartedAt ? pollTimeFormat.format(captionWatch.cycle.currentStartedAt) : "尚未开始"}</dd></div>
-                <div><dt>下个观察到期（MYT）</dt><dd>{captionWatch?.cycle?.nextExpiryAt ? pollTimeFormat.format(captionWatch.cycle.nextExpiryAt) : "暂无观察中窗口"}</dd></div>
-              </dl>
-              <dl className="cms-telegram-counts">
-                <div><dt>观察中</dt><dd>{captionWatch?.watched ?? 0}</dd></div>
-                <div><dt>待检查</dt><dd>{captionWatch?.pending ?? 0}</dd></div>
-                <div><dt>检查中</dt><dd>{captionWatch?.checking ?? 0}</dd></div>
-                <div><dt>上次核对一致</dt><dd>{captionWatch?.consistent ?? 0}</dd></div>
-                <div><dt>发现不一致</dt><dd>{captionWatch?.mismatch ?? 0}</dd></div>
-                <div><dt>等待核实</dt><dd>{captionWatch?.waiting ?? 0}</dd></div>
-                <div><dt>文案最近检查（MYT）</dt><dd>{captionWatch?.lastCheckedAt ? pollTimeFormat.format(captionWatch.lastCheckedAt) : "尚未检查"}</dd></div>
-                <div><dt>文案下次检查（MYT）</dt><dd>{captionWatch?.nextCheckAt ? pollTimeFormat.format(captionWatch.nextCheckAt) : "等待安排"}</dd></div>
-              </dl>
-              <small>各条文案分别安排检查，等待核实的一条不会阻止其他文案继续。观察时间结束仅表示本条计时结束，不代表所有检查都通过；一致、不一致及等待核实会分别保留。机器人更新不能证明长期离线期间没有遗漏编辑。Telegram 限流、连接或权限问题可能延后实际核对，后台会显示原因与下次检查时间。</small>
-              {captionWatch?.lastError && <p className="cms-telegram-last-error">文案检查提示 · {captionWatch.lastError}</p>}
-            </div>
-            <dl className="cms-telegram-counts" aria-label="群图片转发记录">
-              {Object.entries(config.relay.counts).map(([key, count]) => <div key={key}><dt>{({ ...deliveryLabels, cancelled: "已取消" } as Record<string, string>)[key] || key}</dt><dd>{count}</dd></div>)}
-              <div><dt>最近检查（MYT）</dt><dd>{config.relay.lastPolledAt === null ? "尚未检查" : pollTimeFormat.format(config.relay.lastPolledAt)}</dd></div>
+            <dl className="cms-relay-metrics" aria-label="群图片转发记录">
+              <div><dt>已发送</dt><dd>{config.relay.counts.sent}</dd></div>
+              <div><dt>待发送</dt><dd>{config.relay.counts.pending}</dd></div>
+              <div className={config.relay.counts.unknown > 0 ? "is-warning" : ""}><dt>待确认</dt><dd>{config.relay.counts.unknown}</dd></div>
+              <div className={config.relay.counts.failed > 0 ? "is-error" : ""}><dt>发送失败</dt><dd>{config.relay.counts.failed}</dd></div>
             </dl>
-            {config.relay.lastError && <p className="cms-telegram-last-error">最近转发异常 · {config.relay.lastError}</p>}
-          </div>
+            <dl className="cms-relay-inline-stats" aria-label="其他转发记录">
+              <div><dt>发送中</dt><dd>{config.relay.counts.sending}</dd></div>
+              <div><dt>已跳过</dt><dd>{config.relay.counts.skipped}</dd></div>
+              <div><dt>已取消</dt><dd>{config.relay.counts.cancelled}</dd></div>
+            </dl>
+            {config.relay.lastError && <div className="cms-relay-notice" role="status">
+              <strong>最近转发异常</strong><p>{config.relay.lastError}</p>
+            </div>}
+          </section>
+
+          <section className="cms-relay-card" aria-label="文案一致性观察">
+            <div className="cms-relay-card-heading">
+              <h3>文案一致性观察 · {config.relay.enabled && config.relay.captionWatchEnabled ? "已启用" : "已暂停"}</h3>
+              <span>状态每 30 秒自动刷新</span>
+            </div>
+            <dl className="cms-relay-metrics" aria-label="各条文案检查进度">
+              <div><dt>独立观察中</dt><dd>{captionWatch?.cycle?.active ?? 0}</dd></div>
+              <div><dt>核对通过次数</dt><dd>{captionWatch?.cycle?.verifiedChecks ?? 0}</dd></div>
+              <div className={(captionWatch?.cycle?.expiredUnverified ?? 0) > 0 ? "is-warning" : ""}><dt>到期仍未核实</dt><dd>{captionWatch?.cycle?.expiredUnverified ?? 0}</dd></div>
+              <div className={(captionWatch?.mismatch ?? 0) > 0 ? "is-error" : ""}><dt>发现不一致</dt><dd>{captionWatch?.mismatch ?? 0}</dd></div>
+            </dl>
+            <dl className="cms-relay-schedule">
+              <div><dt>当前检查</dt><dd>{captionWatch?.cycle?.currentStartedAt ? captionWatch.cycle.currentState === "checking" ? "正在核对" : "等待核实" : "等待下次检查"}</dd></div>
+              <div><dt>下个观察到期（MYT）</dt><dd>{captionWatch?.cycle?.nextExpiryAt ? pollTimeFormat.format(captionWatch.cycle.nextExpiryAt) : "暂无观察中窗口"}</dd></div>
+              <div><dt>文案最近检查（MYT）</dt><dd>{captionWatch?.lastCheckedAt ? pollTimeFormat.format(captionWatch.lastCheckedAt) : "尚未检查"}</dd></div>
+              <div><dt>文案下次检查（MYT）</dt><dd>{captionWatch?.nextCheckAt ? pollTimeFormat.format(captionWatch.nextCheckAt) : "等待安排"}</dd></div>
+            </dl>
+            {captionWatch?.lastError && <div className="cms-relay-notice" role="status"><strong>文案检查提示</strong><p>{captionWatch.lastError}</p></div>}
+            <details className="cms-relay-disclosure">
+              <summary><strong>查看详细检查记录</strong><span>队列、来源依据与观察结果</span></summary>
+              <div className="cms-relay-disclosure-body">
+                <dl className="cms-relay-detail-stats">
+                  <div><dt>已结束观察</dt><dd>{captionWatch?.cycle?.completed ?? 0}</dd></div>
+                  <div><dt>已有更新版本</dt><dd>{captionWatch?.cycle?.superseded ?? 0}</dd></div>
+                  <div><dt>已到检查时间</dt><dd>{captionWatch?.cycle?.due ?? 0}</dd></div>
+                  <div><dt>检查延后超过1分钟</dt><dd>{captionWatch?.cycle?.overdue ?? 0}</dd></div>
+                  <div><dt>观察中</dt><dd>{captionWatch?.watched ?? 0}</dd></div>
+                  <div><dt>待检查</dt><dd>{captionWatch?.pending ?? 0}</dd></div>
+                  <div><dt>检查中</dt><dd>{captionWatch?.checking ?? 0}</dd></div>
+                  <div><dt>上次核对一致</dt><dd>{captionWatch?.consistent ?? 0}</dd></div>
+                  <div><dt>等待核实</dt><dd>{captionWatch?.waiting ?? 0}</dd></div>
+                  <div><dt>当前检查开始（MYT）</dt><dd>{captionWatch?.cycle?.currentStartedAt ? pollTimeFormat.format(captionWatch.cycle.currentStartedAt) : "尚未开始"}</dd></div>
+                  <div className="cms-relay-wide"><dt>当前来源依据</dt><dd>{captionWatch?.cycle?.sourceEvidence === "source_read" ? "重新读取来源原文" : captionWatch?.cycle?.sourceEvidence === "bot_updates" ? "机器人已收到的编辑更新" : "等待核实"}</dd></div>
+                </dl>
+                <p className="cms-relay-hint">各条文案分别安排检查，等待核实的一条不会阻止其他文案继续。观察时间结束仅表示本条计时结束，不代表所有检查都通过；一致、不一致及等待核实会分别保留。</p>
+              </div>
+            </details>
+            <p className="cms-relay-hint">Telegram 限流、连接或权限问题可能延后实际核对，后台会显示原因与下次检查时间。机器人更新不能证明长期离线期间没有遗漏编辑。</p>
+          </section>
+
+          <details className="cms-relay-card cms-relay-disclosure cms-relay-rules">
+            <summary><strong>转发规则与权限说明</strong><span>内容处理、固定入口与每日去重</span></summary>
+            <div className="cms-relay-disclosure-body cms-relay-rule-copy">
+              <section>
+                <h3>内容与文案</h3>
+                <p>处理开启后识别到的照片／视频／GIF＋文案。来源先发媒体、之后才补文案时，会在后续检查发现后转发；已转发的来源再编辑文案，会更新目标原贴。纯文字及禁止转发的内容会跳过。</p>
+                <p>保留原文换行、文字格式和自定义 Emoji 资料；正文链接改为本站，按钮统一为以下三项。来源的新文案版本会排队更新目标原贴，并回读核对文字、格式、表情及按钮。</p>
+                <ul className="cms-relay-links">
+                  <li><strong>Visit website</strong><a href="https://365freebonus.com/" target="_blank" rel="noopener noreferrer">https://365freebonus.com/</a></li>
+                  <li><strong>365 Free Bonus Official</strong><a href="https://t.me/join365freebonus" target="_blank" rel="noopener noreferrer">https://t.me/join365freebonus</a></li>
+                  <li><strong>NEED HELP?</strong><a href="https://t.me/FreeBonus365ChatBot" target="_blank" rel="noopener noreferrer">https://t.me/FreeBonus365ChatBot</a></li>
+                </ul>
+              </section>
+              <section>
+                <h3>来源与账号权限</h3>
+                <p>个人账号来源先重读原文，机器人来源按最新收到的编辑更新核对。已连接个人账号须具备频道编辑权限；带自定义 Emoji 的版本另须 Premium。无法确认权限、原媒体身份或编辑结果时显示等待核实，未知发送结果不会重新发送媒体。</p>
+                <p>来源群需允许机器人接收普通消息：将机器人设为管理员，或在 BotFather 关闭 Group Privacy。其他机器人发出的消息还可能需要开启 Bot-to-Bot Communication Mode。不要同时为此机器人使用其他 Webhook 或轮询接收服务。</p>
+                <p>个人账号会轮询已追踪的媒体，检测后补或修改的文案。已转发的来源持续保留观察；尚未转发的候选媒体每个来源保留最近 512 条、所有来源合计最多 4,096 条。未被追踪的历史媒体不会自动补发；Telegram 限流或队列忙碌时会延后检查。</p>
+              </section>
+              <section>
+                <h3>每日去重与计时</h3>
+                <p>按马来西亚日期（UTC+8）每天 00:00 重新计算媒体去重：同一天相同图片身份或内容会跳过，第二天新收到相同媒体可以再转发。文案相同不会单独去重，不同媒体仍可分别发送；未带文案的媒体暂不发送，后补文案仍须符合当天媒体去重。</p>
+                <p>当天记录在重新开启和重启后保留，历史消息不会在午夜自动重发；跨午夜仍在发送或结果未确认的请求会保留防重保护。系统会限速，并忽略自己的消息和目标群消息。观察结束不会改变下一条文案的发送时间。</p>
+              </section>
+            </div>
+          </details>
         </section>}
         {view === "all" && <TelegramPersonalAccount request={request} signInPath={signInPath} />}
         {["private", "updates", "followup"].includes(view) && <section className="cms-settings-panel" aria-labelledby="telegram-chat-connection-title">

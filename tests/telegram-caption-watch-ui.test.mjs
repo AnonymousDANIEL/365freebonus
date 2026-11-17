@@ -128,11 +128,12 @@ test('Telegram submenu views isolate settings and standalone source, keyword and
     updates: ['telegram-chat-connection-title', 'telegram-private-updates-title'],
     followup: ['telegram-chat-connection-title', 'telegram-followup-title'],
   };
+  const featurePanels = new Set(Object.values(panelIds).flat());
   try {
     await h.ready();
     for (const [view, expected] of Object.entries(panelIds)) {
       h.setView(view);
-      assert.deepEqual(h.nodes().filter(n => n.type === 'section').map(n => n.props['aria-labelledby']), expected, view);
+      assert.deepEqual(h.nodes().filter(n => n.type === 'section' && featurePanels.has(n.props['aria-labelledby'])).map(n => n.props['aria-labelledby']), expected, view);
       assert.ok(!h.nodes().some(n => n.type === './TelegramPersonalAccount' || n.type === './TelegramJoinGate'));
     }
     h.setView('sources');
@@ -200,5 +201,30 @@ test('private view saves only private preferences and its shared chatbot credent
     assert.equal(put.body.chatBot.privateEnabled, true);
     assert.equal(put.body.chatBot.privateStartMessage, 'Private welcome');
     assert.equal(h.field('@FreeBonus365ChatBot Token').props.value, '');
+  } finally { h.close(); }
+});
+
+test('relay refresh and a rejected save keep unsaved target and monitoring preferences for correction', async () => {
+  const h = harness(snapshot(), 'relay');
+  try {
+    await h.ready();
+    h.field('转发目标群组或频道').props.onChange({ target: { value: '@edited_target' } }); h.render();
+    h.field('观察并同步来源文案').props.onChange({ target: { checked: false } }); h.render();
+    const update = snapshot({ chatId: '@server_target' });
+    update.relay.captionWatch = { ...update.relay.captionWatch, lastCheckedAt: at, consistent: 1, pending: 0 };
+    h.setSnapshot(update); await h.poll();
+    assert.equal(h.field('转发目标群组或频道').props.value, '@edited_target');
+    assert.equal(h.field('观察并同步来源文案').props.checked, false);
+    assert.ok(h.calls.every(call => call.method === 'GET'), 'editing and polling must not save or post content');
+    h.setPut(() => { throw Error('目标权限暂时无法确认'); });
+    await h.form().props.onSubmit({ preventDefault() {} }); h.render();
+    const put = h.calls.find(call => call.method === 'PUT');
+    assert.equal(put.body.relay.chatId, '@edited_target');
+    assert.equal(put.body.relay.captionWatchEnabled, false);
+    assert.equal(put.body.relay.captionWatchIntervalSeconds, 30);
+    assert.ok(h.nodes().some(node => node.props?.notice?.message === '目标权限暂时无法确认' && node.props.notice.error), 'rejected save remains available to the existing error notice');
+    assert.equal(h.field('转发目标群组或频道').props.value, '@edited_target');
+    assert.equal(h.field('观察并同步来源文案').props.checked, false);
+    assert.ok(!h.calls.some(call => call.path.includes('send') || call.path.includes('publish')));
   } finally { h.close(); }
 });
