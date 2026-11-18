@@ -12,7 +12,7 @@ export function getDataDirectory(): string {
 function migrate(db: DatabaseSync) {
   if (migrated.has(db)) return;
   const readVersion = () => (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
-  if (readVersion() < 38) {
+  if (readVersion() < 39) {
     db.exec("BEGIN IMMEDIATE");
     try {
       // Read again inside the write lock, so concurrent process starts cannot
@@ -700,6 +700,12 @@ function migrate(db: DatabaseSync) {
           PRAGMA user_version=38;
         `);
       }
+      if (version < 39) db.exec(`
+        UPDATE telegram_relay_caption_watch_windows
+        SET expires_at=started_at+3600000
+        WHERE status='active' AND expires_at-started_at=1200000;
+        PRAGMA user_version=39;
+      `);
       db.exec("COMMIT");
     } catch (error) { db.exec("ROLLBACK"); throw error; }
   }
@@ -722,3 +728,4 @@ export function getSqlite(): DatabaseSync {
   databases.__directorySqlite.set(filename, db);
   return db;
 }
+
