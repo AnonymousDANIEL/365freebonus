@@ -42,8 +42,24 @@
 .cms-hot-source-heading strong > span { font-weight: 400; color: var(--cms-muted); font-size: .7rem; margin-left: .35rem; }
 .cms-hot-source-heading > span { font-size: .7rem; }
 .cms-hot-source-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .4rem; max-height: 320px; overflow: auto; padding: .1rem; }
-.cms-hot-workspace .cms-hot-source-option { display: flex; align-items: center; gap: .6rem; padding: .7rem; border: 1px solid var(--cms-line); border-radius: .45rem; cursor: pointer; }
-.cms-hot-source-option > input { width: auto; flex-shrink: 0; }
+.cms-hot-workspace .cms-hot-source-option {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: .6rem;
+  padding: .7rem;
+  border: 1px solid var(--cms-line);
+  border-radius: .45rem;
+  cursor: pointer;
+}
+.cms-hot-source-option > input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  accent-color: var(--cms-green);
+}
 .cms-hot-source-option > span { display: grid; gap: .1rem; min-width: 0; }
 .cms-hot-source-option strong, .cms-hot-source-option small { overflow-wrap: anywhere; }
 .cms-hot-source-option small { color: var(--cms-muted); font-size: .65rem; }
