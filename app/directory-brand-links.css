@@ -1,8 +1,6 @@
 .public-site .directory-seo-intro {
   max-width: 470px;
-  margin-top: 22px;
-  padding-left: 15px;
-  border-left: 2px solid color-mix(in srgb, var(--lime), transparent 45%);
+  margin: 22px auto 0;
 }
 
 .public-site .directory-seo-intro h2 {
@@ -49,10 +47,7 @@
 .public-site .faq-list p[hidden] { display: none; }
 
 @media (max-width: 640px) {
-  .public-site .directory-seo-intro {
-    margin-top: 18px;
-    padding-left: 12px;
-  }
+  .public-site .directory-seo-intro { margin-top: 18px; }
   .public-site .directory-seo-intro h2 { font-size: 14px; }
   .public-site .directory-seo-intro p { font-size: 11px; }
 }
