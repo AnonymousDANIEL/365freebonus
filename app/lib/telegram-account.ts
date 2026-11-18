@@ -12,6 +12,7 @@ type AccountRow = {
   generation: string; config_ciphertext: string; session_ciphertext: string; pending_ciphertext: string;
   pending_until: number; stage: Stage; lease_id: string; lease_until: number; next_attempt_at: number;
   last_error: string; last_polled_at: number; synced_at: number; poll_source_id: number; next_code_at: number;
+  refresh_requested_at: number;
 };
 type SourceRow = {
   chat_id: number; title: string; username: string; peer_ciphertext: string; selected: number;
@@ -68,6 +69,7 @@ export function ensureTelegramAccountTables(db = getSqlite()) {
       lease_id TEXT NOT NULL DEFAULT '', lease_until INTEGER NOT NULL DEFAULT 0,
       next_attempt_at INTEGER NOT NULL DEFAULT 0, next_code_at INTEGER NOT NULL DEFAULT 0, last_error TEXT NOT NULL DEFAULT '',
       last_polled_at INTEGER NOT NULL DEFAULT 0, synced_at INTEGER NOT NULL DEFAULT 0,
+      refresh_requested_at INTEGER NOT NULL DEFAULT 0,
       poll_source_id INTEGER NOT NULL DEFAULT 0
     );
     INSERT OR IGNORE INTO telegram_personal_account(id) VALUES('primary');
@@ -78,7 +80,9 @@ export function ensureTelegramAccountTables(db = getSqlite()) {
       last_message_id INTEGER NOT NULL DEFAULT 0, blocked INTEGER NOT NULL DEFAULT 0 CHECK(blocked IN (0,1))
     );`);
     if (!(db.prepare("PRAGMA table_info(telegram_personal_sources)").all() as { name: string }[]).some(column => column.name === "blocked")) db.exec("ALTER TABLE telegram_personal_sources ADD COLUMN blocked INTEGER NOT NULL DEFAULT 0 CHECK(blocked IN (0,1))");
-    if (!(db.prepare("PRAGMA table_info(telegram_personal_account)").all() as { name: string }[]).some(column => column.name === "next_code_at")) db.exec("ALTER TABLE telegram_personal_account ADD COLUMN next_code_at INTEGER NOT NULL DEFAULT 0");
+    const accountColumns = db.prepare("PRAGMA table_info(telegram_personal_account)").all() as { name: string }[];
+    if (!accountColumns.some(column => column.name === "next_code_at")) db.exec("ALTER TABLE telegram_personal_account ADD COLUMN next_code_at INTEGER NOT NULL DEFAULT 0");
+    if (!accountColumns.some(column => column.name === "refresh_requested_at")) db.exec("ALTER TABLE telegram_personal_account ADD COLUMN refresh_requested_at INTEGER NOT NULL DEFAULT 0");
     db.exec("RELEASE telegram_personal_schema");
     initialized.add(db);
   } catch (error) {
@@ -146,11 +150,20 @@ export function accountStatus() {
     lastError: expired ? PENDING_ERROR : current.last_error,
     lastPolledAt: current.last_polled_at || null,
     syncedAt: current.synced_at || null,
+    refreshPending: current.stage === "connected" && current.refresh_requested_at > 0,
     retryAt: retryAt > Date.now() ? retryAt : null,
     retrySource: retryAt > Date.now() ? (/^Telegram 正在限制请求频率/.test(current.last_error) ? "telegram" as const : "connection" as const) : null,
     channels: (db.prepare("SELECT chat_id,title,username,selected,joined FROM telegram_personal_sources WHERE joined=1 OR selected=1 ORDER BY title COLLATE NOCASE,chat_id").all() as SourceRow[])
       .map(source => ({ id: String(source.chat_id), title: source.title, username: source.username, selected: source.selected === 1, joined: source.joined === 1 })),
   };
+}
+
+function requireNoAccountBackoff(current: AccountRow, now: number) {
+  if (current.next_attempt_at <= now) return;
+  const seconds = Math.max(1, Math.ceil((current.next_attempt_at - now) / 1000));
+  const explanation = /^Telegram 正在限制请求频率/.test(current.last_error)
+    ? "Telegram 正在限制请求频率" : "上次操作未完成，系统正在等待重试";
+  throw new TelegramAccountError(`${explanation}，请在 ${seconds} 秒后再试。`, 429);
 }
 
 function claimAccount(db: DatabaseSync, now: number, options: {
@@ -160,14 +173,10 @@ function claimAccount(db: DatabaseSync, now: number, options: {
     const current = row(db);
     if (options.connected && (current.stage !== "connected" || !current.session_ciphertext)) throw new TelegramAccountError(REAUTH_ERROR, 409);
     if (current.lease_until > now) throw new TelegramAccountError(BUSY_ERROR, 409);
-    if (options.respectBackoff && current.next_attempt_at > now) {
-      const seconds = Math.max(1, Math.ceil((current.next_attempt_at - now) / 1000));
-      const explanation = /^Telegram 正在限制请求频率/.test(current.last_error)
-        ? "Telegram 正在限制请求频率" : "上次操作未完成，系统正在等待重试";
-      throw new TelegramAccountError(`${explanation}，请在 ${seconds} 秒后再试。`, 429);
-    }
-    // Only short-lived background work yields. Owner actions remain available,
-    // and caption workers still obey the real lease and Telegram wait above.
+    if (options.respectBackoff) requireNoAccountBackoff(current, now);
+    // Let the owner-requested channel list take one turn ahead of new background
+    // claims without interrupting work that already holds the account lease.
+    if (current.refresh_requested_at > 0 && (options.purpose === "background" || options.purpose === "caption")) return null;
     if (options.purpose === "background" && captionWatchAccountPriority(db, now)) return null;
     const leaseId = randomUUID();
     db.prepare("UPDATE telegram_personal_account SET lease_id=?,lease_until=? WHERE id='primary'").run(leaseId, now + LEASE_MS);
@@ -226,7 +235,7 @@ function recordFailure(db: DatabaseSync, claim: Claim, error: unknown, operation
     db.prepare("UPDATE telegram_personal_account SET last_error=?,next_attempt_at=MAX(next_attempt_at,?) WHERE id='primary' AND lease_id=?")
       .run(safe.message, Math.min(Number.MAX_SAFE_INTEGER, Date.now() + safe.delay), claim.leaseId);
     if (safe.revoked) {
-      db.prepare("UPDATE telegram_personal_account SET stage='disconnected',session_ciphertext='',pending_ciphertext='',pending_until=0,generation=? WHERE id='primary' AND lease_id=?")
+      db.prepare("UPDATE telegram_personal_account SET stage='disconnected',session_ciphertext='',pending_ciphertext='',pending_until=0,refresh_requested_at=0,generation=? WHERE id='primary' AND lease_id=?")
         .run(randomUUID(), claim.leaseId);
       db.prepare("UPDATE telegram_personal_sources SET selected=0,joined=0").run();
       cancelSourceQueue(db);
@@ -292,6 +301,7 @@ async function completeLogin(db: DatabaseSync, claim: Claim, client: TelegramCli
 type DiscoveredChannel = { id: number; title: string; username: string; peer: string; latest: number; blocked: boolean };
 async function refreshChannels(db: DatabaseSync, claim: Claim, client: TelegramClient) {
   renew(db, claim);
+  const requestedAt = row(db).refresh_requested_at;
   const channels = await bounded(client, (async () => {
     const found: DiscoveredChannel[] = [];
     for await (const dialog of client.iterDialogs({})) {
@@ -322,7 +332,9 @@ async function refreshChannels(db: DatabaseSync, claim: Claim, client: TelegramC
       cancelSourceQueue(db, source.chat_id);
     }
     saveSession(db, claim, client);
-    db.prepare("UPDATE telegram_personal_account SET synced_at=? WHERE id='primary' AND lease_id=?").run(Date.now(), claim.leaseId);
+    db.prepare(`UPDATE telegram_personal_account SET synced_at=MAX(synced_at+1,?),
+      refresh_requested_at=CASE WHEN refresh_requested_at=? THEN 0 ELSE refresh_requested_at END
+      WHERE id='primary' AND lease_id=?`).run(Date.now(), requestedAt, claim.leaseId);
   });
   return new Map(channels.map(channel => [channel.id, channel.latest]));
 }
@@ -362,12 +374,24 @@ async function selectChannels(db: DatabaseSync, claim: Claim, client: TelegramCl
 export async function handleAccountAction(input: TelegramAccountAction) {
   const db = getSqlite();
   ensureTelegramAccountTables(db);
+  if (input.action === "refresh") {
+    transaction(db, () => {
+      const now = Date.now();
+      const queued = db.prepare(`UPDATE telegram_personal_account SET refresh_requested_at=COALESCE(NULLIF(refresh_requested_at,0),?)
+        WHERE id='primary' AND stage='connected' AND session_ciphertext<>'' AND next_attempt_at<=?`).run(now, now);
+      if (queued.changes) return;
+      const current = row(db);
+      if (current.stage !== "connected" || !current.session_ciphertext) throw new TelegramAccountError(REAUTH_ERROR, 409);
+      requireNoAccountBackoff(current, now);
+    });
+    return accountStatus();
+  }
   if (input.action === "disconnect") {
     const previous = row(db);
     transaction(db, () => {
       db.prepare(`UPDATE telegram_personal_account SET generation=?,stage='disconnected',session_ciphertext='',
         config_ciphertext='',pending_ciphertext='',pending_until=0,lease_id='',lease_until=0,
-        last_error='',last_polled_at=0,synced_at=0,poll_source_id=0 WHERE id='primary'`).run(randomUUID());
+        last_error='',last_polled_at=0,synced_at=0,refresh_requested_at=0,poll_source_id=0 WHERE id='primary'`).run(randomUUID());
       db.prepare("DELETE FROM telegram_personal_sources").run();
       cancelSourceQueue(db);
     });
@@ -386,7 +410,7 @@ export async function handleAccountAction(input: TelegramAccountAction) {
     } finally { await closeClient(client); }
     return accountStatus();
   }
-  const claim = claimAccount(db, Date.now(), { connected: input.action === "refresh" || input.action === "select", respectBackoff: true });
+  const claim = claimAccount(db, Date.now(), { connected: input.action === "select", respectBackoff: true });
   let client: TelegramClient | undefined;
   try {
     if (input.action === "sendCode") {
@@ -405,7 +429,7 @@ export async function handleAccountAction(input: TelegramAccountAction) {
       const pending: PendingLogin = { ...credentials, phone: input.phone, phoneCodeHash: sent.phoneCodeHash, session: String(client.session.save()) };
       transaction(db, () => {
         db.prepare(`UPDATE telegram_personal_account SET config_ciphertext=?,pending_ciphertext=?,pending_until=?,
-          session_ciphertext='',stage='code',last_error='',next_attempt_at=0,generation=? WHERE id='primary' AND lease_id=?`)
+          session_ciphertext='',stage='code',last_error='',next_attempt_at=0,refresh_requested_at=0,generation=? WHERE id='primary' AND lease_id=?`)
           .run(seal(credentials), seal(pending), Date.now() + LOGIN_MS, randomUUID(), claim.leaseId);
       });
     } else if (input.action === "code" || input.action === "password") {
@@ -437,8 +461,7 @@ export async function handleAccountAction(input: TelegramAccountAction) {
     } else {
       client = makeClient(unseal<Credentials>(claim.row.config_ciphertext), unseal<string>(claim.row.session_ciphertext));
       await bounded(client, client.connect());
-      if (input.action === "refresh") await refreshChannels(db, claim, client);
-      else await selectChannels(db, claim, client, input.channelIds);
+      await selectChannels(db, claim, client, input.channelIds);
     }
     return accountStatus();
   } catch (error) { throw recordFailure(db, claim, error, input.action); }
@@ -1024,7 +1047,9 @@ async function runVerifiedRelayCaptionWithAccount(input: VerifiedCaptionInput,
     const state = error instanceof TelegramAccountError && error.status === 429 ? "backoff"
       : error instanceof TelegramAccountError && error.message === BUSY_ERROR ? "busy"
       : error instanceof TelegramAccountError && error.message === REAUTH_ERROR ? "disconnected" : "unavailable";
-    const latest = row(db), retryAt = state === "busy" ? latest.lease_until : state === "backoff" ? latest.next_attempt_at : 0;
+    const latest = row(db), retryAt = state === "busy"
+      ? Math.max(latest.lease_until, latest.refresh_requested_at > 0 ? Date.now() + POLL_MS : 0)
+      : state === "backoff" ? latest.next_attempt_at : 0;
     return { state, attempted: false, outcome: "unavailable", ...(retryAt > Date.now() ? { retryAt } : {}) };
   }
   const deadline = Date.now() + 40_000;
@@ -1579,6 +1604,9 @@ export async function refreshRelayCaptionSourceWithAccount(input: {
   try { claim = claimAccount(db, now, { connected: true, respectBackoff: true, purpose: "caption" }); }
   catch {
     const latest = row(db), retryAt = Math.max(latest.lease_until, latest.next_attempt_at, Date.now() + 5000);
+    if (latest.refresh_requested_at > 0 && latest.next_attempt_at <= Date.now()) {
+      return { state: "busy", reason: "source_busy", retryAt: Math.max(retryAt, Date.now() + POLL_MS) };
+    }
     return { state: latest.lease_until > Date.now() ? "busy" : latest.next_attempt_at > Date.now() ? "backoff" : "unavailable", reason: "source_unavailable", retryAt };
   }
   const deadline = Date.now() + 40_000;
@@ -1654,11 +1682,33 @@ export async function refreshRelayCaptionSourceWithAccount(input: {
   } finally { release(db, claim); await closeClient(client, Math.max(1, Math.min(2000, deadline - Date.now()))); }
 }
 
+async function pollRequestedChannelList(db: DatabaseSync) {
+  const claim = claimAccount(db, Date.now(), { connected: true, respectBackoff: true });
+  let client: TelegramClient | undefined;
+  try {
+    // Another replica may have satisfied this request before we obtained the lease.
+    if (!claim.row.refresh_requested_at) return;
+    client = makeClient(unseal<Credentials>(claim.row.config_ciphertext), unseal<string>(claim.row.session_ciphertext));
+    await bounded(client, client.connect());
+    await refreshChannels(db, claim, client);
+  } catch (error) {
+    const failure = recordFailure(db, claim, error, "refresh");
+    // Keep Telegram's explicit retry schedule. A failed manual list request
+    // must not keep taking all future account leases from receive or captions.
+    if (failure.status !== 429 && owns(db, claim)) db.prepare(`UPDATE telegram_personal_account SET refresh_requested_at=0
+      WHERE id='primary' AND lease_id=? AND refresh_requested_at=?`).run(claim.leaseId, claim.row.refresh_requested_at);
+  } finally {
+    await closeClient(client);
+    release(db, claim);
+  }
+}
+
 /** Catch up from per-channel durable cursors; new selections start at the latest message. */
 export async function pollTelegramAccountOnce() {
   const db = getSqlite();
   const current = row(db);
   if (current.stage !== "connected" || !current.session_ciphertext || current.next_attempt_at > Date.now() || current.lease_until > Date.now()) return;
+  if (current.refresh_requested_at > 0) return pollRequestedChannelList(db);
   const relay = db.prepare("SELECT relay_enabled,relay_revision,relay_started_at,relay_caption_watch_enabled,relay_caption_watch_interval_seconds,relay_caption_serial_enabled FROM telegram_promotion_settings WHERE id='primary'").get() as { relay_enabled: number; relay_revision: string; relay_started_at: number; relay_caption_watch_enabled: number; relay_caption_watch_interval_seconds: number; relay_caption_serial_enabled: number } | undefined;
   const target = db.prepare("SELECT target_chat_id,ready_until,bot_id,revision FROM telegram_relay_state WHERE id='primary'").get() as { target_chat_id: number; ready_until: number; bot_id: number; revision: string } | undefined;
   const ready = relay?.relay_enabled === 1 && target && target.ready_until > Date.now() && target.revision === relay.relay_revision && target.target_chat_id < 0;

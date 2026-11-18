@@ -21,6 +21,54 @@
 .cms-shell .cms-telegram-source-heading > small { font-size: 11px; color: var(--cms-muted); }
 .cms-shell .cms-telegram-source-count { display: inline-grid; place-items: center; min-width: 26px; padding: 2px 7px; border-radius: 5px; background: var(--cms-neutral-bg); color: var(--cms-text); font-size: 12px; font-variant-numeric: tabular-nums; }
 .cms-shell .cms-telegram-source-selected .cms-telegram-source-count { background: var(--cms-action); color: #302417; }
+.cms-shell .cms-telegram-source-refresh { color: var(--cms-muted); }
+.cms-shell .cms-telegram-source-search { display: grid; gap: 7px; min-width: 0; }
+.cms-shell .cms-telegram-source-search label { color: var(--cms-text); font-size: 11px; font-weight: 600; }
+.cms-shell .cms-telegram-source-search-field {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  min-height: 44px;
+  padding: 0 8px 0 12px;
+  border: 1px solid var(--cms-line);
+  border-radius: 8px;
+  background: var(--cms-panel);
+  color: var(--cms-muted);
+}
+.cms-shell .cms-telegram-source-search-field:focus-within {
+  border-color: var(--cms-green);
+  box-shadow: 0 0 0 2px var(--cms-accent-bg);
+}
+.cms-shell .cms-telegram-source-search-field > svg { flex: none; }
+.cms-shell .cms-telegram-source-search .cms-telegram-source-search-field input[type="search"] {
+  appearance: none;
+  flex: 1;
+  min-width: 0;
+  min-height: 42px;
+  padding: 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--cms-text);
+  font-size: 12px;
+}
+.cms-shell .cms-telegram-source-search-field input[type="search"]::placeholder { color: var(--cms-muted); opacity: 1; }
+.cms-shell .cms-telegram-source-search-field input[type="search"]::-webkit-search-cancel-button { appearance: none; }
+.cms-shell .cms-telegram-source-search-field button {
+  display: grid;
+  flex: 0 0 32px;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border-radius: 6px;
+  color: var(--cms-muted);
+}
+.cms-shell .cms-telegram-source-search-field button:hover,
+.cms-shell .cms-telegram-source-search-field button:focus-visible { background: var(--cms-neutral-bg); color: var(--cms-text); }
+.cms-shell .cms-telegram-source-search-results { color: var(--cms-muted); font-size: 11px; }
+.cms-shell .cms-telegram-source-search-results:empty { display: none; }
 .cms-shell .cms-settings-panel p.cms-telegram-source-help { max-width: none; margin: 0; }
 .cms-shell .cms-telegram-channel-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); align-content: start; gap: 8px; border: 0; border-radius: 0; background: transparent; padding: 2px; max-height: 380px; scrollbar-gutter: stable; }
 .cms-shell .cms-telegram-channel-cards label.cms-telegram-channel { border: 1px solid var(--cms-line); border-radius: 8px; background: var(--cms-panel); min-width: 0; }
@@ -37,4 +85,5 @@
 @media (max-width: 600px) {
   .cms-shell .cms-telegram-account-grid, .cms-shell .cms-telegram-channel-cards { grid-template-columns: 1fr; }
   .cms-shell .cms-telegram-source-section { padding: 14px; }
+  .cms-shell .cms-telegram-source-search .cms-telegram-source-search-field input[type="search"] { font-size: 16px; }
 }

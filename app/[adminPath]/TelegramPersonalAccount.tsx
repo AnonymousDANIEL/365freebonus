@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Check, LoaderCircle, RefreshCw } from "lucide-react";
+import { Check, LoaderCircle, RefreshCw, Search, X } from "lucide-react";
 import "./telegram-account-admin.css";
 
 type Channel = { id: string; title: string; username: string; selected: boolean; joined: boolean };
@@ -12,6 +12,7 @@ type AccountStatus = {
   lastError: string;
   lastPolledAt: number | null;
   syncedAt: number | null;
+  refreshPending?: boolean;
   retryAt?: number | null;
   retrySource?: "telegram" | "connection" | null;
   channels: Channel[];
@@ -20,10 +21,12 @@ type AdminRequest = <T>(path: string, method?: string, body?: unknown) => Promis
 type Props = { request: AdminRequest; signInPath: string };
 type Notice = { message: string; error?: boolean; sessionExpired?: boolean };
 const endpoint = "/api/admin/telegram/account";
+const publicChannelLink = /^(?:https?:\/\/)?(?:www\.)?(?:t\.me|telegram\.me)\/(?:s\/)?([a-z0-9_]+)(?:[/?#]|$)/;
 const myt = new Intl.DateTimeFormat("zh-CN", {
   timeZone: "Asia/Kuala_Lumpur", year: "numeric", month: "2-digit", day: "2-digit",
   hour: "2-digit", minute: "2-digit", hourCycle: "h23",
 });
+const normalizeSearch = (value: string) => value.normalize("NFKC").trim().toLowerCase();
 
 export default function TelegramPersonalAccount({ request, signInPath }: Props) {
   const [status, setStatus] = useState<AccountStatus | null>(null);
@@ -41,15 +44,25 @@ export default function TelegramPersonalAccount({ request, signInPath }: Props) 
   const [clock, setClock] = useState(() => Date.now());
   const dirtyRef = useRef(false);
   const busyRef = useRef(false);
+  const reading = useRef(false);
+  const requestedRefresh = useRef<{ syncedAt: number } | null>(null);
   const requestVersion = useRef(0);
   const alive = useRef(false);
   const focusChannel = useRef<string | null>(null);
+  const searchInput = useRef<HTMLInputElement>(null);
+  const availableList = useRef<HTMLDivElement>(null);
   const requestRef = useRef(request);
   requestRef.current = request;
+  const refreshing = status?.refreshPending === true;
 
   function accept(value: AccountStatus, force = false) {
     setStatus(value);
     setClock(Date.now());
+    const refresh = requestedRefresh.current;
+    if (refresh && !value.refreshPending) {
+      requestedRefresh.current = null;
+      if (value.connected && !value.lastError && (value.syncedAt ?? 0) > refresh.syncedAt) setNotice({ message: "频道列表已更新。" });
+    }
     if (value.connected || value.stage !== "disconnected") setApiHash("");
     if (force || !dirtyRef.current) {
       setSelected(value.channels.filter(channel => channel.selected && channel.joined).map(channel => channel.id));
@@ -63,21 +76,33 @@ export default function TelegramPersonalAccount({ request, signInPath }: Props) 
       sessionExpired: error instanceof Error && "status" in error && error.status === 401 });
   }
 
+  async function load(first = false) {
+    if (busyRef.current || reading.current) return;
+    reading.current = true;
+    const version = requestVersion.current;
+    try {
+      const value = await requestRef.current<AccountStatus>(endpoint);
+      if (alive.current && version === requestVersion.current && !busyRef.current) accept(value);
+    } catch (error) {
+      if (alive.current && version === requestVersion.current && first) showError(error);
+    } finally {
+      reading.current = false;
+      if (alive.current && first) setLoading(false);
+    }
+  }
+
   useEffect(() => {
     alive.current = true;
-    const load = async (first = false) => {
-      if (busyRef.current) return;
-      const version = requestVersion.current;
-      try {
-        const value = await requestRef.current<AccountStatus>(endpoint);
-        if (alive.current && version === requestVersion.current && !busyRef.current) accept(value);
-      } catch (error) { if (alive.current && first) showError(error); }
-      finally { if (alive.current && first) setLoading(false); }
-    };
     void load(true);
-    const timer = setInterval(() => { if (document.visibilityState === "visible") void load(); }, 30_000);
-    return () => { alive.current = false; clearInterval(timer); };
+    return () => { alive.current = false; };
   }, []);
+
+  useEffect(() => {
+    const poll = () => { if (document.visibilityState === "visible") void load(); };
+    const timer = setInterval(poll, refreshing ? 2_000 : 30_000);
+    document.addEventListener("visibilitychange", poll);
+    return () => { clearInterval(timer); document.removeEventListener("visibilitychange", poll); };
+  }, [refreshing]);
 
   useEffect(() => {
     const timer = setInterval(() => setClock(Date.now()), 1_000);
@@ -92,7 +117,7 @@ export default function TelegramPersonalAccount({ request, signInPath }: Props) 
     focusChannel.current = null;
   }, [selected]);
 
-  async function act(body: Record<string, unknown>, message: string, forceSelection = false) {
+  async function act(body: Record<string, unknown>, message?: string, forceSelection = false) {
     if (busyRef.current) return;
     busyRef.current = true;
     const version = ++requestVersion.current;
@@ -101,9 +126,10 @@ export default function TelegramPersonalAccount({ request, signInPath }: Props) 
     try {
       const value = await requestRef.current<AccountStatus>(endpoint, "POST", body);
       if (!alive.current) return;
+      if (body.action === "refresh") requestedRefresh.current = { syncedAt: status?.syncedAt ?? 0 };
       accept(value, forceSelection);
       if (body.action === "sendCode" || body.action === "disconnect") { setApiId(""); setApiHash(""); setPhone(""); }
-      setNotice({ message });
+      if (message) setNotice({ message });
     } catch (error) {
       if (alive.current) showError(error);
       // This reads local saved state only; it never requests another login code.
@@ -139,12 +165,26 @@ export default function TelegramPersonalAccount({ request, signInPath }: Props) 
     setSelected(previous => checked ? [...new Set([...previous, id])] : previous.filter(value => value !== id));
   }
 
-  const search = query.trim().toLocaleLowerCase();
+  function updateQuery(value: string) {
+    setQuery(value);
+    if (availableList.current) availableList.current.scrollTop = 0;
+  }
+
+  function clearSearch() {
+    updateQuery("");
+    searchInput.current?.focus();
+  }
+
+  const search = normalizeSearch(query);
+  const terms = (publicChannelLink.exec(search)?.[1] ?? search).split(/\s+/).map(term => term.replace(/^@+/, "")).filter(Boolean);
   const selectedIds = new Set(selected);
   const joinedChannels = (status?.channels ?? []).filter(channel => channel.joined);
   const selectedChannels = joinedChannels.filter(channel => selectedIds.has(channel.id));
   const availableChannels = joinedChannels.filter(channel => !selectedIds.has(channel.id));
-  const matchingChannels = availableChannels.filter(channel => !search || `${channel.title} ${channel.username}`.toLocaleLowerCase().includes(search));
+  const matchingChannels = terms.length ? availableChannels.filter(channel => {
+    const searchable = normalizeSearch(`${channel.title} ${channel.username}`);
+    return terms.every(term => searchable.includes(term));
+  }) : availableChannels;
   const leftChannels = (status?.channels ?? []).filter(channel => !channel.joined);
   const selectedCount = selectedChannels.length;
   const savedCount = joinedChannels.filter(channel => channel.selected).length;
@@ -206,9 +246,12 @@ export default function TelegramPersonalAccount({ request, signInPath }: Props) 
           </>}
           {status.connected && <>
             <div className="cms-telegram-account-actions">
-              <button type="button" className="cms-secondary" disabled={waiting} onClick={() => void act({ action: "refresh" }, "频道列表已更新。") }><RefreshCw size={15} />刷新频道列表</button>
+              <button type="button" className="cms-secondary" disabled={waiting || refreshing} onClick={() => { if (!refreshing) void act({ action: "refresh" }); }}>
+                <RefreshCw size={15} className={refreshing ? "cms-spin" : undefined} />{refreshing ? "正在刷新频道列表…" : "刷新频道列表"}
+              </button>
               <button type="button" className="cms-secondary" onClick={() => void act({ action: "disconnect" }, "个人账号已断开，已停止读取来源频道。", true)}>断开个人账号</button>
             </div>
+            {refreshing && <small className="cms-telegram-source-refresh" role="status">列表正在后台同步，可以继续搜索及勾选频道。</small>}
             <small>你的账号加入新频道后会自动更新列表；只有勾选并保存的频道才会转发。首次勾选从保存后的新消息开始，不补发历史内容。</small>
             <section className="cms-telegram-source-section cms-telegram-source-selected" aria-labelledby="telegram-selected-sources-title">
               <div className="cms-telegram-source-heading">
@@ -227,19 +270,28 @@ export default function TelegramPersonalAccount({ request, signInPath }: Props) 
               </div>
             </section>
             <div className="cms-telegram-account-actions cms-telegram-source-save">
-              <button type="button" className="cms-primary" disabled={waiting || !dirty} onClick={() => void act({ action: "select", channelIds: selected.filter(id => status.channels.some(channel => channel.id === id && channel.joined)) }, "来源频道选择已保存。", true)}><Check size={15} />保存来源频道</button>
-              <small role="status">当前勾选 {selectedCount} 个频道{dirty ? " · 尚未保存" : " · 已保存"}</small>
+              <button type="button" className="cms-primary" disabled={waiting || refreshing || !dirty} onClick={() => void act({ action: "select", channelIds: selected.filter(id => status.channels.some(channel => channel.id === id && channel.joined)) }, "来源频道选择已保存。", true)}><Check size={15} />保存来源频道</button>
+              <small role="status">当前勾选 {selectedCount} 个频道{dirty ? refreshing ? " · 列表同步后可保存" : " · 尚未保存" : " · 已保存"}</small>
             </div>
             <section className="cms-telegram-source-section" aria-labelledby="telegram-available-sources-title">
               <div className="cms-telegram-source-heading">
                 <h3 id="telegram-available-sources-title">未勾选频道 <span className="cms-telegram-source-count">{availableChannels.length}</span></h3>
                 <small>勾选后会显示在上方</small>
               </div>
-              <label>搜索未勾选的频道
-                <input id="telegram-source-search" type="search" autoComplete="off" maxLength={100} value={query} onChange={event => setQuery(event.target.value)} placeholder="频道名称或用户名" />
-              </label>
-              {search && <small role="status">找到 {matchingChannels.length} 个 · 未勾选共 {availableChannels.length} 个</small>}
-              <div className="cms-telegram-channel-list cms-telegram-channel-cards" aria-label="未勾选的来源频道">
+              <div className="cms-telegram-source-search">
+                <label htmlFor="telegram-source-search">搜索未勾选的频道</label>
+                <div className="cms-telegram-source-search-field">
+                  <Search size={16} aria-hidden="true" />
+                  <input ref={searchInput} id="telegram-source-search" type="search" autoComplete="off" spellCheck={false} maxLength={100}
+                    value={query} onChange={event => updateQuery(event.target.value)} placeholder="输入频道名称、@用户名或公开链接"
+                    onKeyDown={event => { if (event.key === "Escape" && query) { event.preventDefault(); clearSearch(); } }} />
+                  {query && <button type="button" aria-label="清除频道搜索" title="清除频道搜索" onClick={clearSearch}><X size={16} aria-hidden="true" /></button>}
+                </div>
+                <small role="status" className="cms-telegram-source-search-results">
+                  {search ? `找到 ${matchingChannels.length} 个 · 未勾选共 ${availableChannels.length} 个` : ""}
+                </small>
+              </div>
+              <div ref={availableList} className="cms-telegram-channel-list cms-telegram-channel-cards" aria-label="未勾选的来源频道">
                 {matchingChannels.length === 0 ? <p className="cms-telegram-account-empty">{search ? "没有找到匹配的频道。" : joinedChannels.length === 0 ? "尚未识别到你已加入的频道。加入后点击刷新频道列表。" : "已加入的频道都已勾选。"}</p> :
                   matchingChannels.map(channel => <label className="cms-telegram-channel" key={channel.id}>
                     <input id={`telegram-source-${channel.id}`} type="checkbox" checked={false}

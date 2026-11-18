@@ -40,7 +40,7 @@ MessageEntityCustomEmoji,MessageEntityBold,MessageEntityItalic,MessageEntityUnde
 exports.utils={getPeerId:entity=>'-100'+(entity.channelId||entity.id)};
 exports.Logger=class {setLevel(){};};
 exports.state={};
-exports.reset=()=>Object.assign(exports.state,{calls:[],dialogs:[],messages:[],error:null,passwordNeeded:false,media:Buffer.from('fixture-image'),targetVisualHash:'',consume:true,queue:[],observations:[],onObserve:null,onDownload:null,onEnqueue:null,me:null,ownedBots:[],onOwnedBots:null,resolvedTarget:null,onEntity:null,onGetMessages:null,onGetMe:null,onEdit:null,applyEdit:true});
+exports.reset=()=>Object.assign(exports.state,{calls:[],dialogs:[],messages:[],error:null,passwordNeeded:false,media:Buffer.from('fixture-image'),targetVisualHash:'',consume:true,queue:[],observations:[],onObserve:null,onDownload:null,onEnqueue:null,me:null,ownedBots:[],onOwnedBots:null,resolvedTarget:null,onDialogs:null,onEntity:null,onGetMessages:null,onGetMe:null,onEdit:null,applyEdit:true});
 exports.reset();
 function fail(method){const e=exports.state.error;if(e&&e.method===method)throw Object.assign(new Error('PRIVATE RAW DETAIL'),e);}
 exports.TelegramClient=class {
@@ -57,7 +57,7 @@ exports.TelegramClient=class {
     return {};}
   async signInWithPassword(_creds,params){exports.state.calls.push({method:'password'});await params.password();fail('password');return new User();}
   async getMe(){exports.state.calls.push({method:'getMe'});fail('getMe');if(exports.state.onGetMe)await exports.state.onGetMe();return exports.state.me||new User();}
-  iterDialogs(){fail('dialogs');return (async function*(){for(const dialog of exports.state.dialogs)yield dialog;})();}
+  iterDialogs(){exports.state.calls.push({method:'dialogs'});fail('dialogs');return (async function*(){if(exports.state.onDialogs)await exports.state.onDialogs();for(const dialog of exports.state.dialogs)yield dialog;})();}
   async getEntity(peer){exports.state.calls.push({method:'entity',peer});fail('entity');if(exports.state.onEntity)await exports.state.onEntity();return typeof peer==='string'?exports.state.resolvedTarget:exports.state.dialogs.find(d=>String(d.entity.id)===peer.channelId.toString())?.entity;}
   async getMessages(peer,params){exports.state.calls.push({method:'getMessages',peer,params});fail('getMessages');if(exports.state.onGetMessages)await exports.state.onGetMessages();return exports.state.messages.filter(message=>params.ids.includes(message.id));}
   iterMessages(peer,params){exports.state.calls.push({method:'history',peer:peer.channelId.toString(),params});fail('history');
@@ -110,6 +110,12 @@ async function login() {
   return await account.handleAccountAction({action:'code',code:'12345'});
 }
 async function select(ids=[String(source)]) { return await account.handleAccountAction({action:'select',channelIds:ids}); }
+async function refresh() {
+  const queued=await account.handleAccountAction({action:'refresh'});
+  assert.equal(queued.refreshPending,true);
+  await account.pollTelegramAccountOnce();
+  return account.accountStatus();
+}
 function ready() {
   db().prepare(`INSERT INTO telegram_promotion_settings(id,enabled,chat_id,token_ciphertext,relay_enabled,relay_revision,relay_started_at,relay_caption_serial_enabled)
     VALUES('primary',0,'','fixture',1,'relay-generation',?,0)`).run(Date.now()-10000);
@@ -256,7 +262,10 @@ test('long Telegram flood wait blocks refresh, selection and relogin without sho
   await login();
   telegram.state.error={method:'dialogs',errorMessage:'FLOOD_WAIT_200000',seconds:200000};
   const before=Date.now();
-  await assert.rejects(account.handleAccountAction({action:'refresh'}),error=>error.status===429&&!error.message.includes('PRIVATE'));
+  const result=await refresh();
+  assert.equal(result.refreshPending,true);
+  assert.equal(result.retrySource,'telegram');
+  assert.doesNotMatch(result.lastError,/PRIVATE/);
   const until=stored().next_attempt_at;
   assert.ok(until>=before+200000000);
   telegram.state.error=null;
@@ -266,9 +275,98 @@ test('long Telegram flood wait blocks refresh, selection and relogin without sho
   assert.equal(stored().next_attempt_at,until);
   assert.equal(telegram.state.calls.length,calls);
   await account.handleAccountAction({action:'disconnect'});
+  assert.equal(stored().refresh_requested_at,0);
   assert.equal(stored().next_attempt_at,until);
   await assert.rejects(sendCode(),error=>error.status===429);
   assert.equal(telegram.state.calls.length,calls,'remote logout must also respect flood wait');
+});
+
+test('manual channel refresh queues through a live receive lease and coalesces across database reopen',async t=>{
+  let now=Date.now();
+  t.mock.method(Date,'now',()=>now);
+  await login();await select();ready();
+  const old=account.accountStatus(),previous=stored();
+  db().prepare("UPDATE telegram_personal_sources SET last_message_id=97 WHERE chat_id=?").run(source);
+  db().prepare("UPDATE telegram_personal_account SET lease_id='receive-owner',lease_until=?").run(now+60000);
+  telegram.state.calls=[];
+  telegram.state.dialogs.push(channel(1003));
+  const first=await account.handleAccountAction({action:'refresh'});
+  assert.equal(first.connected,true);
+  assert.equal(first.refreshPending,true);
+  assert.equal(first.syncedAt,old.syncedAt);
+  assert.deepEqual(first.channels,old.channels);
+  const queued=stored().refresh_requested_at;
+  now+=1000;
+  await account.handleAccountAction({action:'refresh'});
+  assert.equal(stored().refresh_requested_at,queued);
+  await account.pollTelegramAccountOnce();
+  assert.equal(stored().lease_id,'receive-owner');
+  assert.equal(telegram.state.calls.length,0);
+  closeDb();
+  assert.equal(account.accountStatus().refreshPending,true);
+  db().exec("UPDATE telegram_personal_account SET lease_id='',lease_until=0");
+  await account.pollTelegramAccountOnce();
+  const complete=account.accountStatus();
+  assert.equal(complete.refreshPending,false);
+  assert.equal(complete.lastError,'');
+  assert.ok(complete.syncedAt>old.syncedAt);
+  assert.deepEqual(complete.channels.map(({id,selected})=>[id,selected]),[[String(source),true],['-1001003',false]]);
+  assert.equal(stored().generation,previous.generation);
+  assert.equal(cursor(),97);
+  assert.equal(telegram.state.calls.filter(call=>call.method==='dialogs').length,1);
+  assert.equal(telegram.state.calls.some(call=>['history','download'].includes(call.method)),false);
+});
+
+test('a refresh requested after a poll began reading dialogs survives its older snapshot',async()=>{
+  await login();
+  db().exec("UPDATE telegram_personal_account SET synced_at=0");
+  let started, finish;
+  const reading=new Promise(resolve=>{started=resolve;});
+  const waiting=new Promise(resolve=>{finish=resolve;});
+  telegram.state.onDialogs=async()=>{started();await waiting;};
+  const poll=account.pollTelegramAccountOnce();
+  await reading;
+  try {
+    const result=await account.handleAccountAction({action:'refresh'});
+    assert.equal(result.refreshPending,true);
+  } finally { finish(); await poll; }
+  assert.equal(account.accountStatus().refreshPending,true);
+  telegram.state.onDialogs=null;
+  telegram.state.calls=[];
+  await account.pollTelegramAccountOnce();
+  assert.equal(account.accountStatus().refreshPending,false);
+  assert.equal(telegram.state.calls.filter(call=>call.method==='dialogs').length,1);
+});
+
+test('manual channel sync failure preserves cached list and releases its reserved turn',async t=>{
+  let now=Date.now();
+  t.mock.method(Date,'now',()=>now);
+  await login();await select();ready();
+  const old=account.accountStatus();
+  telegram.state.error={method:'dialogs',errorMessage:'ECONNRESET'};
+  const failed=await refresh();
+  assert.equal(failed.connected,true);
+  assert.equal(failed.refreshPending,false);
+  assert.equal(failed.syncedAt,old.syncedAt);
+  assert.deepEqual(failed.channels,old.channels);
+  assert.equal(failed.retrySource,'connection');
+  assert.match(failed.lastError,/暂时无法连接 Telegram/);
+  assert.equal(stored().lease_id,'');
+  now=failed.retryAt;
+  telegram.state.error=null;telegram.state.calls=[];
+  await account.pollTelegramAccountOnce();
+  assert.equal(telegram.state.calls.some(call=>call.method==='history'),true);
+  assert.equal(telegram.state.calls.some(call=>call.method==='dialogs'),false);
+});
+
+test('upgrade adds manual refresh state without replacing a saved account or sources',async()=>{
+  await login();await select();
+  const old=account.accountStatus(),generation=stored().generation;
+  db().exec("ALTER TABLE telegram_personal_account DROP COLUMN refresh_requested_at");
+  closeDb();
+  assert.deepEqual(account.accountStatus(),old);
+  assert.equal(stored().generation,generation);
+  assert.equal(stored().refresh_requested_at,0);
 });
 
 test('selection seeds current top ID, preserves existing cursor and reselection timestamp increases',async()=>{
@@ -376,7 +474,7 @@ test('personal conversion retains source custom emoji count even when an invalid
 test('source emoji audit reads at most three selected channels and five recent messages without sending or changing cursors',async()=>{
   await login();
   telegram.state.dialogs=[channel(1001),channel(1002),channel(1003),channel(1004)];
-  await account.handleAccountAction({action:'refresh'});
+  await refresh();
   await select(telegram.state.dialogs.map(d=>'-100'+d.entity.id));
   telegram.state.messages=Array.from({length:8},(_,index)=>photo(index+1,{message:'private-source-caption',entities:[
     new Api.MessageEntityCustomEmoji({offset:0,length:1,documentId:{toString:()=>'-9007199254740993123'}}),
@@ -1267,7 +1365,7 @@ test('refresh discovers channel protection and cancels its queued media',async()
   db().prepare(`INSERT INTO telegram_relay_outbox(source_chat_id,source_message_id,fingerprint,queued_at,revision,media_kind,file_id,file_unique_id,caption,origin,status)
     VALUES(?,1,'protected',1,'relay-generation','photo','f','u','caption','account','pending')`).run(source);
   telegram.state.dialogs[0].entity.noforwards=true;
-  await account.handleAccountAction({action:'refresh'});
+  await refresh();
   assert.equal(db().prepare('SELECT blocked FROM telegram_personal_sources WHERE chat_id=?').get(source).blocked,1);
   assert.equal(db().prepare('SELECT status FROM telegram_relay_outbox').get().status,'cancelled');
 });
@@ -1317,12 +1415,12 @@ test('revoked account clears receive authorization and cancels only pending acco
 
 test('leaving a source cancels that source pending work but preserves other sources',async()=>{
   await login();
-  telegram.state.dialogs.push(channel(1003));await account.handleAccountAction({action:'refresh'});
+  telegram.state.dialogs.push(channel(1003));await refresh();
   await select([String(source),'-1001003']);
   for(const id of [source,-1001003])db().prepare(`INSERT INTO telegram_relay_outbox(source_chat_id,source_message_id,fingerprint,queued_at,revision,media_kind,file_id,file_unique_id,caption,origin,status)
     VALUES(?,1,?,1,'relay-generation','photo','f','u','caption','account','pending')`).run(id,String(id));
   telegram.state.dialogs=telegram.state.dialogs.filter(dialog=>String(dialog.entity.id)!=='1001');
-  await account.handleAccountAction({action:'refresh'});
+  await refresh();
   assert.equal(db().prepare('SELECT status FROM telegram_relay_outbox WHERE source_chat_id=?').get(source).status,'cancelled');
   assert.equal(db().prepare('SELECT status FROM telegram_relay_outbox WHERE source_chat_id=-1001003').get().status,'pending');
 });
@@ -2110,10 +2208,15 @@ test('due caption priority makes receive, Hot scanning and all startup audits yi
 
 test('owner refresh bypasses caption priority and expired priority lets Hot scanning resume',async t=>{
   let at=Date.now();t.mock.method(Date,'now',()=>at);
-  await readyFocusedSourceRefresh();const hot=hotSource();db().prepare('UPDATE telegram_promotion_settings SET relay_caption_serial_enabled=1').run();
+  const {input}=await readyFocusedSourceRefresh();const hot=hotSource();db().prepare('UPDATE telegram_promotion_settings SET relay_caption_serial_enabled=1').run();
   assert.equal(cycle.captionWatchAccountPriority(db(),at),true);
   telegram.state.calls=[];await account.handleAccountAction({action:'refresh'});
-  assert.ok(telegram.state.calls.some(call=>call.method==='connect'));
+  assert.equal((await account.refreshRelayCaptionSourceWithAccount(input)).state,'busy');
+  assert.equal((await account.readHotVideoSourcePages(db(),hot)).state,'busy');
+  assert.equal(telegram.state.calls.length,0);
+  await account.pollTelegramAccountOnce();
+  assert.equal(telegram.state.calls.filter(call=>call.method==='dialogs').length,1);
+  assert.equal(account.accountStatus().refreshPending,false);
   at+=15000;telegram.state.calls=[];
   assert.equal(cycle.captionWatchAccountPriority(db(),at),false);
   await account.readHotVideoSourcePages(db(),hot);assert.ok(telegram.state.calls.some(call=>call.method==='connect'));
