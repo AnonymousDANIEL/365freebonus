@@ -1,7 +1,7 @@
 import type { DatabaseSync } from "node:sqlite";
 
 const MINUTE = 60_000;
-const WINDOW = 20 * MINUTE;
+const WINDOW = 60 * MINUTE;
 const TABLE = "telegram_relay_caption_watch_cycle";
 const WINDOWS = "telegram_relay_caption_watch_windows";
 type Scope = { relay_revision: string; target_chat_id: number; account_generation: string; active: boolean; accountSources: boolean };
@@ -265,7 +265,7 @@ export function captionWatchCycleStatus(db: DatabaseSync, now = Date.now()) {
     const item = row ? job(db, value, row.outbox_id) : undefined;
     const lastReason = row && reasons.has(row.last_reason) ? row.last_reason : "";
     return { enabled: value.active, paused: !value.active, mode: "overlapping" as const,
-      windowMinutes: 20, checkIntervalSeconds: 60, active: counts.active, completed: counts.completed,
+      windowMinutes: 60, checkIntervalSeconds: 60, active: counts.active, completed: counts.completed,
       due: counts.due, overdue: counts.overdue, expiredUnverified: counts.expired_unverified, superseded: counts.superseded, verifiedChecks: counts.verified_checks,
       nextExpiryAt: counts.next_expiry, intervalMinutes: 1, cycleNumber: 0,
       cycleStartedAt: row?.started_at || null, currentStartedAt: row?.attempt_started_at || null,
@@ -276,3 +276,4 @@ export function captionWatchCycleStatus(db: DatabaseSync, now = Date.now()) {
         : Math.max(row.next_check_at, row.retry_at) > now ? "scheduled" : "waiting" : "idle", reason: lastReason };
   } catch (error) { if (absentSchema(error)) return null; throw error; }
 }
+

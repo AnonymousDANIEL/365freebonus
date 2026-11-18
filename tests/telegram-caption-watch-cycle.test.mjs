@@ -17,7 +17,7 @@ const require = createRequire(import.meta.url);
 const { ensureCaptionWatchCycleSchema: schema, captionWatchFocus: focus, completeCaptionWatchFocus: complete,
   deferCaptionWatchFocus: defer, captionWatchCycleStatus: status, captionWatchAccountPriority: priority,
   registerCaptionWatchWindow: register, isCaptionWatchFocusCurrent: isCurrent } = require(path.join(fixture, 'cycle.js'));
-const now = 1_800_000_000_000, minute = 60_000, duration = 20 * minute;
+const now = 1_800_000_000_000, minute = 60_000, duration = 60 * minute;
 test.after(() => rmSync(fixture, { recursive: true, force: true }));
 function database(filename = ':memory:') {
   const db = new DatabaseSync(filename);
@@ -54,7 +54,7 @@ function mark(db, id, at, version = 0) {
 function windows(db) { return db.prepare('SELECT * FROM telegram_relay_caption_watch_windows ORDER BY outbox_id,source_version').all().map(row => ({ ...row })); }
 function saved(db) { return db.prepare('SELECT * FROM telegram_relay_caption_watch_cycle').all().map(row => ({ ...row })); }
 
-test('A and newly arriving B retain independent minute schedules and fixed twenty-minute windows', () => {
+test('A and newly arriving B retain independent minute schedules and fixed sixty-minute windows', () => {
   const db = database(); try {
     add(db, 1); const a = focus(db, now); assert.equal(a.outboxId, 1);
     assert.equal(a.windowStartedAt, now); assert.equal(a.windowEndsAt, now + duration);
@@ -184,7 +184,7 @@ test('read-only status distinguishes active, successful checks, overdue work and
     add(db, 1); focus(db, now); defer(db, 1, now, 'PRIVATE_RAW_ERROR', 0);
     const before = windows(db), pointer = saved(db), result = status(db, now + 2 * minute);
     assert.deepEqual([result.active, result.due, result.overdue, result.verifiedChecks], [1, 1, 1, 0]);
-    assert.equal(result.mode, 'overlapping'); assert.equal(result.windowMinutes, 20); assert.equal(result.checkIntervalSeconds, 60);
+    assert.equal(result.mode, 'overlapping'); assert.equal(result.windowMinutes, 60); assert.equal(result.checkIntervalSeconds, 60);
     assert.equal(result.lastReason, 'waiting'); assert.equal(result.nextExpiryAt, now + duration);
     assert.doesNotMatch(JSON.stringify(result), /PRIVATE|account-private|outbox|1001|10099/);
     assert.deepEqual(windows(db), before); assert.deepEqual(saved(db), pointer);
@@ -241,10 +241,10 @@ test('future Telegram backoff remains intact and is not counted as overdue runna
   } finally { db.close(); }
 });
 
-test('twenty observed minute slots end without renewing the window, and missed final slots remain unverified', () => {
+test('sixty observed minute slots end without renewing the window, and missed final slots remain unverified', () => {
   const db = database(); try {
     add(db, 1); add(db, 2);
-    for (let slot = 0; slot < 20; slot++) {
+    for (let slot = 0; slot < 60; slot++) {
       const at = now + slot * minute;
       assert.equal(focus(db, at).outboxId, 1);
       mark(db, 1, at); assert.equal(complete(db, 1, 0, at), true);
@@ -253,7 +253,7 @@ test('twenty observed minute slots end without renewing the window, and missed f
     }
     assert.equal(focus(db, now + duration), null);
     const result = status(db, now + duration);
-    assert.deepEqual([result.completed, result.expiredUnverified, result.verifiedChecks], [2, 1, 21]);
+    assert.deepEqual([result.completed, result.expiredUnverified, result.verifiedChecks], [2, 1, 61]);
     assert.equal(windows(db)[0].expires_at, now + duration);
     assert.equal(focus(db, now + duration + minute), null);
   } finally { db.close(); }
@@ -271,3 +271,4 @@ test('in-flight identity expires exactly at its window boundary and cannot reuse
     mark(db, 1, now + duration); assert.equal(complete(db, 1, 0, now + duration), false);
   } finally { db.close(); }
 });
+
