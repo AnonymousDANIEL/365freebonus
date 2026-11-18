@@ -35,6 +35,10 @@ export function ensureCaptionWatchCycleSchema(db: DatabaseSync) {
     PRIMARY KEY(relay_revision,target_chat_id,account_generation,outbox_id,source_version)
   ); CREATE INDEX IF NOT EXISTS telegram_relay_caption_watch_windows_due ON ${WINDOWS}
     (relay_revision,target_chat_id,account_generation,status,next_check_at,retry_at);`);
+  // Continue active windows created by the former 20-minute release for the full 60 minutes.
+  // Historical, inactive, superseded and delivery/source state are intentionally untouched.
+  db.prepare(`UPDATE ${WINDOWS} SET expires_at=started_at+?
+    WHERE status='active' AND expires_at-started_at=?`).run(WINDOW, 20 * MINUTE);
 }
 function absentSchema(error: unknown) {
   return error instanceof Error && /no such (?:table|column)/i.test(error.message);

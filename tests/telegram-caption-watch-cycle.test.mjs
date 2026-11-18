@@ -151,6 +151,20 @@ test('migration discovers old posts as expired history without launching a new b
   } finally { db.close(); }
 });
 
+test('schema migration extends only active legacy twenty-minute windows to sixty minutes', () => {
+  const db = database(); try {
+    add(db, 1); add(db, 2); add(db, 3); focus(db, now);
+    db.prepare(`UPDATE telegram_relay_caption_watch_windows SET expires_at=started_at+?`).run(20 * minute);
+    db.prepare(`UPDATE telegram_relay_caption_watch_windows SET status='expired' WHERE outbox_id=2`).run();
+    db.prepare(`UPDATE telegram_relay_caption_watch_windows SET status='inactive' WHERE outbox_id=3`).run();
+    schema(db);
+    const rows = windows(db);
+    assert.equal(rows.find(row => row.outbox_id === 1).expires_at, now + duration);
+    assert.equal(rows.find(row => row.outbox_id === 2).expires_at, now + 20 * minute);
+    assert.equal(rows.find(row => row.outbox_id === 3).expires_at, now + 20 * minute);
+  } finally { db.close(); }
+});
+
 test('paused windows preserve starts and scope changes never claim obsolete account work', () => {
   const db = database(); try {
     add(db, 1); focus(db, now); const before = windows(db);
