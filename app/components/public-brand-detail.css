@@ -18,8 +18,28 @@
 .public-brand-detail .brand-detail-breadcrumb [aria-current] { color: var(--text); overflow-wrap: anywhere; }
 .public-brand-detail .brand-detail-article { padding-bottom: 64px; }
 .public-brand-detail .brand-detail-hero { display: grid; grid-template-columns: minmax(240px, .8fr) minmax(0, 1.2fr); align-items: center; gap: 64px; padding-block: 12px 50px; }
-.public-brand-detail .brand-detail-art { width: 100%; aspect-ratio: 1; border-radius: 20px; overflow: hidden; border: 1px solid var(--line); background: var(--surface); display: grid; place-items: center; }
-.public-brand-detail .brand-detail-art img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.public-brand-detail .brand-detail-art {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 100%;
+  aspect-ratio: 8 / 5;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  background: var(--surface);
+}
+.public-brand-detail .brand-detail-art img {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  padding: clamp(8px, 2vw, 16px);
+  object-fit: contain;
+  object-position: center;
+  background: #292334;
+}
 .public-brand-detail .brand-detail-monogram { font-size: clamp(48px, 9vw, 100px); letter-spacing: -5px; color: var(--lime); font-weight: 600; }
 .public-brand-detail .brand-detail-intro,
 .public-brand-detail .brand-detail-content-grid > * { min-width: 0; }
