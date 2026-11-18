@@ -50,7 +50,7 @@ function harness({ brands = [brand()], siteSettings = settings(), loadError, adm
         const { publicBrandDetailPath } = load('app/lib/public-brand-pages.ts');
         return { brands: brands.map(item => ({ ...item, detailPath: publicBrandDetailPath(item, adminPath, now, brands) })), settings: siteSettings };
       } };
-      if (name === './AdminClient') return { default: ({ displayName }) => React.createElement('main', { 'data-admin': true }, displayName) };
+      if (name === './AdminWorkspace') return { default: ({ displayName }) => React.createElement('main', { 'data-admin': true }, displayName) };
       if (name.endsWith('.css')) return {};
       if (name.startsWith('.')) return load(path.relative(project, path.resolve(path.dirname(filename), name + (path.extname(name) ? '' : '.ts')))
         .replace(/PublicBrandDetail\.ts$/, 'PublicBrandDetail.tsx'));

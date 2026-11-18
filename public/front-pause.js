@@ -1,8 +1,8 @@
 (() => {
-  // This only cancels shortcuts delivered to the public page. Access control
-  // stays on the server; browser menus and already-open tools remain available.
+  const pausedPath = "/page-paused.html";
+  // The browser controls its own tools. Only act on shortcuts delivered to a
+  // public page, never on the login or admin interface.
   window.addEventListener("keydown", event => {
-    if (window.location.pathname !== "/") return;
     const key = (event.key || "").toLowerCase();
     const toolKey = ["i", "j", "c", "k"].includes(key);
     const developerShortcut = event.key === "F12" || event.code === "F12"
@@ -12,7 +12,10 @@
     const sourceShortcut = (event.ctrlKey || event.metaKey)
       && !event.shiftKey && !event.altKey && key === "u";
     if (!developerShortcut && !sourceShortcut) return;
+    const path = window.location.pathname;
+    if (path !== "/" && path !== pausedPath && !document.querySelector(".public-site")) return;
     event.preventDefault();
     event.stopImmediatePropagation();
+    if (path !== pausedPath) window.location.assign(pausedPath);
   }, { capture: true, passive: false });
 })();

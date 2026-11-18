@@ -15,6 +15,7 @@ import SecureNotes from "./SecureNotes";
 import NotesActivity from "./NotesActivity";
 import "./social-contacts-admin.css";
 import "./password-settings-admin.css";
+import "./admin.css";
 
 const sections = {
   brands: { title: "品牌管理", description: "在一个地方，管理每个值得被发现的品牌。" },

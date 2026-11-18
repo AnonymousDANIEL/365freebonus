@@ -9,8 +9,7 @@ import { PUBLIC_SITE_URL } from "../lib/public-brand-pages";
 import { isSafeImageUrl } from "../lib/image-url";
 import { defaultAvatarImageUrl } from "../lib/brand-media";
 import PublicBrandDetail from "../components/PublicBrandDetail";
-import AdminClient from "./AdminClient";
-import "./admin.css";
+import AdminWorkspace from "./AdminWorkspace";
 
 export const dynamic = "force-dynamic";
 type Props = { params: Promise<{ adminPath: string }> };
@@ -62,7 +61,7 @@ export default async function SingleSegmentPage({ params }: Props) {
   if (page.kind === "missing") notFound();
   if (page.kind === "admin") {
     const user = await requireChatGPTUser(page.adminPath);
-    return <AdminClient displayName={user.displayName} signInPath={chatGPTSignInPath(page.adminPath)} />;
+    return <AdminWorkspace displayName={user.displayName} signInPath={chatGPTSignInPath(page.adminPath)} />;
   }
   if (!page.canonicalPath) redirect(brandAnchorPath(page.brand.id));
   const breadcrumb = { "@context": "https://schema.org", "@type": "BreadcrumbList", itemListElement: [
