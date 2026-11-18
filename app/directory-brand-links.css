@@ -1,0 +1,58 @@
+.public-site .directory-seo-intro {
+  max-width: 470px;
+  margin-top: 22px;
+  padding-left: 15px;
+  border-left: 2px solid color-mix(in srgb, var(--lime), transparent 45%);
+}
+
+.public-site .directory-seo-intro h2 {
+  margin: 0 0 8px;
+  font-family: var(--font-sans);
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.45;
+  letter-spacing: 0;
+  color: var(--text);
+}
+
+.public-site .directory-seo-intro p {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.85;
+  color: var(--muted);
+}
+
+.public-site a:is(.art-open, .spotlight-open, .card-action) {
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.public-site .brand-detail-page-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  padding: 12px 14px;
+  min-height: 44px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.public-site .brand-detail-page-link:hover {
+  border-color: var(--lime);
+  color: var(--lime);
+}
+
+.public-site .faq-list p[hidden] { display: none; }
+
+@media (max-width: 640px) {
+  .public-site .directory-seo-intro {
+    margin-top: 18px;
+    padding-left: 12px;
+  }
+  .public-site .directory-seo-intro h2 { font-size: 14px; }
+  .public-site .directory-seo-intro p { font-size: 11px; }
+}

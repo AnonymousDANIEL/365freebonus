@@ -10,7 +10,7 @@ import ts from 'typescript';
 // I/O are replaced. These tests never contact users or production resources.
 const fixture = mkdtempSync(path.join(tmpdir(), 'telegram-private-updates-'));
 writeFileSync(path.join(fixture, 'package.json'), '{"type":"commonjs"}');
-for (const name of ['auth-core', 'brand-links', 'directory', 'image-url', 'sqlite', 'server-directory', 'telegram-brand-card', 'telegram-followups', 'telegram-private-updates']) {
+for (const name of ['auth-core', 'brand-links', 'directory', 'public-brand-pages', 'image-url', 'sqlite', 'server-directory', 'telegram-brand-card', 'telegram-followups', 'telegram-private-updates']) {
   writeFileSync(path.join(fixture, `${name}.js`), ts.transpileModule(
     readFileSync(new URL(`../app/lib/${name}.ts`, import.meta.url), 'utf8'),
     { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, esModuleInterop: true } },

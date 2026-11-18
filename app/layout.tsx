@@ -5,10 +5,11 @@ import './public-light.css';
 import './public-soft-light.css';
 import './brand-media.css';
 import { defaultAvatarImageUrl } from './lib/brand-media';
+import { PUBLIC_SITE_URL } from './lib/public-brand-pages';
 
 export const metadata: Metadata = {
+  metadataBase: new URL(PUBLIC_SITE_URL),
   title: '365 Free Bonus',
-  description: 'Explore a curated collection of gaming, lifestyle and digital entertainment brands in one immersive space.',
   icons: { icon: defaultAvatarImageUrl, apple: defaultAvatarImageUrl },
 };
 

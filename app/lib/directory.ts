@@ -26,6 +26,8 @@ export type Brand = {
   publishAt?: number | null;
   sortOrder: number;
   link: string;
+  /** Public-only, server-validated detail-page link; never accepted as a saved brand field. */
+  detailPath?: string;
 };
 
 export function isValidPromotionStart(value: unknown): value is number {

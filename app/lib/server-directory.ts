@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { getSqlite } from "./sqlite";
+import { publicBrandDetailPath } from "./public-brand-pages";
 import { defaultSettings, seedBrands, DEFAULT_PROMOTION_DAYS, PROMOTION_DAY_MS, PROMOTION_START_GRACE_MS, effectiveBrandCategory, isBrandPublished, normalizeBrandCategory, isSafeSocialUrl, isValidPromotionStart, PromotionValidationError, SettingsValidationError, type Brand, type BrandCategory, type SiteSettings, type DirectoryData } from "./directory";
 
 const brandColumns = "id, name, slug, category, tagline, description, color, icon, image_url AS imageUrl, featured, published, sort_order AS sortOrder, link, promotion_days AS promotionDays, promotion_expires_at AS promotionExpiresAt, promotion_starts_at AS promotionStartsAt, publish_at AS publishAt";
@@ -45,7 +46,7 @@ function initializeDirectory() {
   return db;
 }
 
-export async function readDirectory(includeDrafts = false, now = Date.now()): Promise<DirectoryData> {
+export async function readDirectory(includeDrafts = false, now = Date.now(), adminPath?: string): Promise<DirectoryData> {
   const db = initializeDirectory();
   const settings = db.prepare(`SELECT ${settingsColumns} FROM site_settings WHERE id = 'primary'`).get();
   if (!settings) throw new Error("Website settings could not be loaded.");
@@ -60,6 +61,12 @@ export async function readDirectory(includeDrafts = false, now = Date.now()): Pr
     facebookUrl: savedSettings.facebookEnabled ? savedSettings.facebookUrl : "",
   };
   const data: DirectoryData = { settings: visibleSettings, brands: includeDrafts ? brands : brands.map(brand => publicBrand(brand, now)) };
+  if (!includeDrafts && adminPath !== undefined) {
+    data.brands = data.brands.map(brand => {
+      const detailPath = publicBrandDetailPath(brand, adminPath, now, data.brands);
+      return detailPath ? { ...brand, detailPath } : brand;
+    });
+  }
   if (!includeDrafts) {
     const next = db.prepare("SELECT MIN(publish_at) AS nextPublishAt FROM brands WHERE published=1 AND publish_at > ?").get(now);
     if (isValidPromotionStart(next?.nextPublishAt)) data.nextPublishAt = next.nextPublishAt;
@@ -72,7 +79,18 @@ export function readPublicBrandIdBySlug(slug: string, now = Date.now()): string 
   return typeof row?.id === "string" ? row.id : null;
 }
 
-export type BrandWriteInput = Omit<Brand, "id" | "category" | "promotionDays" | "promotionExpiresAt" | "scheduledCategory" | "publishAt"> & {
+/** Lookup preserves all existing public short links, including published brands too thin to index. */
+export function readPublicBrandBySlug(slug: string, now = Date.now()): Brand | null {
+  const row = initializeDirectory().prepare(`SELECT ${brandColumns} FROM brands WHERE slug = ? AND ${publicBrandVisibility}`).get(slug, now);
+  return row ? publicBrand(asBrand(row), now) : null;
+}
+
+export async function readPublicBrandDetailPages(adminPath: string, now = Date.now()): Promise<Brand[]> {
+  const { brands } = await readDirectory(false, now, adminPath);
+  return brands.filter(brand => Boolean(brand.detailPath));
+}
+
+export type BrandWriteInput = Omit<Brand, "id" | "category" | "promotionDays" | "promotionExpiresAt" | "scheduledCategory" | "publishAt" | "detailPath"> & {
   category?: BrandCategory | "Gaming" | "Lifestyle" | "Entertainment";
   promotionDays?: number | null;
   promotionExpiresAt?: number | null;
