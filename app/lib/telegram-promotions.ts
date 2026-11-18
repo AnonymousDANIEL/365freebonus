@@ -10,7 +10,7 @@ import { joinGateStatus, saveJoinGateSettings, type JoinGateInput } from "./tele
 import { hotVideoStatus, saveHotVideoSettings, enqueueHotVideo, updateHotVideo, deleteHotVideo, cancelHotVideoJob,
   startTelegramHotVideoWorker } from "./telegram-hot-videos";
 import { scheduledMessageStatus, saveScheduledMessagePlan, deleteScheduledMessagePlan, verifyScheduledMessageTargets,
-  startTelegramScheduledMessageWorker } from "./telegram-scheduled-messages";
+  saveScheduledMessageTarget, deleteScheduledMessageTarget, startTelegramScheduledMessageWorker } from "./telegram-scheduled-messages";
 import { RELAY_DEFAULT_TARGET } from "./telegram-relay-content";
 
 type StoredSettings = {
@@ -139,6 +139,8 @@ export function telegramScheduledMessageStatus() { return scheduledMessageStatus
 export function saveTelegramScheduledMessagePlan(input: Parameters<typeof saveScheduledMessagePlan>[1]) { return saveScheduledMessagePlan(getSqlite(), input, decryptToken); }
 export function deleteTelegramScheduledMessagePlan(input: { id: string; revision: string }) { return deleteScheduledMessagePlan(getSqlite(), input); }
 export function verifyTelegramScheduledMessageTargets() { return verifyScheduledMessageTargets(getSqlite(), decryptToken); }
+export function saveTelegramScheduledMessageTarget(input: Parameters<typeof saveScheduledMessageTarget>[1]) { return saveScheduledMessageTarget(getSqlite(), input, decryptToken); }
+export function deleteTelegramScheduledMessageTarget(input: Parameters<typeof deleteScheduledMessageTarget>[1]) { return deleteScheduledMessageTarget(getSqlite(), input); }
 
 function storedSettings(db: DatabaseSync): StoredSettings {
   return db.prepare(`SELECT enabled, chat_id, token_ciphertext, chat_bot_token_ciphertext, promotion_message,

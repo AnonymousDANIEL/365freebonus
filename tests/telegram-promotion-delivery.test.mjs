@@ -20,6 +20,7 @@ for (const name of ['auth-core', 'brand-links', 'directory', 'image-url', 'sqlit
 }
 writeFileSync(path.join(fixture, 'telegram-relay-media.js'), 'exports.relayMediaMaxBytes = () => 20971520;');
 writeFileSync(path.join(fixture, 'telegram-welcome.js'), 'exports.startTelegramWelcomeWorker = () => { throw new Error("Unexpected background worker"); };');
+writeFileSync(path.join(fixture, 'telegram-scheduled-media.js'), 'exports.readScheduledMessageMedia = () => null; exports.sendScheduledMessageMedia = () => { throw new Error("Unexpected media send"); };');
 writeFileSync(path.join(fixture, 'telegram-bot.js'), `
 exports.calls = [];
 exports.responses = [];

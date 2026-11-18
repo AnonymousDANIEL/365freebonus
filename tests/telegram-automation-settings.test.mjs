@@ -45,6 +45,7 @@ for (const relative of [
 }
 writeFixture('app/chatgpt-auth.js', 'exports.getChatGPTUser = async () => ({ username: "fixture-admin" });');
 writeFixture('app/lib/telegram-welcome.js', 'exports.startTelegramWelcomeWorker = () => { throw new Error("Unexpected worker start"); };');
+writeFixture('app/lib/telegram-scheduled-media.js', 'exports.readScheduledMessageMedia = () => null; exports.sendScheduledMessageMedia = () => { throw new Error("Unexpected media send"); };');
 writeFixture('app/lib/telegram-bot.js', `
 const targets = new Map([
   ['@fixture_channel', ${channelId}], ['@fixture_group', ${groupId}], ['@other_group', ${otherGroupId}],
@@ -692,7 +693,7 @@ test('schema35 adds observation defaults while retaining existing private settin
   database.exec('ALTER TABLE telegram_promotion_settings DROP COLUMN relay_caption_watch_enabled; ALTER TABLE telegram_promotion_settings DROP COLUMN relay_caption_watch_interval_seconds; PRAGMA user_version=34');
   const filename = path.join(process.env.DATA_DIR, 'directory.sqlite');
   database.close(); globalThis.__directorySqlite.delete(filename); database = getSqlite();
-  assert.equal(database.prepare('PRAGMA user_version').get().user_version, 37);
+  assert.equal(database.prepare('PRAGMA user_version').get().user_version, 38);
   const migratedSettings = settingsRow();
   assert.equal(migratedSettings.relay_caption_watch_enabled, 1); assert.equal(migratedSettings.relay_caption_watch_interval_seconds, 30);
   delete migratedSettings.relay_caption_watch_enabled; delete migratedSettings.relay_caption_watch_interval_seconds;
@@ -723,7 +724,7 @@ test('schema37 upgrades a schema36 database without changing relay records, sour
   const filename = path.join(process.env.DATA_DIR, 'directory.sqlite');
   database.close(); globalThis.__directorySqlite.delete(filename); telegram.calls.length = 0;
   database = getSqlite();
-  assert.equal(database.prepare('PRAGMA user_version').get().user_version, 37);
+  assert.equal(database.prepare('PRAGMA user_version').get().user_version, 38);
   assert.equal(database.prepare('SELECT COUNT(*) AS count FROM telegram_relay_caption_watch_windows').get().count, 0);
   assert.ok(database.prepare("SELECT 1 FROM sqlite_master WHERE type='index' AND name='telegram_relay_caption_watch_windows_due'").get());
   for (const table of tables) assert.deepEqual(database.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all().map(row => ({ ...row })), before[table], table);

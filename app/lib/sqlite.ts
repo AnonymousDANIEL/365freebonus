@@ -12,7 +12,7 @@ export function getDataDirectory(): string {
 function migrate(db: DatabaseSync) {
   if (migrated.has(db)) return;
   const readVersion = () => (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
-  if (readVersion() < 37) {
+  if (readVersion() < 38) {
     db.exec("BEGIN IMMEDIATE");
     try {
       // Read again inside the write lock, so concurrent process starts cannot
@@ -677,6 +677,29 @@ function migrate(db: DatabaseSync) {
       CREATE INDEX IF NOT EXISTS telegram_relay_caption_watch_windows_due ON telegram_relay_caption_watch_windows
         (relay_revision,target_chat_id,account_generation,status,next_check_at,retry_at);
       PRAGMA user_version=37;`);
+      if (version < 38) {
+        const planColumns = db.prepare("PRAGMA table_info(telegram_scheduled_message_plans)").all() as { name: string }[];
+        for (const name of ["calendar_date", "target_keys_json", "media_id"]) {
+          if (!planColumns.some(column => column.name === name)) {
+            db.exec(`ALTER TABLE telegram_scheduled_message_plans ADD COLUMN ${name} TEXT NOT NULL DEFAULT ''`);
+          }
+        }
+        const deliveryColumns = db.prepare("PRAGMA table_info(telegram_scheduled_message_deliveries)").all() as { name: string }[];
+        if (!deliveryColumns.some(column => column.name === "media_id")) {
+          db.exec("ALTER TABLE telegram_scheduled_message_deliveries ADD COLUMN media_id TEXT NOT NULL DEFAULT ''");
+        }
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS telegram_scheduled_message_channels (
+            target_key TEXT PRIMARY KEY,revision TEXT NOT NULL,title TEXT NOT NULL,address TEXT NOT NULL,
+            deleted_at INTEGER NOT NULL DEFAULT 0
+          );
+          CREATE UNIQUE INDEX IF NOT EXISTS telegram_scheduled_message_channels_address ON telegram_scheduled_message_channels(address) WHERE deleted_at=0;
+          CREATE TABLE IF NOT EXISTS telegram_scheduled_message_media (
+            id TEXT PRIMARY KEY,kind TEXT NOT NULL,name TEXT NOT NULL,bytes INTEGER NOT NULL,mime TEXT NOT NULL,created_at INTEGER NOT NULL
+          );
+          PRAGMA user_version=38;
+        `);
+      }
       db.exec("COMMIT");
     } catch (error) { db.exec("ROLLBACK"); throw error; }
   }

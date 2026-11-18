@@ -96,11 +96,28 @@ export function telegramRequest(token: string, method: TelegramMethod, parameter
   return requestTelegram(token, method, parameters, asRecord, upload);
 }
 
-/** Stream one private MP4 without copying the complete video into RAM. */
-export async function telegramVideoFileRequest(token: string, parameters: Record<string, unknown>,
-  upload: { path: string; fileName: string; bytes: number }): Promise<TelegramReply<Record<string, unknown>>> {
-  if (!Number.isSafeInteger(upload.bytes) || upload.bytes < 24 || upload.bytes > 50 * 1024 * 1024
-    || Object.keys(parameters).some(key => !["chat_id", "reply_markup", "supports_streaming", "disable_notification"].includes(key))) return null;
+type PrivateUpload = { path: string; fileName: string; bytes: number };
+type PrivateMediaKind = "photo" | "animation" | "video";
+const privateMediaMethods = { photo: "sendPhoto", animation: "sendAnimation", video: "sendVideo" } as const;
+const privateMediaLimits = { photo: 10 * 1024 * 1024, animation: 20 * 1024 * 1024, video: 50 * 1024 * 1024 } as const;
+
+/** Stream one private MP4 for the Hot video workflow, which has no caption. */
+export async function telegramVideoFileRequest(token: string, parameters: Record<string, unknown>, upload: PrivateUpload) {
+  if (Object.keys(parameters).some(key => !["chat_id", "reply_markup", "supports_streaming", "disable_notification"].includes(key))) return null;
+  return telegramPrivateMediaFileRequest(token, parameters, upload, "video", "video/mp4");
+}
+
+/** Scheduled posts send the caption and attachment in one Telegram message. */
+export async function telegramScheduledMediaFileRequest(token: string, chatId: number, caption: string,
+  upload: PrivateUpload & { kind: PrivateMediaKind; mime: string }) {
+  const mediaMimes = { photo: ["image/jpeg", "image/png"], animation: ["image/gif"], video: ["video/mp4"] };
+  if (!mediaMimes[upload.kind]?.includes(upload.mime) || caption.length > 1024) return null;
+  return telegramPrivateMediaFileRequest(token, { chat_id: chatId, caption }, upload, upload.kind, upload.mime);
+}
+
+async function telegramPrivateMediaFileRequest(token: string, parameters: Record<string, unknown>,
+  upload: PrivateUpload, kind: PrivateMediaKind, mime: string): Promise<TelegramReply<Record<string, unknown>>> {
+  if (!Number.isSafeInteger(upload.bytes) || upload.bytes < (kind === "video" ? 24 : 1) || upload.bytes > privateMediaLimits[kind]) return null;
   let handle: Awaited<ReturnType<typeof open>>;
   try { handle = await open(upload.path, constants.O_RDONLY | constants.O_NOFOLLOW); } catch { return null; }
   try {
@@ -112,8 +129,8 @@ export async function telegramVideoFileRequest(token: string, parameters: Record
       const content = typeof value === "string" ? value : JSON.stringify(value);
       parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${content}\r\n`));
     }
-    const fileName = upload.fileName.replace(/[^A-Za-z0-9_.-]/g, "_") || "video.mp4";
-    parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="video"; filename="${fileName}"\r\nContent-Type: video/mp4\r\n\r\n`));
+    const fileName = upload.fileName.replace(/[^A-Za-z0-9_.-]/g, "_") || (kind === "video" ? "video.mp4" : `${kind}.bin`);
+    parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${kind}"; filename="${fileName}"\r\nContent-Type: ${mime}\r\n\r\n`));
     const prefix = Buffer.concat(parts), suffix = Buffer.from(`\r\n--${boundary}--\r\n`);
     if (prefix.length > 65_536) return null;
     return await new Promise<TelegramReply<Record<string, unknown>>>(resolve => {
@@ -123,10 +140,10 @@ export async function telegramVideoFileRequest(token: string, parameters: Record
         yield prefix;
         for await (const chunk of source) {
           total += chunk.length;
-          if (total > upload.bytes) throw new Error("Video size changed.");
+          if (total > upload.bytes) throw new Error("Media size changed.");
           yield chunk;
         }
-        if (total !== upload.bytes) throw new Error("Video size changed.");
+        if (total !== upload.bytes) throw new Error("Media size changed.");
         yield suffix;
       })());
       let settled = false;
@@ -134,9 +151,9 @@ export async function telegramVideoFileRequest(token: string, parameters: Record
         if (settled) return;
         settled = true; body.destroy(); source.destroy(); resolve(value);
       };
-      const outgoing = request({ hostname: "api.telegram.org", method: "POST", path: `/bot${token}/sendVideo`,
+      const outgoing = request({ hostname: "api.telegram.org", method: "POST", path: `/bot${token}/${privateMediaMethods[kind]}`,
         headers: { "Content-Type": `multipart/form-data; boundary=${boundary}`, "Content-Length": prefix.length + upload.bytes + suffix.length },
-        signal: AbortSignal.timeout(40_000),
+        signal: AbortSignal.timeout(kind === "photo" ? 20_000 : 40_000),
       }, response => {
         let content = "";
         response.setEncoding("utf8");

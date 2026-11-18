@@ -20,7 +20,7 @@ const plan = (overrides = {}) => ({ id: 'plan-one', revision: 'revision-one', na
 // network access is involved. Tests exercise user events and async races.
 function harness(initial = snapshot()) {
   const hooks = [], effects = [], intervals = new Map(), listeners = new Map(), calls = [];
-  let index = 0, tree, time = serverTime + 7200000, serial = 0, getValue = initial, nextGet, nextMutation;
+  let index = 0, tree, time = serverTime + 7200000, serial = 0, getValue = initial, nextGet, nextMutation, upload;
   const jsx = (type, props) => ({ type, props: props || {} });
   const react = {
     useState(value) { const slot = index++; if (!hooks[slot]) hooks[slot] = { value: typeof value === 'function' ? value() : value }; return [hooks[slot].value, update => { hooks[slot].value = typeof update === 'function' ? update(hooks[slot].value) : update; }]; },
@@ -31,6 +31,7 @@ function harness(initial = snapshot()) {
   const document = { visibilityState: 'visible', addEventListener: (name, fn) => listeners.set(name, fn), removeEventListener: name => listeners.delete(name) };
   const request = async (path, method = 'GET', body) => {
     calls.push({ path, method, body });
+    if (path.includes('/upload?')) return upload(path, body);
     if (method === 'GET') { if (nextGet) { const fn = nextGet; nextGet = null; return fn(); } return getValue; }
     if (nextMutation) { const fn = nextMutation; nextMutation = null; return fn(); }
     return getValue;
@@ -49,7 +50,7 @@ function harness(initial = snapshot()) {
   render();
   return { calls, document, render, nodes, text: () => text(tree), button, field, form,
     async ready() { await flush(); render(); },
-    setGet(value) { getValue = value; }, deferGet(fn) { nextGet = fn; }, mutation(fn) { nextMutation = fn; },
+    setGet(value) { getValue = value; }, deferGet(fn) { nextGet = fn; }, mutation(fn) { nextMutation = fn; }, upload(fn) { upload = fn; },
     async tick(ms) { time += ms; for (const timer of intervals.values()) if (timer.ms === ms) timer.fn(); await flush(); render(); },
     close() { for (const hook of hooks) hook?.cleanup?.(); },
   };
@@ -72,7 +73,7 @@ test('background refresh preserves unsaved exact copy and daily times', async ()
   } finally { h.close(); }
 });
 
-test('saving sends unchanged text and explicit daily schedule rather than a browser timer', async () => {
+test('saving sends unchanged text and an explicit Malaysia date rather than a browser timer', async () => {
   const h = harness();
   try {
     await h.ready(); h.button('添加文案').props.onClick(); h.render();
@@ -86,6 +87,8 @@ test('saving sends unchanged text and explicit daily schedule rather than a brow
     const call = h.calls.find(c => c.method === 'POST');
     assert.equal(call.body.text, copy); assert.equal(call.body.name, 'Daily copy');
     assert.deepEqual(Array.from(call.body.times), ['09:00', '21:00']);
+    assert.equal(call.body.calendarDate, '2026-11-15');
+    assert.deepEqual(Array.from(call.body.targetKeys), ['official', 'group', 'hot']);
     assert.equal(call.body.enabled, false); assert.equal(h.form(), undefined);
     assert.match(h.text(), /暂停状态/);
   } finally { h.close(); }
@@ -140,5 +143,87 @@ test('an interrupted create keeps the same request id for a safe retry', async (
     assert.equal(creates.length, 2); assert.match(creates[0].body.requestId, /^[0-9a-f-]{36}$/);
     assert.equal(creates[1].body.requestId, creates[0].body.requestId);
     assert.equal(h.form(), undefined);
+  } finally { h.close(); }
+});
+
+test('the date view rolls over at Malaysia midnight and keeps an open draft intact', async () => {
+  const now = Date.parse('2026-11-15T15:59:59Z');
+  const h = harness(snapshot({ now, plans: [
+    plan({ id: 'today', calendarDate: '2026-11-15', text: 'Before midnight' }),
+    plan({ id: 'tomorrow', calendarDate: '2026-11-16', text: 'After midnight' }),
+    plan({ id: 'later', calendarDate: '2026-11-22', text: 'Next week' }),
+  ] }));
+  try {
+    await h.ready();
+    assert.match(h.text(), /Before midnight.*After midnight.*Next week/);
+    h.button('添加文案').props.onClick(); h.render();
+    h.field('发送文案', 'textarea').props.onChange({ target: { value: 'Unfinished draft' } }); h.render();
+    assert.equal(h.field('发送日期').props.value, '2026-11-15');
+    await h.tick(1000);
+    assert.doesNotMatch(h.text(), /Before midnight/);
+    assert.match(h.text(), /2026-11-16今天.*After midnight.*Next week/);
+    assert.equal(h.field('发送日期').props.value, '2026-11-15');
+    assert.equal(h.field('发送文案', 'textarea').props.value, 'Unfinished draft');
+    h.button('显示过往日期').props.onClick(); h.render();
+    assert.match(h.text(), /Before midnight/);
+  } finally { h.close(); }
+});
+
+test('channel management sends stable creation IDs and revision-checked edits', async () => {
+  const h = harness();
+  const target = { key: 'custom:channel', title: 'Daily offers', address: '@dailyoffers', chatId: '-1002', revision: 'channel-version', editable: true, ready: true, lastError: '' };
+  try {
+    await h.ready(); h.button('频道管理').props.onClick(); h.render();
+    h.button('添加频道').props.onClick(); h.render();
+    h.field('频道名称').props.onChange({ target: { value: target.title } }); h.render();
+    h.field('Telegram 频道地址').props.onChange({ target: { value: ` ${target.address} ` } }); h.render();
+    h.mutation(() => snapshot({ targets: [...snapshot().targets, target] }));
+    await h.form().props.onSubmit({ preventDefault() {} }); h.render();
+    const create = h.calls.find(call => call.body?.action === 'upsertTarget');
+    assert.equal(create.body.address, target.address);
+    assert.match(create.body.requestId, /^[0-9a-f-]{36}$/);
+    h.button('编辑频道 Daily offers').props.onClick(); h.render();
+    h.field('频道名称').props.onChange({ target: { value: 'Revised' } }); h.render();
+    await h.form().props.onSubmit({ preventDefault() {} }); h.render();
+    const edit = h.calls.filter(call => call.body?.action === 'upsertTarget').at(-1);
+    assert.equal(edit.body.key, target.key);
+    assert.equal(edit.body.revision, target.revision);
+    assert.equal(edit.body.title, 'Revised');
+  } finally { h.close(); }
+});
+
+test('a video is uploaded in replayable chunks and its ID is associated only when the post is saved', async () => {
+  const h = harness();
+  const chunkBytes = 4 * 1024 * 1024;
+  const size = chunkBytes + 77;
+  const filename = 'Offer & date.mp4';
+  const file = { name: filename, type: 'video/mp4', size, slice: (start, end, type) => ({ start, end, type }) };
+  const uploaded = [];
+  try {
+    await h.ready(); h.button('添加文案').props.onClick(); h.render();
+    h.upload((path, chunk) => {
+      const params = new URL(path, 'https://365freebonus.com/').searchParams;
+      const id = params.get('uploadId');
+      uploaded.push({ id, offset: params.get('offset'), chunk });
+      assert.equal(params.get('size'), String(size));
+      assert.equal(params.get('name'), filename);
+      if (uploaded.length === 1) throw new Error('Network interrupted');
+      return chunk.end === size ? { id, kind: 'video', name: filename, bytes: size } : { id, received: chunk.end };
+    });
+    h.field('上传附件').props.onChange({ target: { files: [file], value: filename } });
+    await h.ready();
+    assert.deepEqual(uploaded.map(row => row.offset), ['0', '0', String(chunkBytes)]);
+    assert.equal(new Set(uploaded.map(row => row.id)).size, 1);
+    assert.equal(h.field('发送文案', 'textarea').props.maxLength, 1024);
+    assert.equal(h.calls.filter(call => call.method === 'POST' && !call.path.includes('/upload?')).length, 0);
+    h.field('后台名称').props.onChange({ target: { value: 'Tomorrow video' } }); h.render();
+    h.field('发送文案', 'textarea').props.onChange({ target: { value: 'Video caption' } }); h.render();
+    h.field('发送日期').props.onChange({ target: { value: '2026-11-16' } }); h.render();
+    h.field('时间 1').props.onChange({ target: { value: '21:00' } }); h.render();
+    await h.form().props.onSubmit({ preventDefault() {} });
+    const post = h.calls.find(call => call.method === 'POST' && !call.path.includes('/upload?'));
+    assert.equal(post.body.calendarDate, '2026-11-16');
+    assert.equal(post.body.mediaId, uploaded[0].id);
+    assert.equal(post.body.text, 'Video caption');
   } finally { h.close(); }
 });

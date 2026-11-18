@@ -2,29 +2,35 @@ import { createHash, randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { getSqlite } from "./sqlite";
 import { telegramRequest } from "./telegram-bot";
-import type { ScheduledMessageStatus, ScheduledMessagePlan, ScheduledMessagePlanInput, ScheduledMessageTargetKey } from "./telegram-scheduled-messages-types";
+import { readScheduledMessageMedia, sendScheduledMessageMedia } from "./telegram-scheduled-media";
+import type { ScheduledMessageStatus, ScheduledMessagePlan, ScheduledMessagePlanInput, ScheduledMessageTargetInput, ScheduledMessageTargetKey } from "./telegram-scheduled-messages-types";
 
 type Decrypt = (ciphertext: string) => string;
-type Plan = { id: string; revision: string; name: string; text: string; times_json: string; enabled: number; next_run_at: number; last_run_at: number; created_at: number; updated_at: number; deleted_at: number };
+type Plan = { id: string; revision: string; name: string; text: string; times_json: string; calendar_date: string; target_keys_json: string; media_id: string; enabled: number; next_run_at: number; last_run_at: number; created_at: number; updated_at: number; deleted_at: number };
 type Target = { target_key: ScheduledMessageTargetKey; chat_id: number; title: string; ready: number; last_error: string; verified_at: number };
+type Channel = { target_key: ScheduledMessageTargetKey; title: string; address: string; revision: string; deleted_at: number };
+type ChannelDefinition = { key: ScheduledMessageTargetKey; title: string; address: string; revision: string; editable: boolean };
 type Runtime = { token_hash: string; bot_id: number; hot_chat_id: number; next_verify_at: number; owner_id: string; lease_id: string; lease_until: number; heartbeat_at: number; last_tick_at: number; last_completed_at: number; last_error: string };
-type Delivery = { id: string; plan_id: string; plan_revision: string; plan_name: string; text: string; run_at: number; target_key: ScheduledMessageTargetKey; target_chat_id: number; target_title: string; token_hash: string; bot_id: number; status: string; attempts: number; next_attempt_at: number; lease_id: string; lease_until: number; dispatch_started_at: number; last_error: string; sent_at: number; message_id: number };
+type Delivery = { id: string; plan_id: string; plan_revision: string; plan_name: string; text: string; media_id: string; run_at: number; target_key: ScheduledMessageTargetKey; target_chat_id: number; target_title: string; token_hash: string; bot_id: number; status: string; attempts: number; next_attempt_at: number; lease_id: string; lease_until: number; dispatch_started_at: number; last_error: string; sent_at: number; message_id: number };
 const DAY = 86_400_000, OFFSET = 8 * 3_600_000, TICK_MS = 5_000, LEASE_MS = 90_000, GRACE_MS = 15 * 60_000, MAX_ATTEMPTS = 5;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const TIME = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
 const TOKEN_ERROR = "请先保存 @FreeBonus365ChatBot 的 Token。";
-const TARGET_ERROR = "请检查三个频道的机器人发布权限，并重新验证频道。";
-const CHANGED_ERROR = "机器人或 Hot 目标已改变，请重新验证频道后继续发布。";
+const TARGET_ERROR = "请检查所选频道的机器人发布权限，并重新验证频道。";
+const CHANGED_ERROR = "机器人或频道设置已改变，请重新验证频道后继续发布。";
 const UNKNOWN_ERROR = "Telegram 未确认发送结果，已停止自动重试以避免重复。";
-const TARGETS: { key: ScheduledMessageTargetKey; title: string; username?: string }[] = [
-  { key: "official", title: "365 Free Bonus Official", username: "join365freebonus" },
-  { key: "group", title: "365 Free Bonus Group", username: "join365freebonusgroup" },
-  { key: "hot", title: "🔞365 Free Bonus Hot" },
+const TARGETS: ChannelDefinition[] = [
+  { key: "official", title: "365 Free Bonus Official", address: "@join365freebonus", revision: "", editable: false },
+  { key: "group", title: "365 Free Bonus Group", address: "@join365freebonusgroup", revision: "", editable: false },
+  { key: "hot", title: "🔞365 Free Bonus Hot", address: "", revision: "", editable: false },
 ];
+const DEFAULT_TARGET_KEYS = TARGETS.map(target => target.key);
 export class ScheduledMessageError extends Error { constructor(message: string, readonly status = 400) { super(message); } }
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
 const validChat = (value: unknown): value is number => typeof value === "number" && Number.isSafeInteger(value) && value < 0;
 const validId = (value: unknown): value is number => typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+const validCustomKey = (key: unknown): key is `custom:${string}` => typeof key === "string" && key.startsWith("custom:") && UUID.test(key.slice(7));
+const validTargetKey = (key: unknown): key is ScheduledMessageTargetKey => key === "official" || key === "group" || key === "hot" || validCustomKey(key);
 function transaction<T>(db: DatabaseSync, work: () => T): T {
   db.exec("BEGIN IMMEDIATE");
   try { const result = work(); db.exec("COMMIT"); return result; } catch (error) { db.exec("ROLLBACK"); throw error; }
@@ -38,40 +44,75 @@ function hotChatId(db: DatabaseSync): number {
 }
 function runtime(db: DatabaseSync): Runtime { return db.prepare("SELECT * FROM telegram_scheduled_message_runtime WHERE id='primary'").get() as Runtime; }
 function targets(db: DatabaseSync): Target[] { return db.prepare("SELECT * FROM telegram_scheduled_message_targets").all() as Target[]; }
+function customChannels(db: DatabaseSync): Channel[] {
+  return db.prepare("SELECT * FROM telegram_scheduled_message_channels WHERE deleted_at=0 ORDER BY target_key").all() as Channel[];
+}
+function channelDefinitions(db: DatabaseSync, hot: number): ChannelDefinition[] {
+  const fixed = TARGETS.map(target => target.key === "hot" ? { ...target, address: hot ? String(hot) : "" } : target);
+  return [...fixed, ...customChannels(db).map(channel => ({ key: channel.target_key, title: channel.title, address: channel.address, revision: channel.revision, editable: true }))];
+}
 function plan(db: DatabaseSync, id: string): Plan | undefined { return db.prepare("SELECT * FROM telegram_scheduled_message_plans WHERE id=? AND deleted_at=0").get(id) as Plan | undefined; }
 function parseTimes(value: string): string[] { try { const times: unknown = JSON.parse(value); return Array.isArray(times) && times.every(t => typeof t === "string" && TIME.test(t)) ? times : []; } catch { return []; } }
+function parseTargetKeys(value: string): ScheduledMessageTargetKey[] {
+  if (!value) return [...DEFAULT_TARGET_KEYS];
+  try { const keys: unknown = JSON.parse(value); return Array.isArray(keys) && keys.every(validTargetKey) ? keys : []; }
+  catch { return []; }
+}
 function dayStart(now: number): number { return Math.floor((now + OFFSET) / DAY) * DAY - OFFSET; }
+function calendarDay(date: string): number {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return NaN;
+  const day = Date.parse(`${date}T00:00:00+08:00`);
+  return Number.isFinite(day) && new Date(day + OFFSET).toISOString().slice(0, 10) === date ? day : NaN;
+}
 function slot(day: number, time: string): number { const [hours, minutes] = time.split(":").map(Number); return day + hours * 3_600_000 + minutes * 60_000; }
 /** Fixed UTC+8 wall times avoid host timezone, DST and interval drift. */
-export function nextScheduledMessageTime(times: string[], now: number, inclusive = false): number {
+export function nextScheduledMessageTime(times: string[], now: number, inclusive = false, date = ""): number {
   const start = dayStart(now);
-  for (const day of [start, start + DAY]) for (const time of [...times].sort()) { const at = slot(day, time); if (inclusive ? at >= now : at > now) return at; }
+  const days = date ? [calendarDay(date)] : [start, start + DAY];
+  for (const day of days) for (const time of [...times].sort()) { const at = slot(day, time); if (inclusive ? at >= now : at > now) return at; }
   return 0;
 }
-function viewPlan(row: Plan): ScheduledMessagePlan { return { id: row.id, revision: row.revision, name: row.name, text: row.text, times: parseTimes(row.times_json), enabled: row.enabled === 1, nextRunAt: row.next_run_at || null, lastRunAt: row.last_run_at || null, createdAt: row.created_at, updatedAt: row.updated_at }; }
+function viewPlan(db: DatabaseSync, row: Plan): ScheduledMessagePlan {
+  return { id: row.id, revision: row.revision, name: row.name, text: row.text, times: parseTimes(row.times_json), enabled: row.enabled === 1,
+    calendarDate: row.calendar_date, targetKeys: parseTargetKeys(row.target_keys_json), media: row.media_id ? readScheduledMessageMedia(db, row.media_id) : null,
+    nextRunAt: row.next_run_at || null, lastRunAt: row.last_run_at || null, createdAt: row.created_at, updatedAt: row.updated_at };
+}
 function identityCurrent(db: DatabaseSync): boolean {
   const state = runtime(db), stored = cipher(db);
   return Boolean(stored && state.token_hash === hash(stored) && state.bot_id > 0 && state.hot_chat_id === hotChatId(db));
 }
-function configured(db: DatabaseSync): boolean {
-  const entries = targets(db);
-  return identityCurrent(db) && TARGETS.every(t => entries.some(e => e.target_key === t.key && e.ready === 1 && validChat(e.chat_id)));
+function targetsReady(entries: Target[], keys: ScheduledMessageTargetKey[]): boolean {
+  const selected = keys.map(key => entries.find(entry => entry.target_key === key && entry.ready === 1 && validChat(entry.chat_id)));
+  return selected.length > 0 && selected.every(entry => entry !== undefined) && new Set(selected.map(entry => entry?.chat_id)).size === selected.length;
+}
+function configured(db: DatabaseSync, keys: ScheduledMessageTargetKey[]): boolean {
+  return identityCurrent(db) && targetsReady(targets(db), keys);
+}
+function hasBlockedPlan(db: DatabaseSync): boolean {
+  const entries = targets(db), current = identityCurrent(db);
+  const plans = db.prepare("SELECT target_keys_json FROM telegram_scheduled_message_plans WHERE enabled=1 AND deleted_at=0 AND next_run_at>0").all() as { target_keys_json: string }[];
+  return plans.some(p => !current || !targetsReady(entries, parseTargetKeys(p.target_keys_json)));
 }
 export function scheduledMessageStatus(db: DatabaseSync, clock = Date.now): ScheduledMessageStatus {
   const now = clock(), state = runtime(db), stored = cipher(db), rows = targets(db), current = identityCurrent(db);
-  const plans = (db.prepare("SELECT * FROM telegram_scheduled_message_plans WHERE deleted_at=0 ORDER BY created_at,id").all() as Plan[]).map(viewPlan);
+  const plans = (db.prepare("SELECT * FROM telegram_scheduled_message_plans WHERE deleted_at=0 ORDER BY created_at,id").all() as Plan[]).map(row => viewPlan(db, row));
   const deliveries = (db.prepare("SELECT * FROM telegram_scheduled_message_deliveries ORDER BY run_at DESC,target_key,id LIMIT 150").all() as Delivery[]).map(row => ({ id: row.id, planId: row.plan_id, planName: row.plan_name, runAt: row.run_at, targetKey: row.target_key, targetTitle: row.target_title, status: row.status, attempts: row.attempts, lastError: row.last_error, sentAt: row.sent_at || null, messageId: row.message_id || null }));
   const counts: Record<string, number> = { pending: 0, sending: 0, sent: 0, failed: 0, unknown: 0, cancelled: 0, skipped: 0 };
   for (const row of db.prepare("SELECT status,COUNT(*) AS count FROM telegram_scheduled_message_deliveries GROUP BY status").all() as { status: string; count: number }[]) counts[row.status] = row.count;
   const next = plans.flatMap(p => p.enabled && p.nextRunAt ? [p.nextRunAt] : []);
   return { now, timezone: "Asia/Kuala_Lumpur", hasToken: Boolean(stored), plans, deliveries, counts,
-    targets: TARGETS.map(target => { const row = rows.find(r => r.target_key === target.key); return { key: target.key, title: target.title, chatId: row?.chat_id ? String(row.chat_id) : target.key === "hot" && hotChatId(db) ? String(hotChatId(db)) : "", ready: current && row?.ready === 1, lastError: row?.last_error || (stored && !current ? CHANGED_ERROR : !stored ? TOKEN_ERROR : !row ? TARGET_ERROR : "") }; }),
-    scheduler: { workerHealthy: state.heartbeat_at > 0 && now - state.heartbeat_at < 30_000, heartbeatAt: state.heartbeat_at || null, lastTickAt: state.last_tick_at || null, lastCompletedAt: state.last_completed_at || null, nextRunAt: next.length ? Math.min(...next) : null, lastError: state.last_error || (plans.some(p => p.enabled) && !configured(db) ? CHANGED_ERROR : "") } };
+    targets: channelDefinitions(db, hotChatId(db)).map(target => {
+      const row = rows.find(r => r.target_key === target.key);
+      return { ...target, chatId: row?.chat_id ? String(row.chat_id) : /^-\d+$/.test(target.address) ? target.address : "",
+        ready: current && row?.ready === 1, lastError: row?.last_error || (stored && !current ? CHANGED_ERROR : !stored ? TOKEN_ERROR : !row ? TARGET_ERROR : "") };
+    }),
+    scheduler: { workerHealthy: state.heartbeat_at > 0 && now - state.heartbeat_at < 30_000, heartbeatAt: state.heartbeat_at || null, lastTickAt: state.last_tick_at || null, lastCompletedAt: state.last_completed_at || null, nextRunAt: next.length ? Math.min(...next) : null, lastError: state.last_error || (hasBlockedPlan(db) ? CHANGED_ERROR : "") } };
 }
 
 /** Permission checks only; this method never publishes a message. */
 export async function verifyScheduledMessageTargets(db: DatabaseSync, decrypt: Decrypt, clock = Date.now): Promise<ScheduledMessageStatus> {
   const stored = cipher(db), hot = hotChatId(db), token = stored ? decrypt(stored) : "", now = clock();
+  const definitions = channelDefinitions(db, hot), signature = JSON.stringify(definitions);
   let botId = 0, globalError = "";
   if (!token) globalError = TOKEN_ERROR;
   else {
@@ -79,28 +120,111 @@ export async function verifyScheduledMessageTargets(db: DatabaseSync, decrypt: D
     if (me?.ok && me.result.is_bot === true && validId(me.result.id) && typeof me.result.username === "string" && me.result.username.toLowerCase() === "freebonus365chatbot") botId = me.result.id;
     else globalError = "无法验证 @FreeBonus365ChatBot，请检查已保存的 Token。";
   }
-  const verified = await Promise.all(TARGETS.map(async target => {
+  const verified = await Promise.all(definitions.map(async target => {
     const fail = (error: string): Target => ({ target_key: target.key, chat_id: 0, title: target.title, ready: 0, last_error: error, verified_at: now });
     if (globalError) return fail(globalError);
-    if (target.key === "hot" && !hot) return fail("请先在 Hot 频道设置保存目标频道。" );
-    const chat = await telegramRequest(token, "getChat", { chat_id: target.username ? `@${target.username}` : hot }).catch(() => null);
+    if (!target.address) return fail("请先在 Hot 频道设置保存目标频道。");
+    const username = target.address.startsWith("@") ? target.address.slice(1) : "";
+    const chat = await telegramRequest(token, "getChat", { chat_id: username ? target.address : Number(target.address) }).catch(() => null);
     if (!chat?.ok || !validChat(chat.result.id) || !["channel", "supergroup", "group"].includes(String(chat.result.type))
-      || target.username && (typeof chat.result.username !== "string" || chat.result.username.toLowerCase() !== target.username)
-      || target.key === "hot" && chat.result.id !== hot) return fail(`无法识别 ${target.title}，请检查频道和机器人权限。`);
+      || (username ? typeof chat.result.username !== "string" || chat.result.username.toLowerCase() !== username
+        : chat.result.id !== Number(target.address))) return fail(`无法识别 ${target.title}，请检查频道和机器人权限。`);
     const member = await telegramRequest(token, "getChatMember", { chat_id: chat.result.id, user_id: botId }).catch(() => null);
     const allowed = member?.ok && (member.result.status === "creator" || member.result.status === "administrator" && (chat.result.type !== "channel" || member.result.can_post_messages === true));
     if (!allowed) return { ...fail(`请将 @FreeBonus365ChatBot 设为 ${target.title} 管理员并允许发布消息。`), chat_id: chat.result.id };
     return { target_key: target.key, chat_id: chat.result.id, title: target.title, ready: 1, last_error: "", verified_at: now } as Target;
   }));
-  const ids = verified.filter(t => t.ready).map(t => t.chat_id);
-  if (new Set(ids).size !== ids.length) for (const row of verified) { row.ready = 0; row.last_error = "三个目标必须是不同的频道，请检查 Hot 频道设置。"; }
+  const fixed = verified.filter(target => !validCustomKey(target.target_key));
+  const fixedIds = fixed.filter(target => target.ready).map(target => target.chat_id);
+  if (new Set(fixedIds).size !== fixedIds.length) for (const row of fixed) {
+    row.ready = 0;
+    row.last_error = "三个默认目标必须是不同的频道，请检查 Hot 频道设置。";
+  }
+  const knownChats = new Set(fixed.filter(target => validChat(target.chat_id)).map(target => target.chat_id));
+  for (const row of verified.filter(target => validCustomKey(target.target_key) && target.ready)) {
+    if (knownChats.has(row.chat_id)) {
+      row.ready = 0;
+      row.last_error = "此频道已在发送目标中。请使用已有频道或填写不同的频道。";
+    } else knownChats.add(row.chat_id);
+  }
   transaction(db, () => {
-    if (cipher(db) !== stored || hotChatId(db) !== hot) throw new ScheduledMessageError(CHANGED_ERROR, 409);
+    if (cipher(db) !== stored || hotChatId(db) !== hot || JSON.stringify(channelDefinitions(db, hot)) !== signature) throw new ScheduledMessageError(CHANGED_ERROR, 409);
     for (const row of verified) db.prepare(`INSERT INTO telegram_scheduled_message_targets(target_key,chat_id,title,ready,last_error,verified_at)
       VALUES(?,?,?,?,?,?) ON CONFLICT(target_key) DO UPDATE SET chat_id=excluded.chat_id,title=excluded.title,ready=excluded.ready,last_error=excluded.last_error,verified_at=excluded.verified_at`)
       .run(row.target_key, row.chat_id, row.title, row.ready, row.last_error, row.verified_at);
     db.prepare("UPDATE telegram_scheduled_message_runtime SET token_hash=?,bot_id=?,hot_chat_id=?,next_verify_at=?,last_error=? WHERE id='primary'")
-      .run(stored ? hash(stored) : "", botId, hot, now + (verified.every(t => t.ready) ? 60 * 60_000 : 60_000), verified.find(t => !t.ready)?.last_error || "");
+      .run(stored ? hash(stored) : "", botId, hot, now + (verified.every(t => t.ready) ? 60 * 60_000 : 60_000), globalError);
+  });
+  return scheduledMessageStatus(db, clock);
+}
+
+function channelAddress(value: string): string {
+  const address = value.trim().toLowerCase();
+  const handle = /^(?:@|https?:\/\/t\.me\/)([a-z][a-z0-9_]{4,31})\/?$/.exec(address);
+  if (handle) return `@${handle[1]}`;
+  if (/^-[1-9]\d{0,15}$/.test(address) && validChat(Number(address))) return address;
+  throw new ScheduledMessageError("请输入频道的 @用户名、t.me 公开链接或负数频道 ID。");
+}
+function channelRow(db: DatabaseSync, key: ScheduledMessageTargetKey): Channel | undefined {
+  return db.prepare("SELECT * FROM telegram_scheduled_message_channels WHERE target_key=?").get(key) as Channel | undefined;
+}
+function clearChannelJobs(db: DatabaseSync, key: ScheduledMessageTargetKey) {
+  db.prepare("DELETE FROM telegram_scheduled_message_targets WHERE target_key=?").run(key);
+  db.prepare(`UPDATE telegram_scheduled_message_deliveries SET text='',media_id='',status='cancelled',last_error=?,lease_id='',lease_until=0
+    WHERE target_key=? AND status IN ('pending','sending') AND dispatch_started_at=0`).run(CHANGED_ERROR, key);
+  db.prepare("UPDATE telegram_scheduled_message_runtime SET next_verify_at=0 WHERE id='primary'").run();
+}
+function requireInactiveChannel(db: DatabaseSync, key: ScheduledMessageTargetKey) {
+  const active = db.prepare(`SELECT target_keys_json FROM telegram_scheduled_message_plans p
+    WHERE enabled=1 AND deleted_at=0 AND (next_run_at>0 OR EXISTS (
+      SELECT 1 FROM telegram_scheduled_message_deliveries d WHERE d.plan_id=p.id AND d.plan_revision=p.revision AND d.status IN ('pending','sending')
+    ))`).all() as { target_keys_json: string }[];
+  if (active.some(p => parseTargetKeys(p.target_keys_json).includes(key))) {
+    throw new ScheduledMessageError("此频道仍有启用的发送计划，请先修改目标或暂停相关计划。");
+  }
+}
+export async function saveScheduledMessageTarget(db: DatabaseSync, input: ScheduledMessageTargetInput, decrypt: Decrypt, clock = Date.now): Promise<ScheduledMessageStatus> {
+  if (typeof input.title !== "string" || !input.title.trim() || input.title.trim().length > 100 || typeof input.address !== "string"
+    || input.key !== undefined && (!validCustomKey(input.key) || typeof input.revision !== "string" || !UUID.test(input.revision) || input.requestId !== undefined)
+    || input.key === undefined && (typeof input.requestId !== "string" || !UUID.test(input.requestId) || input.revision !== undefined)) {
+    throw new ScheduledMessageError("请检查频道名称、地址和版本。");
+  }
+  const title = input.title.trim(), address = channelAddress(input.address);
+  const key = input.key ?? `custom:${input.requestId!}`;
+  const changed = transaction(db, () => {
+    const current = channelRow(db, key);
+    if (input.key ? !current || current.deleted_at > 0 || current.revision !== input.revision
+      : current && (current.deleted_at > 0 || current.title !== title || current.address !== address)) {
+      throw new ScheduledMessageError("频道已被修改或请求已处理，请刷新后再保存。", 409);
+    }
+    if (current?.title === title && current.address === address) return false;
+    if (channelDefinitions(db, hotChatId(db)).some(target => target.key !== key && target.address === address)
+      || !address.startsWith("@") && targets(db).some(target => target.target_key !== key && String(target.chat_id) === address)) {
+      throw new ScheduledMessageError("此频道已在发送目标中，请选择已有频道。");
+    }
+    if (!current && customChannels(db).length >= 20) throw new ScheduledMessageError("最多可添加 20 个自定义频道。");
+    if (current && current.address !== address) requireInactiveChannel(db, key);
+    db.prepare(`INSERT INTO telegram_scheduled_message_channels(target_key,title,address,revision) VALUES(?,?,?,?)
+      ON CONFLICT(target_key) DO UPDATE SET title=excluded.title,address=excluded.address,revision=excluded.revision`)
+      .run(key, title, address, randomUUID());
+    if (current?.address !== address) clearChannelJobs(db, key);
+    return true;
+  });
+  if (!changed || !cipher(db)) return scheduledMessageStatus(db, clock);
+  try { return await verifyScheduledMessageTargets(db, decrypt, clock); }
+  catch (error) {
+    if (error instanceof ScheduledMessageError && error.status === 409) return scheduledMessageStatus(db, clock);
+    throw error;
+  }
+}
+export function deleteScheduledMessageTarget(db: DatabaseSync, input: { key: ScheduledMessageTargetKey; revision: string }, clock = Date.now): ScheduledMessageStatus {
+  if (!validCustomKey(input.key) || !UUID.test(input.revision)) throw new ScheduledMessageError("频道标识无效。");
+  transaction(db, () => {
+    const current = channelRow(db, input.key);
+    if (!current || current.deleted_at || current.revision !== input.revision) throw new ScheduledMessageError("频道已被修改，请刷新后重试。", 409);
+    requireInactiveChannel(db, input.key);
+    db.prepare("UPDATE telegram_scheduled_message_channels SET deleted_at=?,revision=? WHERE target_key=?").run(clock(), randomUUID(), input.key);
+    clearChannelJobs(db, input.key);
   });
   return scheduledMessageStatus(db, clock);
 }
@@ -109,20 +233,37 @@ function validateInput(input: ScheduledMessagePlanInput) {
     || !Array.isArray(input.times) || input.times.length < 1 || input.times.length > 24 || input.times.some(t => typeof t !== "string" || !TIME.test(t)) || new Set(input.times).size !== input.times.length
     || typeof input.enabled !== "boolean" || input.id !== undefined && !UUID.test(input.id) || input.revision !== undefined && !UUID.test(input.revision)
     || input.id && (!input.revision || input.requestId !== undefined) || !input.id && (typeof input.requestId !== "string" || !UUID.test(input.requestId) || input.revision !== undefined)) throw new ScheduledMessageError("请检查文案、每日发送时间和计划版本。" );
+  if (input.calendarDate != null && (typeof input.calendarDate !== "string" || input.calendarDate && !Number.isFinite(calendarDay(input.calendarDate)))) {
+    throw new ScheduledMessageError("请输入有效的马来西亚日期。");
+  }
+  if (input.targetKeys !== undefined && (!Array.isArray(input.targetKeys) || !input.targetKeys.length || input.targetKeys.length > 23
+    || !input.targetKeys.every(validTargetKey) || new Set(input.targetKeys).size !== input.targetKeys.length)) {
+    throw new ScheduledMessageError("请选择至少一个有效且不同的发送频道。");
+  }
+  if (input.mediaId != null && (typeof input.mediaId !== "string" || !UUID.test(input.mediaId))) throw new ScheduledMessageError("附件标识无效，请重新上传。");
 }
 export async function saveScheduledMessagePlan(db: DatabaseSync, input: ScheduledMessagePlanInput, decrypt: Decrypt, clock = Date.now): Promise<ScheduledMessageStatus> {
   validateInput(input);
-  const samePayload = (row: Plan) => !row.deleted_at && row.name === input.name.trim() && row.text === input.text
-    && row.times_json === JSON.stringify([...input.times].sort()) && row.enabled === Number(input.enabled);
   const existingRequest = () => !input.id ? db.prepare("SELECT * FROM telegram_scheduled_message_plans WHERE id=?").get(input.requestId!) as Plan | undefined : undefined;
+  const before = input.id ? plan(db, input.id) : undefined;
+  if (input.id && (!before || before.revision !== input.revision)) throw new ScheduledMessageError("计划已被修改，请刷新后再保存。", 409);
+  const times = [...input.times].sort(), timesJson = JSON.stringify(times), name = input.name.trim(), enabled = Number(input.enabled);
+  const calendarDate = input.calendarDate === undefined ? before?.calendar_date || "" : input.calendarDate || "";
+  const mediaId = input.mediaId === undefined ? before?.media_id || "" : input.mediaId || "";
+  const keys = [...(input.targetKeys ?? parseTargetKeys(before?.target_keys_json || ""))].sort();
+  const keysJson = keys.length === DEFAULT_TARGET_KEYS.length && DEFAULT_TARGET_KEYS.every(key => keys.includes(key)) ? "" : JSON.stringify(keys);
+  if (mediaId && input.text.length > 1024) throw new ScheduledMessageError("附照片、视频或 GIF 的文案最多 1,024 个字符。");
+  const samePayload = (row: Plan) => !row.deleted_at && row.name === name && row.text === input.text
+    && row.times_json === timesJson && row.calendar_date === calendarDate && row.target_keys_json === keysJson && row.media_id === mediaId && row.enabled === enabled;
   const existing = existingRequest();
   if (existing) {
     if (!samePayload(existing)) throw new ScheduledMessageError("此新增请求已处理或内容已改变，请刷新后重试。", 409);
     return scheduledMessageStatus(db, clock);
   }
-  const before = input.id ? plan(db, input.id) : undefined;
-  if (input.id && (!before || before.revision !== input.revision)) throw new ScheduledMessageError("计划已被修改，请刷新后再保存。", 409);
-  if (input.enabled) { await verifyScheduledMessageTargets(db, decrypt, clock); if (!configured(db)) throw new ScheduledMessageError(TARGET_ERROR); }
+  if (input.enabled && !(before && samePayload(before))) {
+    await verifyScheduledMessageTargets(db, decrypt, clock);
+    if (!configured(db, keys)) throw new ScheduledMessageError(TARGET_ERROR);
+  }
   transaction(db, () => {
     const replay = existingRequest();
     if (replay) {
@@ -130,18 +271,28 @@ export async function saveScheduledMessagePlan(db: DatabaseSync, input: Schedule
       return;
     }
     const current = input.id ? plan(db, input.id) : undefined;
-    if (input.enabled && !configured(db)) throw new ScheduledMessageError(CHANGED_ERROR, 409);
     if (input.id && (!current || current.revision !== input.revision)) throw new ScheduledMessageError("计划已被修改，请刷新后再保存。", 409);
-    if (!current && (db.prepare("SELECT COUNT(*) AS count FROM telegram_scheduled_message_plans WHERE deleted_at=0").get() as { count: number }).count >= 100) throw new ScheduledMessageError("最多保留 100 个文案计划。" );
-    const times = [...input.times].sort(), timesJson = JSON.stringify(times), name = input.name.trim(), enabled = Number(input.enabled), now = clock();
-    if (current && current.name === name && current.text === input.text && current.times_json === timesJson && current.enabled === enabled) return;
-    const next = enabled ? current?.enabled === 1 && current.times_json === timesJson ? current.next_run_at : nextScheduledMessageTime(times, now, true) : 0;
+    if (current && samePayload(current)) return;
+    const now = clock(), today = new Date(now + OFFSET).toISOString().slice(0, 10);
+    const sameSchedule = current?.enabled === 1 && current.times_json === timesJson && current.calendar_date === calendarDate;
+    const next = enabled ? sameSchedule ? current.next_run_at : nextScheduledMessageTime(times, now, true, calendarDate) : 0;
+    if (enabled && calendarDate && !sameSchedule && !next) throw new ScheduledMessageError("这一天的发送时间已过，请选未来的日期或时间。");
+    if (enabled && !configured(db, keys)) throw new ScheduledMessageError(CHANGED_ERROR, 409);
+    if (!keys.length || keys.some(key => validCustomKey(key) && !customChannels(db).some(channel => channel.target_key === key))) {
+      throw new ScheduledMessageError("所选频道已不存在，请重新选择。");
+    }
+    if (mediaId && !readScheduledMessageMedia(db, mediaId)) throw new ScheduledMessageError("附件已失效，请重新上传。");
+    if ((!current || current.calendar_date && current.calendar_date < today) && (!calendarDate || calendarDate >= today)) {
+      const count = db.prepare("SELECT COUNT(*) AS count FROM telegram_scheduled_message_plans WHERE deleted_at=0 AND (calendar_date='' OR calendar_date>=?)").get(today) as { count: number };
+      if (count.count >= 100) throw new ScheduledMessageError("最多安排 100 个重复、今天和未来的文案计划。");
+    }
     const id = current?.id || input.requestId!, revision = randomUUID();
-    db.prepare(`INSERT INTO telegram_scheduled_message_plans(id,revision,name,text,times_json,enabled,next_run_at,created_at,updated_at)
-      VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,name=excluded.name,text=excluded.text,
-      times_json=excluded.times_json,enabled=excluded.enabled,next_run_at=excluded.next_run_at,updated_at=excluded.updated_at`)
-      .run(id, revision, name, input.text, timesJson, enabled, next, now, now);
-    db.prepare(`UPDATE telegram_scheduled_message_deliveries SET text='',status='cancelled',last_error='计划已修改或停用。',lease_id='',lease_until=0
+    db.prepare(`INSERT INTO telegram_scheduled_message_plans(id,revision,name,text,times_json,calendar_date,target_keys_json,media_id,enabled,next_run_at,created_at,updated_at)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,name=excluded.name,text=excluded.text,
+      times_json=excluded.times_json,calendar_date=excluded.calendar_date,target_keys_json=excluded.target_keys_json,media_id=excluded.media_id,
+      enabled=excluded.enabled,next_run_at=excluded.next_run_at,updated_at=excluded.updated_at`)
+      .run(id, revision, name, input.text, timesJson, calendarDate, keysJson, mediaId, enabled, next, now, now);
+    db.prepare(`UPDATE telegram_scheduled_message_deliveries SET text='',media_id='',status='cancelled',last_error='计划已修改或停用。',lease_id='',lease_until=0
       WHERE plan_id=? AND status IN ('pending','sending') AND dispatch_started_at=0`).run(id);
   });
   return scheduledMessageStatus(db, clock);
@@ -151,41 +302,55 @@ export function deleteScheduledMessagePlan(db: DatabaseSync, input: { id: string
   transaction(db, () => {
     const current = plan(db, input.id);
     if (!current || current.revision !== input.revision) throw new ScheduledMessageError("计划已被修改，请刷新后重试。", 409);
-    db.prepare("UPDATE telegram_scheduled_message_plans SET enabled=0,next_run_at=0,deleted_at=?,updated_at=?,revision=? WHERE id=?").run(clock(), clock(), randomUUID(), input.id);
-    db.prepare(`UPDATE telegram_scheduled_message_deliveries SET text='',status='cancelled',last_error='计划已删除。',lease_id='',lease_until=0
+    db.prepare("UPDATE telegram_scheduled_message_plans SET enabled=0,next_run_at=0,media_id='',deleted_at=?,updated_at=?,revision=? WHERE id=?").run(clock(), clock(), randomUUID(), input.id);
+    db.prepare(`UPDATE telegram_scheduled_message_deliveries SET text='',media_id='',status='cancelled',last_error='计划已删除。',lease_id='',lease_until=0
       WHERE plan_id=? AND status IN ('pending','sending') AND dispatch_started_at=0`).run(input.id);
   });
   return scheduledMessageStatus(db, clock);
 }
 
 function materialize(db: DatabaseSync, now: number) {
-  const state = runtime(db), channelRows = targets(db);
-  const insert = (row: Plan, at: number, status: "pending" | "skipped", error = "") => {
-    for (const target of TARGETS) {
-      const channel = channelRows.find(t => t.target_key === target.key);
+  const state = runtime(db), channelRows = targets(db), currentIdentity = identityCurrent(db), today = dayStart(now);
+  const definitions = channelDefinitions(db, hotChatId(db));
+  const insert = (row: Plan, keys: ScheduledMessageTargetKey[], at: number, status: "pending" | "skipped", error = "") => {
+    for (const key of keys) {
+      const channel = channelRows.find(target => target.target_key === key);
       db.prepare(`INSERT OR IGNORE INTO telegram_scheduled_message_deliveries
-        (id,plan_id,plan_revision,plan_name,text,run_at,target_key,target_chat_id,target_title,token_hash,bot_id,status,next_attempt_at,last_error)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(randomUUID(), row.id, row.revision, row.name, status === "pending" ? row.text : "", at, target.key, channel?.chat_id || 0, target.title, state.token_hash, state.bot_id, status, at, error);
+        (id,plan_id,plan_revision,plan_name,text,media_id,run_at,target_key,target_chat_id,target_title,token_hash,bot_id,status,next_attempt_at,last_error)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+          randomUUID(), row.id, row.revision, row.name, status === "pending" ? row.text : "", status === "pending" ? row.media_id : "",
+          at, key, channel?.chat_id || 0, definitions.find(target => target.key === key)?.title || key, state.token_hash, state.bot_id, status, at, error);
     }
   };
   for (const row of db.prepare("SELECT * FROM telegram_scheduled_message_plans WHERE enabled=1 AND deleted_at=0 AND next_run_at>0 AND next_run_at<=?").all(now) as Plan[]) {
-    const times = parseTimes(row.times_json);
-    if (!times.length) { db.prepare("UPDATE telegram_scheduled_message_plans SET enabled=0,next_run_at=0 WHERE id=?").run(row.id); continue; }
-    if (row.next_run_at < now - GRACE_MS) insert(row, row.next_run_at, "skipped", "错过发送时段超过 15 分钟，已跳过停机期间的旧时段。" );
+    const times = parseTimes(row.times_json), keys = parseTargetKeys(row.target_keys_json), date = row.calendar_date ? calendarDay(row.calendar_date) : null;
+    if (!times.length || !keys.length || date !== null && !Number.isFinite(date)) {
+      db.prepare("UPDATE telegram_scheduled_message_plans SET enabled=0,next_run_at=0 WHERE id=?").run(row.id);
+      continue;
+    }
+    const expiredDate = date !== null && date < today;
+    if (!expiredDate && (!currentIdentity || !targetsReady(channelRows, keys))) continue;
+    if (date === null && row.next_run_at < now - GRACE_MS) insert(row, keys, row.next_run_at, "skipped", "错过发送时段超过 15 分钟，已跳过停机期间的旧时段。");
     // Only recent wall-clock occurrences may catch up; long downtime never bursts an old backlog.
     let latest = row.last_run_at;
-    for (const day of [dayStart(now) - DAY, dayStart(now)]) for (const time of times) {
+    for (const day of date === null ? [today - DAY, today] : [date]) for (const time of times) {
       const at = slot(day, time);
-      if (at >= row.next_run_at && at >= now - GRACE_MS && at <= now) { insert(row, at, "pending"); latest = Math.max(latest, at); }
+      if (at < row.next_run_at || at > now) continue;
+      if (expiredDate || date !== null && at < now - GRACE_MS) {
+        insert(row, keys, at, "skipped", expiredDate ? "该发送日期已结束，未补发旧消息。" : "错过发送时段超过 15 分钟，已跳过旧消息。");
+      } else if (at >= now - GRACE_MS) {
+        insert(row, keys, at, "pending");
+        latest = Math.max(latest, at);
+      }
     }
     db.prepare("UPDATE telegram_scheduled_message_plans SET next_run_at=?,last_run_at=? WHERE id=? AND revision=?")
-      .run(nextScheduledMessageTime(times, now), latest, row.id, row.revision);
+      .run(nextScheduledMessageTime(times, now, false, row.calendar_date), latest, row.id, row.revision);
   }
 }
 function releaseTerminalPayloads(db: DatabaseSync) {
   // Keep the unique occurrence metadata forever for deduplication. Only the
-  // redundant text snapshot is released after a definitive terminal outcome.
-  db.prepare("UPDATE telegram_scheduled_message_deliveries SET text='' WHERE text<>'' AND status IN ('sent','failed','cancelled','skipped')").run();
+  // redundant payload snapshot is released after a definitive terminal outcome.
+  db.prepare("UPDATE telegram_scheduled_message_deliveries SET text='',media_id='' WHERE (text<>'' OR media_id<>'') AND status IN ('sent','failed','cancelled','skipped')").run();
 }
 function recover(db: DatabaseSync, now: number) {
   releaseTerminalPayloads(db);
@@ -193,11 +358,13 @@ function recover(db: DatabaseSync, now: number) {
     WHERE status='sending' AND dispatch_started_at>0 AND lease_until<=?`).run(UNKNOWN_ERROR, now);
   db.prepare(`UPDATE telegram_scheduled_message_deliveries SET status='pending',lease_id='',lease_until=0
     WHERE status='sending' AND dispatch_started_at=0 AND lease_until<=?`).run(now);
-  db.prepare(`UPDATE telegram_scheduled_message_deliveries SET text='',status='cancelled',last_error='计划已修改或停用。',lease_id='',lease_until=0
+  db.prepare(`UPDATE telegram_scheduled_message_deliveries SET text='',media_id='',status='cancelled',last_error='计划已修改或停用。',lease_id='',lease_until=0
     WHERE status='pending' AND NOT EXISTS(SELECT 1 FROM telegram_scheduled_message_plans p
       WHERE p.id=plan_id AND p.revision=plan_revision AND p.enabled=1 AND p.deleted_at=0)`).run();
-  db.prepare(`UPDATE telegram_scheduled_message_deliveries SET text='',status='skipped',last_error='发送时段已过期，未补发旧消息。',lease_id='',lease_until=0
-    WHERE status='pending' AND run_at<?`).run(now - GRACE_MS);
+  db.prepare(`UPDATE telegram_scheduled_message_deliveries SET text='',media_id='',status='skipped',last_error='发送时段已过期，未补发旧消息。',lease_id='',lease_until=0
+    WHERE status='pending' AND (run_at<? OR (run_at<? AND EXISTS (
+      SELECT 1 FROM telegram_scheduled_message_plans p WHERE p.id=plan_id AND p.calendar_date<>''
+    )))`).run(now - GRACE_MS, dayStart(now));
 }
 function owns(db: DatabaseSync, lease: string, now: number): boolean { const state = runtime(db); return state.lease_id === lease && state.lease_until > now; }
 function claimGroup(db: DatabaseSync, lease: string, now: number): Delivery[] {
@@ -206,7 +373,7 @@ function claimGroup(db: DatabaseSync, lease: string, now: number): Delivery[] {
     recover(db, now);
     const due = db.prepare("SELECT plan_id,run_at FROM telegram_scheduled_message_deliveries d WHERE status='pending' AND run_at<=? AND next_attempt_at<=? AND EXISTS(SELECT 1 FROM telegram_scheduled_message_targets t WHERE t.target_key=d.target_key AND t.ready=1) ORDER BY run_at,id LIMIT 1").get(now, now) as { plan_id: string; run_at: number } | undefined;
     if (!due) return [];
-    const jobs = db.prepare("SELECT * FROM telegram_scheduled_message_deliveries d WHERE plan_id=? AND run_at=? AND status='pending' AND next_attempt_at<=? AND EXISTS(SELECT 1 FROM telegram_scheduled_message_targets t WHERE t.target_key=d.target_key AND t.ready=1) ORDER BY target_key").all(due.plan_id, due.run_at, now) as Delivery[];
+    const jobs = db.prepare("SELECT * FROM telegram_scheduled_message_deliveries d WHERE plan_id=? AND run_at=? AND status='pending' AND next_attempt_at<=? AND EXISTS(SELECT 1 FROM telegram_scheduled_message_targets t WHERE t.target_key=d.target_key AND t.ready=1) ORDER BY target_key LIMIT 4").all(due.plan_id, due.run_at, now) as Delivery[];
     const claimed: Delivery[] = [];
     for (const job of jobs) {
       const claim = randomUUID();
@@ -222,7 +389,13 @@ function prepareDispatch(db: DatabaseSync, lease: string, job: Delivery, now: nu
     const current = plan(db, job.plan_id), state = runtime(db), target = targets(db).find(t => t.target_key === job.target_key);
     if (!owns(db, lease, now) || !identityCurrent(db) || !current?.enabled || current.revision !== job.plan_revision || !target?.ready
       || target.chat_id !== job.target_chat_id || state.token_hash !== job.token_hash || state.bot_id !== job.bot_id || row.status !== "sending" || row.lease_id !== job.lease_id) {
-      db.prepare("UPDATE telegram_scheduled_message_deliveries SET text='',status='cancelled',lease_id='',lease_until=0,last_error=? WHERE id=? AND status='sending' AND dispatch_started_at=0").run(CHANGED_ERROR, job.id);
+      db.prepare("UPDATE telegram_scheduled_message_deliveries SET text='',media_id='',status='cancelled',lease_id='',lease_until=0,last_error=? WHERE id=? AND lease_id=? AND status='sending' AND dispatch_started_at=0")
+        .run(CHANGED_ERROR, job.id, job.lease_id);
+      return false;
+    }
+    if (current.calendar_date && row.run_at < dayStart(now)) {
+      db.prepare("UPDATE telegram_scheduled_message_deliveries SET text='',media_id='',status='skipped',lease_id='',lease_until=0,last_error='该发送日期已结束，未补发旧消息。' WHERE id=? AND lease_id=? AND status='sending' AND dispatch_started_at=0")
+        .run(job.id, job.lease_id);
       return false;
     }
     return Boolean(db.prepare("UPDATE telegram_scheduled_message_deliveries SET dispatch_started_at=?,attempts=attempts+1,lease_until=? WHERE id=? AND lease_id=? AND status='sending' AND dispatch_started_at=0").run(now, now + LEASE_MS, job.id, job.lease_id).changes);
@@ -232,14 +405,16 @@ async function dispatch(db: DatabaseSync, lease: string, job: Delivery, decrypt:
   const stored = cipher(db), token = decrypt(stored);
   if (!token || hash(stored) !== job.token_hash) {
     transaction(db, () => {
-      db.prepare("UPDATE telegram_scheduled_message_deliveries SET text='',status='cancelled',last_error=?,lease_id='',lease_until=0 WHERE id=? AND status='sending' AND dispatch_started_at=0").run(TOKEN_ERROR, job.id);
+      db.prepare("UPDATE telegram_scheduled_message_deliveries SET text='',media_id='',status='cancelled',last_error=?,lease_id='',lease_until=0 WHERE id=? AND lease_id=? AND status='sending' AND dispatch_started_at=0").run(TOKEN_ERROR, job.id, job.lease_id);
       db.prepare("UPDATE telegram_scheduled_message_targets SET ready=0,last_error=?").run(TOKEN_ERROR);
       db.prepare("UPDATE telegram_scheduled_message_runtime SET next_verify_at=?,last_error=? WHERE id='primary'").run(clock() + 60_000, TOKEN_ERROR);
     });
     return;
   }
   if (!prepareDispatch(db, lease, job, clock())) return;
-  const response = await telegramRequest(token, "sendMessage", { chat_id: job.target_chat_id, text: job.text, link_preview_options: { is_disabled: true } }).catch(() => null);
+  const response = await (job.media_id
+    ? sendScheduledMessageMedia(db, token, job.target_chat_id, job.text, job.media_id)
+    : telegramRequest(token, "sendMessage", { chat_id: job.target_chat_id, text: job.text, link_preview_options: { is_disabled: true } })).catch(() => null);
   transaction(db, () => {
     const row = db.prepare("SELECT * FROM telegram_scheduled_message_deliveries WHERE id=?").get(job.id) as Delivery;
     if (row.status !== "sending" || row.lease_id !== job.lease_id) return;
@@ -254,7 +429,9 @@ async function dispatch(db: DatabaseSync, lease: string, job: Delivery, decrypt:
       db.prepare("UPDATE telegram_scheduled_message_deliveries SET status='pending',next_attempt_at=?,dispatch_started_at=0,lease_id='',lease_until=0,last_error='Telegram 限流，稍后自动重试。' WHERE id=? AND lease_id=?")
         .run(clock() + Math.max(1_000, delay), job.id, job.lease_id); return;
     }
-    const definitive = [400, 401, 403, 429].includes(code), error = code === 401 ? TOKEN_ERROR : code === 400 || code === 403 ? TARGET_ERROR : code === 429 ? "Telegram 连续限流，已停止本次发送。" : UNKNOWN_ERROR;
+    const definitive = [400, 401, 403, 429].includes(code), error = code === 401 ? TOKEN_ERROR
+      : code === 400 && job.media_id ? "Telegram 拒绝附件或附件已失效，请检查文件后重新安排。"
+      : code === 400 || code === 403 ? TARGET_ERROR : code === 429 ? "Telegram 连续限流，已停止本次发送。" : UNKNOWN_ERROR;
     db.prepare("UPDATE telegram_scheduled_message_deliveries SET status=?,last_error=?,lease_id='',lease_until=0 WHERE id=? AND lease_id=?").run(definitive ? "failed" : "unknown", error, job.id, job.lease_id);
     if (code === 401 || code === 403) {
       if (code === 401) db.prepare("UPDATE telegram_scheduled_message_targets SET ready=0,last_error=?").run(error);
@@ -275,16 +452,17 @@ export async function deliverScheduledMessagesOnce(decrypt: Decrypt, clock = Dat
   });
   if (!claimed) return;
   try {
-    const active = Boolean(db.prepare("SELECT 1 FROM telegram_scheduled_message_plans WHERE enabled=1 AND deleted_at=0 LIMIT 1").get());
+    const active = Boolean(db.prepare(`SELECT 1 FROM telegram_scheduled_message_plans p WHERE enabled=1 AND deleted_at=0
+      AND (next_run_at>0 OR EXISTS (SELECT 1 FROM telegram_scheduled_message_deliveries d WHERE d.plan_id=p.id AND d.status IN ('pending','sending'))) LIMIT 1`).get());
     const stored = cipher(db), state = runtime(db);
-    // One read-only startup verification makes all three destinations visible;
+    // One read-only startup verification makes the destinations visible;
     // failures back off rather than hammering Telegram every five seconds.
     const identityDirty = stored && (hash(stored) !== state.token_hash || hotChatId(db) !== state.hot_chat_id);
-    if (stored && (identityDirty || clock() >= state.next_verify_at) && (active || !targets(db).length || !configured(db))) await verifyScheduledMessageTargets(db, decrypt, clock);
+    if (stored && (identityDirty || clock() >= state.next_verify_at) && (active || !state.next_verify_at || !configured(db, DEFAULT_TARGET_KEYS))) {
+      await verifyScheduledMessageTargets(db, decrypt, clock);
+    }
     if (active) {
-      if (configured(db)) {
-        transaction(db, () => { if (owns(db, lease, clock())) materialize(db, clock()); });
-      }
+      transaction(db, () => { if (owns(db, lease, clock())) materialize(db, clock()); });
       // A permission problem on one destination must not block a definitive
       // 429 retry that belongs to another already-materialized destination.
       if (identityCurrent(db)) {
@@ -298,7 +476,7 @@ export async function deliverScheduledMessagesOnce(decrypt: Decrypt, clock = Dat
     }
     releaseTerminalPayloads(db);
     db.prepare("UPDATE telegram_scheduled_message_runtime SET last_completed_at=?,heartbeat_at=?,last_error=? WHERE id='primary' AND lease_id=?")
-      .run(clock(), clock(), active && !configured(db) ? runtime(db).last_error || CHANGED_ERROR : "", lease);
+      .run(clock(), clock(), active && hasBlockedPlan(db) ? runtime(db).last_error || CHANGED_ERROR : "", lease);
   } catch (error) {
     db.prepare("UPDATE telegram_scheduled_message_runtime SET last_error='文案定时服务暂时无法完成检查，将自动重试。' WHERE id='primary' AND lease_id=?").run(lease);
     throw error;

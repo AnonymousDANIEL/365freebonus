@@ -1,47 +1,93 @@
 "use client";
 
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { CalendarClock, Check, Clock3, History, LoaderCircle, MessageSquareText, Pause, Pencil, Play, Plus, RefreshCw, Trash2, X } from "lucide-react";
-import type { ScheduledMessagePlan, ScheduledMessagePlanInput, ScheduledMessageStatus } from "../lib/telegram-scheduled-messages-types";
+import { CalendarClock, Check, Clock3, History, LoaderCircle, MessageSquareText, Paperclip, Pause, Pencil, Play, Plus, Radio, RefreshCw, Trash2, Upload, X } from "lucide-react";
+import type { ScheduledMessagePlan, ScheduledMessagePlanInput, ScheduledMessageStatus, ScheduledMessageTarget, ScheduledMessageTargetKey } from "../lib/telegram-scheduled-messages-types";
 import "./telegram-scheduled-messages-admin.css";
 
 type Request = <T>(path: string, method?: string, body?: unknown) => Promise<T>;
 type Props = { request: Request; signInPath: string };
 type Notice = { message: string; error?: boolean; expired?: boolean };
-type Tab = "plans" | "time" | "history";
+type Tab = "plans" | "channels" | "time" | "history";
+type Attachment = NonNullable<ScheduledMessagePlan["media"]>;
+type UploadResponse = Attachment | { id: string; received: number };
+type PlanDraft = Omit<ScheduledMessagePlanInput, "mediaId"> & {
+  calendarDate: string; repeatDaily: boolean; targetKeys: ScheduledMessageTargetKey[]; media: Attachment | null;
+};
+type ChannelDraft = { requestId?: string; key?: ScheduledMessageTargetKey; revision?: string; title: string; address: string };
 const endpoint = "/api/admin/telegram/scheduled-messages";
+const uploadEndpoint = `${endpoint}/upload`;
 const timezone = "Asia/Kuala_Lumpur";
+const dayMs = 86_400_000;
+const chunkBytes = 4 * 1024 * 1024;
+const hourMinute = /^([01]\d|2[0-3]):[0-5]\d$/;
 const timeFormat = new Intl.DateTimeFormat("zh-CN", { timeZone: timezone, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" });
 const dateFormat = new Intl.DateTimeFormat("en-CA", { timeZone: timezone, year: "numeric", month: "2-digit", day: "2-digit" });
 const statusLabels: Record<string, string> = { pending: "待发送", sending: "发送中", sent: "已发送", failed: "发送失败", unknown: "待确认", cancelled: "已取消", skipped: "已跳过" };
-const tabs = [{ id: "plans", label: "文案管理", icon: MessageSquareText }, { id: "time", label: "时间管理", icon: CalendarClock }, { id: "history", label: "发送记录", icon: History }] as const;
-const freshDraft = (): ScheduledMessagePlanInput => ({ requestId: crypto.randomUUID(), name: "", text: "", times: [""], enabled: false });
+const tabs = [
+  { id: "plans", label: "文案管理", icon: MessageSquareText },
+  { id: "channels", label: "频道管理", icon: Radio },
+  { id: "time", label: "发送排期", icon: CalendarClock },
+  { id: "history", label: "发送记录", icon: History },
+] as const;
+const mediaLabels = { photo: "照片", video: "视频", animation: "GIF" };
+const mediaLimits: Record<string, number> = { "image/jpeg": 10, "image/png": 10, "image/gif": 20, "video/mp4": 50 };
+const mediaExtensions: Record<string, string> = { jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", gif: "image/gif", mp4: "video/mp4" };
 const displayTime = (value: number | null | undefined) => value ? timeFormat.format(value) : "—";
-function draftOf(plan: ScheduledMessagePlan): ScheduledMessagePlanInput {
-  return { id: plan.id, revision: plan.revision, name: plan.name, text: plan.text, times: [...plan.times], enabled: plan.enabled };
+function freshDraft(today: string, targetKeys: ScheduledMessageTargetKey[]): PlanDraft {
+  return { requestId: crypto.randomUUID(), name: "", text: "", times: [""], enabled: false, calendarDate: today, repeatDaily: false, targetKeys, media: null };
 }
-function failure(error: unknown): Notice {
+function draftOf(plan: ScheduledMessagePlan, today: string, defaults: ScheduledMessageTargetKey[]): PlanDraft {
+  return {
+    id: plan.id, revision: plan.revision, name: plan.name, text: plan.text, times: [...plan.times], enabled: plan.enabled,
+    calendarDate: plan.calendarDate || today, repeatDaily: !plan.calendarDate,
+    targetKeys: [...(plan.targetKeys ?? defaults)], media: plan.media ?? null,
+  };
+}
+function payloadOf({ media, repeatDaily, ...draft }: PlanDraft): ScheduledMessagePlanInput {
+  return { ...draft, name: draft.name.trim(), times: [...draft.times].sort(), calendarDate: repeatDaily ? "" : draft.calendarDate, mediaId: media?.id ?? null };
+}
+function describeMedia(media: Attachment) {
+  const size = media.bytes >= 1024 * 1024 ? `${(media.bytes / (1024 * 1024)).toFixed(1)} MB` : `${Math.max(1, Math.round(media.bytes / 1024))} KB`;
+  return `${mediaLabels[media.kind]} · ${media.name} · ${size}`;
+}
+async function uploadChunk(request: Request, path: string, chunk: Blob) {
+  try {
+    return await request<UploadResponse>(path, "POST", chunk);
+  } catch (error) {
+    const status = error instanceof Error && "status" in error ? error.status : undefined;
+    if (typeof status === "number" && ![502, 503, 504].includes(status)) throw error;
+    return request<UploadResponse>(path, "POST", chunk);
+  }
+}
+function failure(error: unknown, subject = "这条计划"): Notice {
   const status = error instanceof Error && "status" in error ? error.status : undefined;
-  return { error: true, expired: status === 401, message: status === 409 ? "这条计划已在其他页面修改。草稿已保留，请加载最新版本后再保存。" : error instanceof Error ? error.message : "暂时无法连接，请稍后重试。" };
+  return { error: true, expired: status === 401, message: status === 409 ? `${subject}已在其他页面修改。草稿已保留，请加载最新版本后再保存。` : error instanceof Error ? error.message : "暂时无法连接，请稍后重试。" };
 }
 function countdown(next: number | null, now: number): string {
   if (!next) return "尚未安排";
   const seconds = Math.max(0, Math.ceil((next - now) / 1000));
   if (!seconds) return "已到时间，正在检查发送";
-  return [Math.floor(seconds / 3600), Math.floor(seconds % 3600 / 60), seconds % 60].map(n => n.toString().padStart(2, "0")).join(":");
+  const hours = Math.floor(seconds / 3600), days = Math.floor(hours / 24);
+  const remaining = [hours % 24, Math.floor(seconds % 3600 / 60), seconds % 60].map(n => n.toString().padStart(2, "0")).join(":");
+  return days ? `${days} 天 ${remaining}` : remaining;
 }
-function dayStart(now: number) {
+function localDate(now: number) {
   const parts = dateFormat.formatToParts(now), value = (type: string) => parts.find(p => p.type === type)?.value || "";
-  return Date.parse(`${value("year")}-${value("month")}-${value("day")}T00:00:00+08:00`);
+  return `${value("year")}-${value("month")}-${value("day")}`;
+}
+function dayStart(date: string) {
+  return Date.parse(`${date}T00:00:00+08:00`);
 }
 function upcoming(plans: ScheduledMessagePlan[], now: number) {
-  const rows: { id: string; plan: ScheduledMessagePlan; at: number }[] = [], start = dayStart(now);
+  const rows: { id: string; plan: ScheduledMessagePlan; at: number }[] = [], start = dayStart(localDate(now));
   for (const plan of plans.filter(p => p.enabled)) {
     if (plan.nextRunAt && plan.nextRunAt <= now) rows.push({ id: `${plan.id}-due`, plan, at: plan.nextRunAt });
-    for (let day = 0; day < 2; day++) for (const time of plan.times) {
-      if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(time)) continue;
-      const [hour, minute] = time.split(":").map(Number), at = start + day * 86_400_000 + hour * 3_600_000 + minute * 60_000;
-      if (at > now && at <= now + 86_400_000) rows.push({ id: `${plan.id}-${at}`, plan, at });
+    const days = plan.calendarDate ? [dayStart(plan.calendarDate)] : [start, start + dayMs];
+    for (const dateStart of days) for (const time of plan.times) {
+      if (!hourMinute.test(time)) continue;
+      const [hour, minute] = time.split(":").map(Number), at = dateStart + hour * 3_600_000 + minute * 60_000;
+      if (at > now && at <= now + dayMs) rows.push({ id: `${plan.id}-${at}`, plan, at });
     }
   }
   return rows.sort((a, b) => a.at - b.at || a.plan.name.localeCompare(b.plan.name)).slice(0, 24);
@@ -50,10 +96,13 @@ function upcoming(plans: ScheduledMessagePlan[], now: number) {
 export default function TelegramScheduledMessages({ request, signInPath }: Props) {
   const [status, setStatus] = useState<ScheduledMessageStatus | null>(null);
   const [tab, setTab] = useState<Tab>("plans");
-  const [draft, setDraft] = useState<ScheduledMessagePlanInput | null>(null);
+  const [draft, setDraft] = useState<PlanDraft | null>(null);
+  const [channelDraft, setChannelDraft] = useState<ChannelDraft | null>(null);
+  const [showPast, setShowPast] = useState(false);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState("");
+  const [uploadProgress, setUploadProgress] = useState(0);
   const [clientNow, setClientNow] = useState(() => Date.now());
   const [historyFilter, setHistoryFilter] = useState("all");
   const busyRef = useRef(false), epoch = useRef(0), anchor = useRef({ now: Date.now(), receivedAt: Date.now() });
@@ -80,7 +129,7 @@ export default function TelegramScheduledMessages({ request, signInPath }: Props
     if (draft && tab === "plans") { editor.current?.scrollIntoView({ block: "nearest" }); editor.current?.querySelector<HTMLInputElement>("input")?.focus({ preventScroll: true }); }
   }, [draft?.id, Boolean(draft), tab]);
 
-  async function mutate(label: string, method: string, body?: unknown, success?: string) {
+  async function mutate(label: string, method: string, body?: unknown, success?: string, subject?: string) {
     if (busyRef.current) return false;
     busyRef.current = true; epoch.current++; setBusy(label); setNotice(null);
     try {
@@ -88,7 +137,7 @@ export default function TelegramScheduledMessages({ request, signInPath }: Props
       if (success) setNotice({ message: success });
       return true;
     } catch (error) {
-      setNotice(failure(error));
+      setNotice(failure(error, subject));
       if (error instanceof Error && "status" in error && error.status === 409) {
         try { accept(await request<ScheduledMessageStatus>(endpoint)); } catch { /* Keep the original conflict and draft. */ }
       }
@@ -97,37 +146,111 @@ export default function TelegramScheduledMessages({ request, signInPath }: Props
   }
   async function save(event: FormEvent) {
     event.preventDefault(); if (!draft) return;
-    if (!draft.name.trim() || !draft.text.trim() || draft.text.length > 4096) { setNotice({ error: true, message: "请填写名称和文案，文案最多 4,096 个字符。" }); return; }
-    if (!draft.times.length || draft.times.some(time => !/^([01]\d|2[0-3]):[0-5]\d$/.test(time)) || new Set(draft.times).size !== draft.times.length) {
-      setNotice({ error: true, message: "请填写有效且不重复的每日发送时间。" }); return;
+    const limit = draft.media ? 1024 : 4096;
+    if (!draft.name.trim() || !draft.text.trim() || draft.text.length > limit) {
+      setNotice({ error: true, message: `请填写名称和文案，文案最多 ${limit.toLocaleString()} 个字符。` }); return;
     }
-    const payload = { ...draft, name: draft.name.trim(), times: [...draft.times].sort() };
-    if (await mutate("save", draft.id ? "PUT" : "POST", payload, draft.enabled ? "文案及每日时间已保存，后台将自动向三个频道发送。" : "文案及每日时间已保存，计划处于暂停状态。")) setDraft(null);
+    if (!draft.times.length || draft.times.some(time => !hourMinute.test(time)) || new Set(draft.times).size !== draft.times.length) {
+      setNotice({ error: true, message: "请填写有效且不重复的发送时间。" }); return;
+    }
+    if (!draft.repeatDaily && (!/^\d{4}-\d{2}-\d{2}$/.test(draft.calendarDate) || !Number.isFinite(dayStart(draft.calendarDate)))) {
+      setNotice({ error: true, message: "请选择有效的发送日期。" }); return;
+    }
+    if (!draft.targetKeys.length) {
+      setNotice({ error: true, message: "请至少选择一个发送频道。" }); return;
+    }
+    if (await mutate("save", draft.id ? "PUT" : "POST", payloadOf(draft), draft.enabled ? "计划已保存，后台将按排期发布。" : "计划已保存，处于暂停状态。")) setDraft(null);
   }
   function open(plan?: ScheduledMessagePlan) {
     if (draft && !window.confirm("放弃当前未保存的草稿？")) return;
-    setDraft(plan ? draftOf(plan) : freshDraft()); setTab("plans"); setNotice(null);
+    setDraft(plan ? draftOf(plan, today, defaultTargetKeys) : freshDraft(today, defaultTargetKeys));
+    setTab("plans"); setNotice(null);
   }
   async function remove(plan: ScheduledMessagePlan) {
-    if (!window.confirm(`删除「${plan.name}」的每日计划？已发送的频道消息不会删除。`)) return;
+    if (!window.confirm(`删除「${plan.name}」的发送计划？已发送的频道消息会保留。`)) return;
     if (await mutate(`delete-${plan.id}`, "DELETE", { id: plan.id, revision: plan.revision }, "计划已删除，未发送的安排已取消。")) {
       if (draft?.id === plan.id) setDraft(null);
     }
   }
+  async function upload(file: File) {
+    if (!draft || busyRef.current) return;
+    const kind = file.type && file.type !== "application/octet-stream" ? file.type : mediaExtensions[file.name.split(".").at(-1)?.toLowerCase() || ""];
+    const max = Object.hasOwn(mediaLimits, kind) ? mediaLimits[kind] : 0;
+    if (!max || !file.size || file.size > max * 1024 * 1024) {
+      setNotice({ error: true, message: max ? `文件不能为空，每个文件最多 ${max} MB。` : "请选择 JPG、PNG、MP4 或 GIF 文件。" });
+      return;
+    }
+    busyRef.current = true; setBusy("upload"); setUploadProgress(0); setNotice(null);
+    try {
+      const uploadId = crypto.randomUUID();
+      const query = `name=${encodeURIComponent(file.name)}&uploadId=${uploadId}&size=${file.size}`;
+      for (let offset = 0; offset < file.size; offset += chunkBytes) {
+        const end = Math.min(offset + chunkBytes, file.size);
+        const chunk = file.slice(offset, end, file.type || "application/octet-stream");
+        const result = await uploadChunk(request, `${uploadEndpoint}?${query}&offset=${offset}`, chunk);
+        if (result?.id === uploadId && "kind" in result && end === file.size && Object.hasOwn(mediaLabels, result.kind)) {
+          setDraft(current => current ? { ...current, media: result } : current);
+          return;
+        }
+        if (result?.id !== uploadId || !("received" in result) || result.received !== end || end === file.size) {
+          throw new Error("无法读取附件上传结果，请重试。");
+        }
+        setUploadProgress(Math.floor(end / file.size * 100));
+      }
+    } catch (error) {
+      setNotice(failure(error));
+    } finally {
+      busyRef.current = false; setBusy("");
+    }
+  }
+  function editChannel(target?: ScheduledMessageTarget) {
+    if (channelDraft && !window.confirm("放弃当前未保存的频道设置？")) return;
+    setChannelDraft(target
+      ? { key: target.key, revision: target.revision, title: target.title, address: target.address }
+      : { requestId: crypto.randomUUID(), title: "", address: "" });
+    setNotice(null);
+  }
+  async function saveChannel(event: FormEvent) {
+    event.preventDefault();
+    if (!channelDraft?.title.trim() || !channelDraft.address.trim()) {
+      setNotice({ error: true, message: "请填写频道名称和 Telegram 地址。" }); return;
+    }
+    const payload = { ...channelDraft, action: "upsertTarget", title: channelDraft.title.trim(), address: channelDraft.address.trim() };
+    if (await mutate("save-channel", "POST", payload, "频道已保存，可在文案计划中选择。", "这个频道")) setChannelDraft(null);
+  }
+  async function removeChannel(target: ScheduledMessageTarget) {
+    if (!window.confirm(`删除「${target.title}」？请先从仍使用该频道的计划移除它。`)) return;
+    if (await mutate(`delete-channel-${target.key}`, "DELETE", { targetKey: target.key, revision: target.revision }, "频道已删除。", "这个频道") && channelDraft?.key === target.key) setChannelDraft(null);
+  }
   const now = anchor.current.now + Math.max(0, clientNow - anchor.current.receivedAt);
+  const today = localDate(now);
   const plans = status?.plans || [], current = draft?.id ? plans.find(p => p.id === draft.id) : null;
   const conflict = Boolean(draft?.id && (!current || current.revision !== draft.revision));
-  const enabledCount = plans.filter(p => p.enabled).length, next = status?.scheduler.nextRunAt || null;
+  const targets = status?.targets || [], defaultTargetKeys = targets.filter(target => !target.editable).map(target => target.key);
+  const targetsByKey = new Map(targets.map(target => [target.key, target]));
+  const selectedTargets = draft?.targetKeys || [];
+  const targetTitles = (plan: ScheduledMessagePlan) => (plan.targetKeys ?? defaultTargetKeys).map(key => targetsByKey.get(key)?.title || key);
+  const editedChannel = channelDraft?.key ? targetsByKey.get(channelDraft.key) : undefined;
+  const channelConflict = Boolean(channelDraft?.key && editedChannel?.revision !== channelDraft.revision);
+  const enabledCount = plans.filter(p => p.enabled && (!p.calendarDate || p.calendarDate >= today)).length, next = status?.scheduler.nextRunAt || null;
   const heartbeat = status?.scheduler.heartbeatAt || 0;
   const healthy = Boolean(status?.scheduler.workerHealthy && heartbeat && now - heartbeat < 60_000);
-  const targetsReady = Boolean(status?.hasToken && status.targets.length === 3 && status.targets.every(t => t.ready));
+  const targetsReady = Boolean(status?.hasToken && selectedTargets.length && selectedTargets.every(key => targetsByKey.get(key)?.ready));
+  const pastCount = plans.filter(plan => plan.calendarDate && plan.calendarDate < today).length;
+  const visiblePlans = plans.filter(plan => showPast || !plan.calendarDate || plan.calendarDate >= today);
+  const dates = [...new Set(visiblePlans.map(plan => plan.calendarDate || ""))].sort((left, right) => {
+    if (!left) return 1;
+    if (!right) return -1;
+    if ((left < today) !== (right < today)) return left < today ? 1 : -1;
+    return left < today ? right.localeCompare(left) : left.localeCompare(right);
+  });
   const timeline = upcoming(plans, now);
   const deliveries = (status?.deliveries || []).filter(item => historyFilter === "all" || item.status === historyFilter);
 
   return <section className="cms-settings-form cms-scheduled-messages" aria-labelledby="scheduled-messages-title">
     <div className="cms-settings-panel">
       <div className="cms-scheduled-heading">
-        <div><h2 id="scheduled-messages-title">频道文案定时发布</h2><p>添加文案与每日发送时间，同一时段自动发送到三个频道。</p></div>
+        <div><h2 id="scheduled-messages-title">频道文案定时发布</h2><p>按马来西亚日期安排文案、照片、视频或 GIF，自动发布到所选频道。</p></div>
         <div className="cms-scheduled-actions">
           <span className={`cms-scheduled-pill ${healthy ? "cms-scheduled-good" : ""}`}>{healthy ? "后台定时服务运行中" : loading ? "正在连接…" : "定时服务需要检查"}</span>
           <button type="button" className="cms-secondary" disabled={Boolean(busy)} onClick={() => void mutate("refresh", "GET")}><RefreshCw size={14} className={busy === "refresh" ? "cms-spin" : ""} />刷新状态</button>
@@ -145,39 +268,129 @@ export default function TelegramScheduledMessages({ request, signInPath }: Props
           {tabs.map(({ id, label, icon: Icon }) => <button key={id} type="button" role="tab" id={`scheduled-tab-${id}`} aria-controls={`scheduled-panel-${id}`} aria-selected={tab === id} onClick={() => setTab(id)}><Icon size={15} />{label}{id === "plans" && <small>{plans.length}</small>}</button>)}
         </div>
         <div id="scheduled-panel-plans" role="tabpanel" aria-labelledby="scheduled-tab-plans" hidden={tab !== "plans"} className="cms-scheduled-panel">
-          <div className="cms-scheduled-heading"><div><h3>每日文案计划</h3><p>{plans.length} 条文案 · {enabledCount} 条已启用</p></div><button type="button" className="cms-primary" disabled={Boolean(busy)} onClick={() => open()}><Plus size={15} />添加文案</button></div>
+          <div className="cms-scheduled-heading">
+            <div><h3>每日文案计划</h3><p>{plans.length} 条计划 · {enabledCount} 条已启用</p></div>
+            <div className="cms-scheduled-actions">
+              {pastCount > 0 && <button type="button" className="cms-secondary" aria-pressed={showPast} onClick={() => setShowPast(value => !value)}><History size={14} />{showPast ? "隐藏过往日期" : "显示过往日期"}</button>}
+              <button type="button" className="cms-primary" disabled={Boolean(busy)} onClick={() => open()}><Plus size={15} />添加文案</button>
+            </div>
+          </div>
           {draft && <form ref={editor} className="cms-scheduled-card cms-scheduled-editor" onSubmit={save}>
             <fieldset disabled={Boolean(busy)}>
               <div className="cms-scheduled-heading"><h3>{draft.id ? "编辑文案计划" : "添加文案计划"}</h3><button type="button" className="cms-icon-button" aria-label="关闭文案编辑" onClick={() => { if (window.confirm("放弃当前未保存的草稿？")) setDraft(null); }}><X size={16} /></button></div>
-              {conflict && <div className="cms-scheduled-conflict" role="alert"><span>{current ? "这条计划已有新版本，当前草稿尚未保存。" : "这条计划已被删除，草稿尚未保存。"}</span>{current && <button type="button" className="cms-secondary" onClick={() => { if (window.confirm("加载最新版本会替换当前未保存的草稿，继续？")) setDraft(draftOf(current)); }}>加载最新版本</button>}</div>}
-              <label>后台名称<input required autoComplete="off" maxLength={100} value={draft.name} onChange={event => setDraft({ ...draft, name: event.target.value })} placeholder="例如：每日欢迎文案" /><small>仅用于后台管理，不发送到频道。</small></label>
-              <label>发送文案<textarea required rows={8} maxLength={4096} value={draft.text} onChange={event => setDraft({ ...draft, text: event.target.value })} placeholder="输入要发送到三个频道的文案" /><small>{draft.text.length.toLocaleString()} / 4,096 · 保留文字、表情及换行，按纯文字发送。</small></label>
-              <div className="cms-scheduled-time-fields"><div className="cms-scheduled-heading"><h3>每天发送时间（MYT）</h3><button type="button" className="cms-secondary" disabled={draft.times.length >= 24} onClick={() => setDraft({ ...draft, times: [...draft.times, ""] })}><Plus size={14} />添加时间</button></div>
-                {draft.times.map((time, index) => <div className="cms-scheduled-time-input" key={index}><label>时间 {index + 1}<input type="time" step="60" required value={time} onChange={event => setDraft({ ...draft, times: draft.times.map((value, i) => i === index ? event.target.value : value) })} /></label><button type="button" className="cms-icon-button" disabled={draft.times.length === 1} aria-label={`移除时间 ${index + 1}`} onClick={() => setDraft({ ...draft, times: draft.times.filter((_, i) => i !== index) })}><Trash2 size={14} /></button></div>)}
-                <small>每天自动按这些时间发送；一个时间点向三个频道各发送一次。</small>
+              {conflict && <div className="cms-scheduled-conflict" role="alert"><span>{current ? "这条计划已有新版本，当前草稿尚未保存。" : "这条计划已被删除，草稿尚未保存。"}</span>{current && <button type="button" className="cms-secondary" onClick={() => { if (window.confirm("加载最新版本会替换当前未保存的草稿，继续？")) setDraft(draftOf(current, today, defaultTargetKeys)); }}>加载最新版本</button>}</div>}
+              <div className="cms-scheduled-form-grid">
+                <label>后台名称<input required autoComplete="off" maxLength={100} value={draft.name} onChange={event => setDraft({ ...draft, name: event.target.value })} placeholder="例如：周五上午活动" /><small>供后台辨认这条文案。</small></label>
+                <div className="cms-scheduled-date-field">
+                  {!draft.repeatDaily && <label>发送日期（MYT）<input type="date" required value={draft.calendarDate} onChange={event => setDraft({ ...draft, calendarDate: event.target.value })} /></label>}
+                  {draft.repeatDaily && <span className="cms-scheduled-muted">每天使用同一份文案和附件。</span>}
+                  <label className="cms-telegram-switch"><input type="checkbox" checked={draft.repeatDaily} onChange={event => setDraft({ ...draft, repeatDaily: event.target.checked })} />每天重复</label>
+                </div>
               </div>
-              <label className="cms-telegram-switch"><input type="checkbox" role="switch" checked={draft.enabled} onChange={event => setDraft({ ...draft, enabled: event.target.checked })} />保存后启用每日发送</label>
-              {draft.enabled && !targetsReady && <small className="cms-scheduled-error">保存时会核实三个频道及机器人的发布权限；可先停用并保存文案。</small>}
+              <label>发送文案<textarea required rows={7} maxLength={draft.media ? 1024 : 4096} value={draft.text} onChange={event => setDraft({ ...draft, text: event.target.value })} placeholder="输入要发布的文案" /><small>{draft.text.length.toLocaleString()} / {draft.media ? "1,024 · 文案会作为附件说明一起发送。" : "4,096 · 保留文字、表情及换行。"}</small></label>
+              <div className="cms-scheduled-media">
+                <div className="cms-scheduled-heading">
+                  <div><h3>照片、视频或 GIF</h3><p>每条文案可加一个附件。JPG / PNG 10 MB，MP4 50 MB，GIF 20 MB。</p></div>
+                  <label className="cms-secondary cms-scheduled-file-button">
+                    {busy === "upload" ? <LoaderCircle size={14} className="cms-spin" /> : <Upload size={14} />}
+                    <span aria-hidden="true">{busy === "upload" ? "正在上传…" : draft.media ? "更换附件" : "上传附件"}</span>
+                    <input type="file" accept="image/jpeg,image/png,image/gif,video/mp4,.jpg,.jpeg,.png,.gif,.mp4" aria-label={draft.media ? "更换附件" : "上传附件"} onChange={event => { const file = event.target.files?.[0]; event.target.value = ""; if (file) void upload(file); }} />
+                  </label>
+                </div>
+                {busy === "upload" && <progress aria-label="附件上传进度" max={100} value={uploadProgress} />}
+                {draft.media && <div className="cms-scheduled-attachment">
+                  {draft.media.kind === "video"
+                    ? <video controls playsInline preload="metadata" aria-label="上传视频预览" src={`${uploadEndpoint}?id=${encodeURIComponent(draft.media.id)}`} />
+                    : <img loading="lazy" src={`${uploadEndpoint}?id=${encodeURIComponent(draft.media.id)}`} alt="上传附件预览" />}
+                  <div><strong>{describeMedia(draft.media)}</strong><button type="button" className="cms-secondary" onClick={() => setDraft({ ...draft, media: null })}><X size={14} />移除附件</button></div>
+                </div>}
+              </div>
+              <div role="group" aria-labelledby="scheduled-target-choices" className="cms-scheduled-time-fields">
+                <div className="cms-scheduled-heading"><h3 id="scheduled-target-choices">发送频道</h3><button type="button" className="cms-secondary" onClick={() => setTab("channels")}><Radio size={14} />管理频道</button></div>
+                <div className="cms-scheduled-target-choices">{targets.map(target => {
+                  const checked = selectedTargets.includes(target.key);
+                  return <label key={target.key} className="cms-scheduled-target-choice">
+                    <input type="checkbox" checked={checked} onChange={() => setDraft({ ...draft, targetKeys: checked ? selectedTargets.filter(key => key !== target.key) : [...selectedTargets, target.key] })} />
+                    <span><strong>{target.title}</strong><small>{target.address || target.chatId || "尚未连接"}</small></span>
+                    <span className={target.ready ? "cms-scheduled-ready-text" : "cms-scheduled-muted"}>{target.ready ? "可发布" : "待检查"}</span>
+                  </label>;
+                })}</div>
+                {!selectedTargets.length && <small>至少选择一个频道。</small>}
+              </div>
+              <div className="cms-scheduled-time-fields"><div className="cms-scheduled-heading"><h3>发送时间（MYT）</h3><button type="button" className="cms-secondary" disabled={draft.times.length >= 24} onClick={() => setDraft({ ...draft, times: [...draft.times, ""] })}><Plus size={14} />添加时间</button></div>
+                {draft.times.map((time, index) => <div className="cms-scheduled-time-input" key={index}><label>时间 {index + 1}<input type="time" step="60" required value={time} onChange={event => setDraft({ ...draft, times: draft.times.map((value, i) => i === index ? event.target.value : value) })} /></label><button type="button" className="cms-icon-button" disabled={draft.times.length === 1} aria-label={`移除时间 ${index + 1}`} onClick={() => setDraft({ ...draft, times: draft.times.filter((_, i) => i !== index) })}><Trash2 size={14} /></button></div>)}
+                <small>{draft.repeatDaily ? "每天按所选时间发布。" : "只在所选日期发布。隔天的文案和附件可另加一条计划。"}</small>
+              </div>
+              <label className="cms-telegram-switch"><input type="checkbox" role="switch" checked={draft.enabled} onChange={event => setDraft({ ...draft, enabled: event.target.checked })} />保存后启用自动发送</label>
+              {draft.enabled && !targetsReady && <small className="cms-scheduled-error">启用时将核实所选频道的发布权限。也可先暂停保存。</small>}
               <div className="cms-scheduled-actions"><button className="cms-primary" type="submit" disabled={conflict}>{busy === "save" ? <LoaderCircle size={15} className="cms-spin" /> : <Check size={15} />}保存文案与时间</button><span className="cms-scheduled-muted">草稿需保存后才会生效</span></div>
             </fieldset>
           </form>}
-          {!plans.length && !draft && <div className="cms-scheduled-empty"><strong>尚未添加文案计划</strong><p>添加一条文案，设置每日时间并启用，即可由后台自动发布。</p></div>}
-          <div className="cms-scheduled-plan-list">{plans.map(plan => <article className="cms-scheduled-card" key={plan.id}>
-            <div className="cms-scheduled-heading"><div><h3>{plan.name}</h3><span className={`cms-scheduled-pill ${plan.enabled ? "cms-scheduled-good" : ""}`}>{plan.enabled ? "每日发送已启用" : "已暂停"}</span></div><div className="cms-scheduled-actions"><button type="button" className="cms-secondary" disabled={Boolean(busy)} onClick={() => open(plan)}><Pencil size={14} />编辑</button><button type="button" className="cms-secondary" disabled={Boolean(busy)} onClick={() => void mutate(`toggle-${plan.id}`, "PUT", { ...draftOf(plan), enabled: !plan.enabled }, plan.enabled ? "每日计划已暂停。" : "每日计划已启用。")}>{plan.enabled ? <Pause size={14} /> : <Play size={14} />}{plan.enabled ? "暂停" : "启用"}</button><button type="button" className="cms-icon-button" aria-label={`删除计划 ${plan.name}`} disabled={Boolean(busy)} onClick={() => void remove(plan)}><Trash2 size={15} /></button></div></div>
-            <p className="cms-scheduled-copy">{plan.text}</p><div className="cms-scheduled-plan-times">{plan.times.map(time => <span key={time}><Clock3 size={12} />{time}</span>)}</div><small className="cms-scheduled-muted">下次：{displayTime(plan.nextRunAt)} · 最近安排：{displayTime(plan.lastRunAt)}</small>
-          </article>)}</div>
+          {!visiblePlans.length && !draft && <div className="cms-scheduled-empty"><strong>目前没有待排文案</strong><p>添加一条文案，选择日期、时间和频道，再启用自动发布。</p></div>}
+          {dates.map(date => <div key={date || "daily"} className="cms-scheduled-plan-list">
+            <h4 className="cms-scheduled-day"><CalendarClock size={15} />{date ? <><time dateTime={date}>{date}</time>{date === today && <span className="cms-scheduled-pill cms-scheduled-good">今天</span>}</> : "每天重复"}</h4>
+            {visiblePlans.filter(plan => (plan.calendarDate || "") === date).sort((left, right) => left.times[0].localeCompare(right.times[0])).map(plan => {
+              const past = Boolean(date && date < today);
+              return <article className="cms-scheduled-card" key={plan.id}>
+                <div className="cms-scheduled-heading">
+                  <div><h3>{plan.name}</h3><span className={`cms-scheduled-pill ${plan.enabled && !past ? "cms-scheduled-good" : ""}`}>{past ? "日期已过" : plan.enabled ? "已启用" : "已暂停"}</span></div>
+                  <div className="cms-scheduled-actions">
+                    <button type="button" className="cms-secondary" disabled={Boolean(busy)} onClick={() => open(plan)}><Pencil size={14} />编辑</button>
+                    {!past && <button type="button" className="cms-secondary" disabled={Boolean(busy)} onClick={() => void mutate(`toggle-${plan.id}`, "PUT", payloadOf({ ...draftOf(plan, today, defaultTargetKeys), enabled: !plan.enabled }), plan.enabled ? "计划已暂停。" : "计划已启用。")}>{plan.enabled ? <Pause size={14} /> : <Play size={14} />}{plan.enabled ? "暂停" : "启用"}</button>}
+                    <button type="button" className="cms-icon-button" aria-label={`删除计划 ${plan.name}`} disabled={Boolean(busy)} onClick={() => void remove(plan)}><Trash2 size={15} /></button>
+                  </div>
+                </div>
+                <p className="cms-scheduled-copy">{plan.text}</p>
+                {plan.media && <div className="cms-scheduled-attachment-label"><Paperclip size={14} />{describeMedia(plan.media)}</div>}
+                <div className="cms-scheduled-plan-times">{plan.times.map(time => <span key={time}><Clock3 size={12} />{time}</span>)}</div>
+                <small className="cms-scheduled-muted">频道 · {targetTitles(plan).join("、")}<br />下次 · {displayTime(plan.nextRunAt)}　最近安排 · {displayTime(plan.lastRunAt)}</small>
+              </article>;
+            })}
+          </div>)}
+        </div>
+        <div id="scheduled-panel-channels" role="tabpanel" aria-labelledby="scheduled-tab-channels" hidden={tab !== "channels"} className="cms-scheduled-panel">
+          <div className="cms-scheduled-heading">
+            <div><h3>发送频道</h3><p>将 @FreeBonus365ChatBot 设为频道管理员并开启发布权限，然后检查频道。</p></div>
+            <div className="cms-scheduled-actions">
+              <button type="button" className="cms-secondary" disabled={Boolean(busy) || !status.hasToken} onClick={() => void mutate("verify", "POST", { action: "verify" }, "频道权限检查已完成。")}>{busy === "verify" ? <LoaderCircle size={14} className="cms-spin" /> : <RefreshCw size={14} />}检查频道权限</button>
+              <button type="button" className="cms-primary" disabled={Boolean(busy)} onClick={() => editChannel()}><Plus size={15} />添加频道</button>
+            </div>
+          </div>
+          {!status.hasToken && <p className="cms-scheduled-error">请先在 Telegram 聊天机器人设置中保存 Token。</p>}
+          {channelDraft && <form className="cms-scheduled-card cms-scheduled-editor" onSubmit={saveChannel}>
+            <fieldset disabled={Boolean(busy)}>
+              <div className="cms-scheduled-heading"><h3>{channelDraft.key ? "编辑频道" : "新增频道"}</h3><button type="button" className="cms-icon-button" aria-label="关闭频道编辑" onClick={() => { if (window.confirm("放弃当前未保存的频道设置？")) setChannelDraft(null); }}><X size={16} /></button></div>
+              {channelConflict && <div className="cms-scheduled-conflict" role="alert"><span>{editedChannel ? "频道已有新版本，当前草稿尚未保存。" : "这个频道已被删除，当前草稿尚未保存。"}</span>{editedChannel && <button type="button" className="cms-secondary" onClick={() => editChannel(editedChannel)}>加载最新频道</button>}</div>}
+              <div className="cms-scheduled-form-grid">
+                <label>频道名称<input autoFocus required autoComplete="off" maxLength={100} value={channelDraft.title} onChange={event => setChannelDraft({ ...channelDraft, title: event.target.value })} placeholder="例如：活动公告频道" /></label>
+                <label>Telegram 频道地址<input required autoComplete="off" maxLength={120} value={channelDraft.address} onChange={event => setChannelDraft({ ...channelDraft, address: event.target.value })} placeholder="@channelname 或 -1001234567890" /><small>支持公开用户名、公开 t.me 链接或私人频道数字 ID。</small></label>
+              </div>
+              <button type="submit" className="cms-primary cms-scheduled-save-channel" disabled={channelConflict}>{busy === "save-channel" ? <LoaderCircle size={15} className="cms-spin" /> : <Check size={15} />}保存频道</button>
+            </fieldset>
+          </form>}
+          <div className="cms-scheduled-targets">{targets.map(target => <div key={target.key}>
+            <div><strong>{target.title}</strong><small>{target.address || target.chatId || "尚未连接"}</small></div>
+            <span className={`cms-scheduled-pill ${target.ready ? "cms-scheduled-good" : "cms-scheduled-attention"}`}>{target.ready ? "可发布" : "需要检查"}</span>
+            {target.editable ? <div className="cms-scheduled-target-actions">
+              <button type="button" className="cms-secondary" disabled={Boolean(busy)} aria-label={`编辑频道 ${target.title}`} onClick={() => editChannel(target)}><Pencil size={14} />编辑</button>
+              <button type="button" className="cms-icon-button" disabled={Boolean(busy)} aria-label={`删除频道 ${target.title}`} onClick={() => void removeChannel(target)}><Trash2 size={15} /></button>
+            </div> : <span className="cms-scheduled-muted">内置频道</span>}
+            {target.lastError && <p className="cms-scheduled-error">{target.lastError}</p>}
+          </div>)}</div>
         </div>
         <div id="scheduled-panel-time" role="tabpanel" aria-labelledby="scheduled-tab-time" hidden={tab !== "time"} className="cms-scheduled-panel">
-          <div className="cms-scheduled-card"><div className="cms-scheduled-heading"><div><h3>发送到三个频道</h3><p>使用已保存的 @FreeBonus365ChatBot，同一时段分别提交发布。</p></div><button type="button" className="cms-secondary" disabled={Boolean(busy)} onClick={() => void mutate("verify", "POST", { action: "verify" }, "频道权限检查已完成。")}>{busy === "verify" ? <LoaderCircle size={14} className="cms-spin" /> : <RefreshCw size={14} />}检查频道权限</button></div>
-            {!status.hasToken && <p className="cms-scheduled-error">请先在上方 Telegram 设置保存聊天机器人的 Token。</p>}
-            <div className="cms-scheduled-targets">{status.targets.map(target => <div key={target.key}><div><strong>{target.title}</strong><small>{target.chatId || "尚未连接"}</small></div><span className={`cms-scheduled-pill ${target.ready ? "cms-scheduled-good" : "cms-scheduled-attention"}`}>{target.ready ? "可发布" : "需要检查"}</span>{target.lastError && <p className="cms-scheduled-error">{target.lastError}</p>}</div>)}</div>
+          <div className="cms-scheduled-card">
+            <div className="cms-scheduled-heading"><div><h3>接下来 24 小时</h3><p>按马来西亚当地日期与时间排列。</p></div></div>
+            {timeline.length ? <ol className="cms-scheduled-timeline">{timeline.map(row => <li key={row.id}>
+              <time dateTime={new Date(row.at).toISOString()}>{displayTime(row.at)}</time>
+              <div><strong>{row.plan.name}</strong><small>{row.at <= now ? "已到时间，等待后台处理" : targetTitles(row.plan).join("、")}</small></div>
+            </li>)}</ol> : <div className="cms-scheduled-empty">接下来 24 小时没有已启用的发送安排。</div>}
           </div>
-          <div className="cms-scheduled-card"><div className="cms-scheduled-heading"><div><h3>接下来 24 小时</h3><p>按已保存的每日时间展示；每项安排发送到全部三个频道。</p></div></div>{timeline.length ? <ol className="cms-scheduled-timeline">{timeline.map(row => <li key={row.id}><time dateTime={new Date(row.at).toISOString()}>{displayTime(row.at)}</time><div><strong>{row.plan.name}</strong><small>{row.at <= now ? "已到时间，等待后台处理" : "每日自动发送"} · 3 个频道</small></div></li>)}</ol> : <div className="cms-scheduled-empty">没有已启用的发送安排。请在文案管理中添加或启用计划。</div>}</div>
-          <div className="cms-scheduled-note"><p>保存后的计划由后台执行，关闭页面、刷新或正常重启不会重置每日时间。当天完成后自动安排下一天。</p><p>长时间停机错过的时段会跳过，避免恢复后集中补发。Telegram 未确认的发送会显示「待确认」，不会自动重发；请到发送记录核对。</p></div>
+          <div className="cms-scheduled-note"><p>每日排期会在马来西亚时间 00:00 换日，下一天使用自己的文案和附件。</p><p>关闭页面或刷新后，已保存的安排仍由后台发送。遇到 Telegram 回执不明时，可在发送记录核对「待确认」状态。</p></div>
         </div>
         <div id="scheduled-panel-history" role="tabpanel" aria-labelledby="scheduled-tab-history" hidden={tab !== "history"} className="cms-scheduled-panel">
           <dl className="cms-scheduled-counts">{Object.entries(statusLabels).map(([key, label]) => <div key={key}><dt>{label}</dt><dd>{status.counts[key] || 0}</dd></div>)}</dl>
-          <div className="cms-scheduled-heading"><div><h3>逐频道发送记录</h3><p>同一次计划在三个频道的结果分开显示。</p></div><label className="cms-scheduled-filter">状态<select value={historyFilter} onChange={event => setHistoryFilter(event.target.value)}><option value="all">全部状态</option>{Object.entries(statusLabels).map(([key, label]) => <option key={key} value={key}>{label}</option>)}</select></label></div>
+          <div className="cms-scheduled-heading"><div><h3>逐频道发送记录</h3><p>同一次计划的结果按频道显示。</p></div><label className="cms-scheduled-filter">状态<select value={historyFilter} onChange={event => setHistoryFilter(event.target.value)}><option value="all">全部状态</option>{Object.entries(statusLabels).map(([key, label]) => <option key={key} value={key}>{label}</option>)}</select></label></div>
           {deliveries.length ? <div className="cms-scheduled-history">{deliveries.map(item => <article className="cms-scheduled-card" key={item.id}><div className="cms-scheduled-heading"><div><h3>{item.planName}</h3><p>{item.targetTitle}</p></div><span className={`cms-scheduled-pill ${item.status === "sent" ? "cms-scheduled-good" : item.status === "failed" || item.status === "unknown" ? "cms-scheduled-attention" : ""}`}>{statusLabels[item.status] || item.status}</span></div><small className="cms-scheduled-muted">计划：{displayTime(item.runAt)} · 发送：{displayTime(item.sentAt)}{item.messageId ? ` · 消息 #${item.messageId}` : ""}</small>{item.lastError && <p className="cms-scheduled-error">{item.lastError}</p>}</article>)}</div> : <div className="cms-scheduled-empty">暂无{historyFilter === "all" ? "" : statusLabels[historyFilter]}发送记录。</div>}
         </div>
       </>}

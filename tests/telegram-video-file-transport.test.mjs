@@ -13,7 +13,7 @@ writeFileSync(path.join(fixture,'package.json'),'{"type":"commonjs"}');
 writeFileSync(path.join(fixture,'telegram-bot.js'),ts.transpileModule(readFileSync(new URL('../app/lib/telegram-bot.ts',import.meta.url),'utf8'),
   {compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS,esModuleInterop:true}}).outputText);
 const require=createRequire(import.meta.url),https=require('node:https');
-const {telegramVideoFileRequest}=require(path.join(fixture,'telegram-bot.js'));
+const {telegramVideoFileRequest,telegramScheduledMediaFileRequest}=require(path.join(fixture,'telegram-bot.js'));
 const video=Buffer.concat([Buffer.from([0,0,0,24]),Buffer.from('ftypisom0000000000000'),Buffer.alloc(150000,7)]);
 const filename=path.join(fixture,'private.mp4');writeFileSync(filename,video);
 const upload={path:filename,fileName:'private.mp4',bytes:video.length};
@@ -61,4 +61,22 @@ test('private video transport rejects replaced size, symlinks and caption fields
 });
 test('private video transport treats malformed Telegram results as unknown',async t=>{
   const requests=transport(t,'{broken json');assert.equal(await telegramVideoFileRequest('fixture-token',parameters,upload),null);assert.equal(requests.length,1);
+});
+
+test('scheduled media streams the caption and original file in one kind-specific Telegram request', async t => {
+  const requests = transport(t, { ok: true, result: { message_id: 7, chat: { id: -100123 } } });
+  const caption = 'Morning offer\n\n📣 Today only. ';
+  for (const [kind, mime, method] of [['photo', 'image/png', 'sendPhoto'], ['animation', 'image/gif', 'sendAnimation'],
+    ['video', 'video/mp4', 'sendVideo']]) {
+    const result = await telegramScheduledMediaFileRequest('fixture-token', -100123, caption, { ...upload, kind, mime });
+    assert.equal(result.ok, true);
+    const { options, chunks } = requests.at(-1), body = Buffer.concat(chunks);
+    assert.equal(options.path, `/botfixture-token/${method}`);
+    assert.equal(body.length, options.headers['Content-Length']);
+    assert.ok(body.includes(Buffer.from(`name="caption"\r\n\r\n${caption}\r\n`)));
+    assert.ok(body.includes(Buffer.from(`name="${kind}"; filename="private.mp4"\r\nContent-Type: ${mime}`)));
+    assert.ok(body.includes(video));
+    assert.ok(chunks.length > 2, 'file is streamed in bounded chunks');
+  }
+  assert.equal(requests.length, 3);
 });

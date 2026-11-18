@@ -29,7 +29,8 @@ write('app/lib/telegram-scheduled-messages.js', 'exports.ScheduledMessageError=c
 write('app/lib/telegram-promotions.js', `
 exports.calls=[];exports.failure=null;exports.status={now:123,plans:[],deliveries:[],targets:[],counts:{},scheduler:{workerHealthy:true}};
 for(const [name,kind] of [['telegramScheduledMessageStatus','status'],['saveTelegramScheduledMessagePlan','save'],
- ['deleteTelegramScheduledMessagePlan','delete'],['verifyTelegramScheduledMessageTargets','verify']])
+ ['deleteTelegramScheduledMessagePlan','delete'],['verifyTelegramScheduledMessageTargets','verify'],
+ ['saveTelegramScheduledMessageTarget','saveTarget'],['deleteTelegramScheduledMessageTarget','deleteTarget']])
  exports[name]=input=>{exports.calls.push([kind,input]);if(exports.failure)throw exports.failure;return exports.status;};
 `);
 const require = createRequire(import.meta.url);
@@ -145,4 +146,41 @@ test('known scheduler conflicts and permission errors retain safe non-cacheable 
     const response = await route.PUT(request('PUT', edit())); uncached(response, status);
     assert.deepEqual(await response.json(), { error: facade.failure.message });
   }
+});
+
+test('dated plans accept a validated channel selection and private media ID', async () => {
+  const body = { ...plan(), calendarDate: '2026-11-19', mediaId: randomUUID(),
+    targetKeys: ['official', `custom:${randomUUID()}`] };
+  uncached(await route.POST(request('POST', body)), 200);
+  assert.deepEqual(facade.calls.splice(0), [['save', body]]);
+  for (const invalid of [
+    { calendarDate: '2026/11/19' },
+    { targetKeys: ['official', 'official'] },
+    { targetKeys: ['@arbitrary-channel'] },
+    { targetKeys: [] },
+    { mediaId: '../private.jpg' },
+    { text: 'x'.repeat(1025) },
+  ]) uncached(await route.POST(request('POST', { ...body, ...invalid })), 400);
+  assert.deepEqual(facade.calls, []);
+});
+
+test('custom channel create, edit and removal require stable IDs and explicit revisions', async () => {
+  const requestId = randomUUID();
+  const key = `custom:${requestId}`;
+  const revision = randomUUID();
+  const target = { action: 'upsertTarget', title: '  Main announcements  ', address: ' @channel_updates ' };
+  const saved = { title: 'Main announcements', address: '@channel_updates' };
+  uncached(await route.POST(request('POST', { ...target, requestId })), 200);
+  uncached(await route.POST(request('POST', { ...target, key, revision })), 200);
+  uncached(await route.DELETE(request('DELETE', { targetKey: key, revision })), 200);
+  assert.deepEqual(facade.calls.splice(0), [
+    ['saveTarget', { ...saved, requestId }],
+    ['saveTarget', { ...saved, key, revision }],
+    ['deleteTarget', { key, revision }],
+  ]);
+  for (const fields of [{ key }, { key: 'official', revision }, { requestId, revision },
+    { requestId, token: 'sensitive' }]) uncached(await route.POST(request('POST', { ...target, ...fields })), 400);
+  uncached(await route.DELETE(request('DELETE', { targetKey: key })), 400);
+  uncached(await route.DELETE(request('DELETE', { targetKey: 'hot', revision })), 400);
+  assert.deepEqual(facade.calls, []);
 });

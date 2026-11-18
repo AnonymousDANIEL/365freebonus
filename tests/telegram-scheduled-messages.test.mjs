@@ -27,12 +27,20 @@ exports.telegramRequest=async(token,method,p={})=>{
   return {ok:true,result:{id:exports.ids[key],type:'channel',title:key,username:key==='official'?'join365freebonus':key==='group'?'join365freebonusgroup':undefined}};
  }
  if(method==='getChatMember')return {ok:true,result:exports.roles[p.chat_id]||{status:'administrator',can_post_messages:true}};
- if(method==='sendMessage'){
-  if(exports.onSend){const value=await exports.onSend(p);if(value!==undefined)return value;}
+ if(['sendMessage','sendPhoto','sendVideo','sendAnimation'].includes(method)){
+  if(exports.onSend){const value=await exports.onSend(p,method);if(value!==undefined)return value;}
   const list=exports.results[p.chat_id];if(list?.length)return list.shift();
   return {ok:true,result:{message_id:100+exports.calls.length,chat:{id:p.chat_id,type:'channel'},text:p.text}};
  }
  throw new Error('Unexpected Telegram method '+method);
+};
+`);
+writeFileSync(path.join(fixture, 'telegram-scheduled-media.js'), `
+const {telegramRequest}=require('./telegram-bot');
+exports.readScheduledMessageMedia=(db,id)=>db.prepare('SELECT id,kind,name,bytes FROM telegram_scheduled_message_media WHERE id=?').get(id)||null;
+exports.sendScheduledMessageMedia=(db,token,chatId,caption,id)=>{
+ const media=exports.readScheduledMessageMedia(db,id);
+ return media ? telegramRequest(token,{photo:'sendPhoto',video:'sendVideo',animation:'sendAnimation'}[media.kind],{chat_id:chatId,caption,mediaId:id}) : Promise.resolve({ok:false,code:400,retryAfter:0});
 };
 `);
 const require = createRequire(import.meta.url), scheduler = require(path.join(fixture, 'telegram-scheduled-messages.js'));
@@ -45,12 +53,18 @@ const db = () => getSqlite();
 const status = () => scheduler.scheduledMessageStatus(db(), clock);
 const tick = () => scheduler.deliverScheduledMessagesOnce(decrypt, clock);
 const sends = () => telegram.calls.filter(c => c.method === 'sendMessage');
+const sendsMedia = () => telegram.calls.filter(c => ['sendPhoto','sendVideo','sendAnimation'].includes(c.method));
 const jobs = () => db().prepare('SELECT * FROM telegram_scheduled_message_deliveries ORDER BY run_at,target_key').all();
 const onlyPlan = () => status().plans[0];
 function close() { const filename = path.join(process.env.DATA_DIR, 'directory.sqlite'); globalThis.__directorySqlite?.get(filename)?.close(); globalThis.__directorySqlite?.delete(filename); }
 function input(extra={}) { return { requestId: randomUUID(), name: 'Daily news', text: 'First line\n\nExact text 🔥', times: ['09:00'], enabled: true, ...extra }; }
 async function create(extra={}) { return scheduler.saveScheduledMessagePlan(db(), input(extra), decrypt, clock); }
 async function update(extra={}) { const p = onlyPlan(); return scheduler.saveScheduledMessagePlan(db(), { id:p.id, revision:p.revision, name:p.name, text:p.text, times:p.times, enabled:p.enabled, ...extra }, decrypt, clock); }
+function storeMedia(kind) {
+ const id=randomUUID();
+ db().prepare('INSERT INTO telegram_scheduled_message_media(id,kind,name,bytes,mime,created_at) VALUES(?,?,?,?,?,?)').run(id,kind,kind,64,'fixture',now);
+ return id;
+}
 
 test.beforeEach(() => {
  process.env.DATA_DIR = mkdtempSync(path.join(fixture, 'case-')); now = start;
@@ -65,7 +79,7 @@ test.after(() => { if(oldData===undefined) delete process.env.DATA_DIR; else pro
 test('empty scheduler starts healthy and verifies all three destinations without sending', async () => {
  assert.deepEqual(status().plans, []); assert.equal(status().scheduler.workerHealthy, false);
  await tick(); assert.equal(status().scheduler.workerHealthy, true); assert.equal(sends().length, 0); assert.equal(status().targets.filter(t=>t.ready).length,3);
- assert.equal(db().prepare('PRAGMA user_version').get().user_version, 37);
+ assert.equal(db().prepare('PRAGMA user_version').get().user_version, 38);
 });
 
 test('disabled draft can be saved without credentials or outbound calls', async () => {
@@ -105,6 +119,99 @@ test('due slot sends matching text to all three channels and rolls to tomorrow',
  assert.ok(sends().every(c=>c.p.text===text && c.p.parse_mode===undefined && c.p.reply_markup===undefined));
  assert.ok(jobs().every(j=>j.status==='sent')); assert.equal(onlyPlan().nextRunAt,due+DAY);
  now+=DAY; await tick(); assert.equal(sends().length,6); assert.equal(onlyPlan().nextRunAt,due+2*DAY);
+});
+
+test('upgrading a v37 database retains fixed legacy targets and dispatched occurrence deduplication', async () => {
+ await create(); now=onlyPlan().nextRunAt; await tick();
+ const before=onlyPlan(), ids=jobs().map(job=>job.id);
+ db().exec(`DROP TABLE telegram_scheduled_message_media;
+   DROP TABLE telegram_scheduled_message_channels;
+   ALTER TABLE telegram_scheduled_message_plans DROP COLUMN calendar_date;
+   ALTER TABLE telegram_scheduled_message_plans DROP COLUMN target_keys_json;
+   ALTER TABLE telegram_scheduled_message_plans DROP COLUMN media_id;
+   ALTER TABLE telegram_scheduled_message_deliveries DROP COLUMN media_id;
+   PRAGMA user_version=37;`);
+ close();
+ assert.deepEqual(onlyPlan(),before);
+ assert.deepEqual(onlyPlan().targetKeys,['official','group','hot']);
+ await tick();assert.equal(sends().length,3);assert.deepEqual(jobs().map(job=>job.id),ids);
+});
+
+test('custom channel management verifies publishing access, guards revisions and prevents changing an active target', async () => {
+ const channelId=-1004444444444, nextId=-1005555555555;
+ telegram.onRequest=(method,p)=>{
+  if(method==='getChat'&&(p.chat_id==='@freshchannel'||p.chat_id===nextId)) return {ok:true,result:{id:p.chat_id===nextId?nextId:channelId,type:'channel',username:'freshchannel'}};
+  if(method==='getChat'&&p.chat_id==='@existingalias')return {ok:true,result:{id:telegram.ids.official,type:'channel',username:'existingalias'}};
+ };
+ const save = fields => scheduler.saveScheduledMessageTarget(db(),fields,decrypt,clock);
+ const remove = target => scheduler.deleteScheduledMessageTarget(db(),{key:target.key,revision:target.revision},clock);
+ const requestId=randomUUID(), initial={requestId,title:' New channel ',address:'https://t.me/FreshChannel/'};
+ await save(initial); const target=status().targets.find(row=>row.key===`custom:${requestId}`);
+ assert.equal(target.address,'@freshchannel'); assert.equal(target.title,'New channel'); assert.equal(target.ready,true); assert.equal(target.chatId,String(channelId));
+ assert.deepEqual((await save(initial)).targets.find(row=>row.key===target.key),target);
+ await assert.rejects(save({...initial, title:'Different'}),e=>e.status===409);
+ await assert.rejects(save({requestId:randomUUID(),title:'Duplicate',address:String(channelId)}),/已在发送目标/);
+ await save({requestId:randomUUID(),title:'Alias',address:'@existingalias'});
+ assert.equal(status().targets.find(row=>row.address==='@existingalias').ready,false);
+ await create({calendarDate:'2026-11-15',targetKeys:[target.key]});
+ await assert.rejects(save({key:target.key,revision:target.revision,title:target.title,address:String(nextId)}),/启用的发送计划/);
+ assert.throws(()=>remove(target),/启用的发送计划/);
+ await save({key:target.key,revision:target.revision,title:'Renamed label',address:target.address});
+ const renamed=status().targets.find(row=>row.key===target.key);
+ await assert.rejects(save({key:target.key,revision:target.revision,title:'Stale',address:target.address}),e=>e.status===409);
+ now=onlyPlan().nextRunAt;await tick();
+ assert.deepEqual(sends().map(call=>call.p.chat_id),[channelId]);assert.equal(status().deliveries[0].targetTitle,'Renamed label');
+ await save({key:target.key,revision:renamed.revision,title:'New address',address:String(nextId)});
+ remove(status().targets.find(row=>row.key===target.key));
+ assert.equal(status().targets.some(row=>row.key===target.key),false);
+ assert.equal(status().deliveries[0].targetTitle,'Renamed label');
+});
+
+test('dated photo and GIF use distinct captions at MYT midnight, without any old-day retry', async () => {
+ now=Date.parse('2026-11-15T15:57:00Z');
+ const photo=storeMedia('photo'), gif=storeMedia('animation');
+ await create({calendarDate:'2026-11-15',targetKeys:['official'],mediaId:photo,text:'今日照片',times:['23:59']});
+ await create({calendarDate:'2026-11-16',targetKeys:['official'],mediaId:gif,text:'明日 GIF',times:['00:00']});
+ const today=status().plans.find(plan=>plan.calendarDate==='2026-11-15');
+ const tomorrow=status().plans.find(plan=>plan.calendarDate==='2026-11-16');
+ assert.equal(today.media.id,photo);assert.equal(tomorrow.media.id,gif);
+ assert.equal(tomorrow.nextRunAt-today.nextRunAt,MINUTE);
+ telegram.results[telegram.ids.official]=[{ok:false,code:429,retryAfter:70}];
+ now=today.nextRunAt;await tick();
+ assert.equal(jobs()[0].media_id,photo);assert.equal(jobs()[0].status,'pending');
+ close();now=tomorrow.nextRunAt;await tick();now+=MINUTE;await tick();
+ assert.deepEqual(sendsMedia().map(call=>[call.method,call.p.caption,call.p.mediaId]),[
+  ['sendPhoto','今日照片',photo],['sendAnimation','明日 GIF',gif],
+ ]);
+ assert.deepEqual(jobs().map(job=>[job.status,job.media_id]),[['skipped',''],['sent','']]);
+ assert.ok(status().plans.every(plan=>plan.nextRunAt===null));
+ now+=DAY;await tick();assert.equal(sendsMedia().length,2);assert.equal(sends().length,0);
+});
+
+test('completed date still allows a safe same-day attachment retry and never retries an uncertain video', async () => {
+ const mediaId=storeMedia('video');
+ await create({calendarDate:'2026-11-15',targetKeys:['official','group'],mediaId,text:'Scheduled video'});
+ now=onlyPlan().nextRunAt;
+ telegram.results[telegram.ids.official]=[{ok:false,code:429,retryAfter:60}];
+ telegram.results[telegram.ids.group]=[null];
+ await tick();assert.equal(onlyPlan().nextRunAt,null);assert.deepEqual(jobs().map(row=>[row.target_key,row.status,row.media_id]),[
+  ['group','unknown',mediaId],['official','pending',mediaId],
+ ]);
+ now+=MINUTE;await tick();assert.equal(sendsMedia().length,3);
+ assert.equal(sendsMedia().at(-1).p.chat_id,telegram.ids.official);assert.equal(sendsMedia().at(-1).p.caption,'Scheduled video');
+ assert.deepEqual(jobs().map(row=>[row.target_key,row.status,row.media_id]),[['group','unknown',mediaId],['official','sent','']]);
+ now+=MINUTE;await tick();assert.equal(sendsMedia().length,3);
+});
+
+test('dated plans reject expired dates and leave newly scheduled dates available after historical plans accumulate', async () => {
+ await assert.rejects(create({calendarDate:'2026-02-30'}),/有效的马来西亚日期/);
+ await assert.rejects(create({calendarDate:'2026-11-14'}),/发送时间已过/);
+ await assert.rejects(create({enabled:false,mediaId:randomUUID()}),/附件已失效/);
+ await assert.rejects(create({mediaId:storeMedia('photo'),text:'x'.repeat(1025)}),/1,024/);
+ for(let index=0;index<101;index++)await create({calendarDate:'2026-11-14',enabled:false});
+ await create({calendarDate:'2026-11-15',targetKeys:['group']});
+ now=Date.parse('2026-11-15T16:00:00Z');await tick();
+ assert.equal(sends().length,0);assert.equal(status().counts.skipped,1);
 });
 
 test('multiple daily times advance by wall clock and survive database reopen', async () => {
