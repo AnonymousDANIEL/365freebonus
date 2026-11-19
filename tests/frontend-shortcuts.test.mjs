@@ -1,15 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import vm from 'node:vm';
+import ts from 'typescript';
 
 const source = readFileSync(new URL('../public/front-pause.js', import.meta.url), 'utf8');
-const pausedHtml = readFileSync(new URL('../public/page-paused.html', import.meta.url), 'utf8');
-const pausedPath = '/page-paused.html';
 
 function harness(pathname = '/', publicPage = false) {
   const navigations = [], listeners = [];
-  const location = { pathname, assign: path => navigations.push(path) };
+  const location = { pathname, assign: path => navigations.push(path), replace: path => navigations.push(path),
+    reload: () => navigations.push('reload'), set href(path) { navigations.push(path); } };
   const document = { querySelector: selector => publicPage && selector === '.public-site' ? {} : null };
   vm.runInNewContext(source, { document, window: { location, addEventListener: (...args) => listeners.push(args) } });
   assert.equal(listeners.length, 1);
@@ -17,7 +17,7 @@ function harness(pathname = '/', publicPage = false) {
   assert.equal(name, 'keydown');
   assert.equal(options.capture, true);
   assert.equal(options.passive, false);
-  return { navigations, press(input) {
+  return { navigations, navigate(path, isPublicPage) { location.pathname = path; publicPage = isPublicPage; }, press(input) {
     const event = { key: '', code: '', ctrlKey: false, metaKey: false, shiftKey: false, altKey: false,
       cancelled: false, stopped: false, ...input,
       preventDefault() { this.cancelled = true; }, stopImmediatePropagation() { this.stopped = true; } };
@@ -26,13 +26,14 @@ function harness(pathname = '/', publicPage = false) {
   } };
 }
 
-test('home and published brand pages leave the active document on F12, including the physical key code', () => {
+test('home and published brand pages cancel F12 while staying on the same document', () => {
   for (const [pathname, publicPage] of [['/', false], ['/sample-brand', true], ['/another-brand', true]]) {
+    const h = harness(pathname, publicPage);
     for (const event of [{ key: 'F12' }, { key: 'Unidentified', code: 'F12' }, { key: 'F12', repeat: true }, { key: 'F12', ctrlKey: true }]) {
-      const h = harness(pathname, publicPage);
       assert.deepEqual(h.press(event), { cancelled: true, stopped: true });
-      assert.deepEqual(h.navigations, [pausedPath]);
     }
+    assert.deepEqual(h.press({ key: 'Enter' }), { cancelled: false, stopped: false });
+    assert.deepEqual(h.navigations, []);
   }
 });
 
@@ -46,6 +47,7 @@ test('homepage cancels common Windows, Linux and Mac developer shortcuts', () =>
   for (const event of [{ key: 'u', ctrlKey: true }, { key: 'u', metaKey: true }, { key: 'u', metaKey: true, altKey: true }]) {
     assert.equal(h.press(event).cancelled, true);
   }
+  assert.deepEqual(h.navigations, []);
 });
 
 test('ordinary typing, copy, paste, search, reload and navigation do not pause a public brand page', () => {
@@ -58,29 +60,31 @@ test('ordinary typing, copy, paste, search, reload and navigation do not pause a
   assert.deepEqual(h.navigations, []);
 });
 
-test('login, admin, API and missing pages keep shortcuts and never navigate to the pause page', () => {
+test('shortcut scope follows the active page across brand, login and admin navigation', () => {
+  const h = harness('/sample-brand', true);
+  assert.equal(h.press({ key: 'F12' }).cancelled, true);
   for (const pathname of ['/login', '/private-studio', '/api/health', '/missing-brand']) {
-    const h = harness(pathname);
+    h.navigate(pathname, false);
     assert.deepEqual(h.press({ key: 'F12' }), { cancelled: false, stopped: false });
     assert.deepEqual(h.press({ key: 'I', ctrlKey: true, shiftKey: true }), { cancelled: false, stopped: false });
-    assert.deepEqual(h.navigations, []);
   }
+  h.navigate('/another-brand', true);
+  assert.equal(h.press({ key: 'F12' }).cancelled, true);
+  assert.deepEqual(h.navigations, []);
 });
 
-test('standalone pause document loads only the shortcut guard and allows returning to the directory', () => {
-  assert.match(pausedHtml, /<meta\s+name="robots"\s+content="noindex,\s*nofollow"/);
-  assert.match(pausedHtml, /<a\s+href="\/"/);
-  const scripts = [...pausedHtml.matchAll(/<script\b[^>]*>/g)].map(match => match[0]);
-  assert.equal(scripts.length, 1);
-  assert.match(scripts[0], /src="\/front-pause\.js(?:\?[^"]*)?"/);
-
-  const paused = harness(pausedPath);
-  assert.deepEqual(paused.press({ key: 'F12' }), { cancelled: true, stopped: true });
-  assert.deepEqual(paused.press({ key: 'r', ctrlKey: true }), { cancelled: false, stopped: false });
-  assert.deepEqual(paused.navigations, []);
-  const reopened = harness('/', true);
-  assert.deepEqual(reopened.press({ key: 'Enter' }), { cancelled: false, stopped: false });
-  assert.deepEqual(reopened.navigations, []);
+test('old links to the retired pause document return to the directory', () => {
+  assert.equal(existsSync(new URL('../public/page-paused.html', import.meta.url)), false);
+  const route = readFileSync(new URL('../app/page-paused.html/route.ts', import.meta.url), 'utf8');
+  const { outputText } = ts.transpileModule(route, { compilerOptions: { module: ts.ModuleKind.CommonJS } });
+  const exports = {};
+  vm.runInNewContext(outputText, { exports, Response });
+  for (const method of ['GET', 'HEAD']) {
+    const response = exports[method]();
+    assert.equal(response.status, 307);
+    assert.equal(response.headers.get('location'), '/');
+    assert.equal(response.headers.get('cache-control'), 'no-store');
+  }
 });
 
 test('script never schedules debugger pauses or blocks unrelated mouse actions', () => {

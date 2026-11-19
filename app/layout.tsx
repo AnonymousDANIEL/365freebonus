@@ -14,5 +14,5 @@ export const metadata: Metadata = {
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
-  return <html lang="en"><body>{children}<Script src="/front-pause.js?v=3" strategy="beforeInteractive" /></body></html>;
+  return <html lang="en"><body>{children}<Script src="/front-pause.js?v=4" strategy="beforeInteractive" /></body></html>;
 }
