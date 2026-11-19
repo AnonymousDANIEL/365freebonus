@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, rmSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
@@ -196,6 +196,26 @@ test('raster uploads persist and stream with detected type, and reject SVG, over
   await assert.rejects(images.readImageUpload(oversized), { status: 413 });
   assert.equal(await images.openImage('../directory.sqlite'), null);
   assert.equal(await images.openImage(`${'0'.repeat(32)}.png`), null);
+});
+
+test('cancelled image streams close their file descriptors', async (context) => {
+  if (process.platform !== 'linux') return context.skip('/proc/self/fd is only available on Linux');
+  const bytes = Buffer.alloc(1024 * 1024, 0);
+  bytes.write('GIF89a', 0, 'ascii');
+  bytes.writeUInt16LE(2, 6);
+  bytes.writeUInt16LE(2, 8);
+  bytes[bytes.length - 1] = 0x3b;
+  const url = await images.saveImage(bytes);
+  const filename = url.split('/').at(-1);
+  const before = readdirSync('/proc/self/fd').length;
+  for (let index = 0; index < 24; index++) {
+    const opened = await images.openImage(filename);
+    const reader = opened.stream.getReader();
+    assert.equal((await reader.read()).done, false);
+    await reader.cancel();
+  }
+  await new Promise(resolve => setImmediate(resolve));
+  assert.ok(readdirSync('/proc/self/fd').length <= before + 1);
 });
 
 test.after(() => {

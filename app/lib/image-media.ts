@@ -2,7 +2,6 @@ import { randomBytes } from "node:crypto";
 import { constants } from "node:fs";
 import { mkdir, open, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { Readable } from "node:stream";
 import { getDataDirectory } from "./sqlite";
 
 export const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
@@ -93,6 +92,35 @@ export async function readImageUpload(request: Request): Promise<Buffer> {
 
 function mediaDirectory() { return path.join(getDataDirectory(), "media"); }
 
+function streamImage(handle: Awaited<ReturnType<typeof open>>, size: number) {
+  let position = 0;
+  let closed = false;
+  const close = async () => {
+    if (closed) return;
+    closed = true;
+    await handle.close().catch(() => undefined);
+  };
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      if (closed) { controller.close(); return; }
+      const remaining = size - position;
+      if (remaining <= 0) { await close(); controller.close(); return; }
+      const buffer = Buffer.allocUnsafe(Math.min(64 * 1024, remaining));
+      try {
+        const { bytesRead } = await handle.read(buffer, 0, buffer.length, position);
+        if (!bytesRead) { await close(); controller.close(); return; }
+        position += bytesRead;
+        controller.enqueue(buffer.subarray(0, bytesRead));
+        if (position >= size) { await close(); controller.close(); }
+      } catch (error) {
+        await close();
+        controller.error(error);
+      }
+    },
+    async cancel() { await close(); },
+  });
+}
+
 export async function saveImage(data: Buffer): Promise<string> {
   if (data.length > MAX_IMAGE_BYTES) throw tooLarge();
   const extension = rasterExtension(data);
@@ -116,7 +144,7 @@ export async function openImage(file: string) {
   try {
     const stat = await handle.stat();
     if (!stat.isFile() || stat.size < 1 || stat.size > MAX_IMAGE_BYTES) { await handle.close(); return null; }
-    const stream = Readable.toWeb(handle.createReadStream({ autoClose: true, end: stat.size - 1 })) as ReadableStream<Uint8Array>;
+    const stream = streamImage(handle, stat.size);
     return { stream, mime: MIME[matched[2] as Extension], size: stat.size };
   } catch (error) { await handle.close().catch(() => undefined); throw error; }
 }
