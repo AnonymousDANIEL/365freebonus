@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { constants } from "node:fs";
-import { mkdir, open, writeFile } from "node:fs/promises";
+import { lstat, mkdir, open, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { getDataDirectory } from "./sqlite";
 
@@ -92,21 +92,28 @@ export async function readImageUpload(request: Request): Promise<Buffer> {
 
 function mediaDirectory() { return path.join(getDataDirectory(), "media"); }
 
-function streamImage(handle: Awaited<ReturnType<typeof open>>, size: number) {
+function streamImage(filePath: string, size: number) {
+  let handle: Awaited<ReturnType<typeof open>> | null = null;
   let position = 0;
   let closed = false;
   const close = async () => {
     if (closed) return;
     closed = true;
-    await handle.close().catch(() => undefined);
+    await handle?.close().catch(() => undefined);
+    handle = null;
   };
   return new ReadableStream<Uint8Array>({
     async pull(controller) {
       if (closed) { controller.close(); return; }
       const remaining = size - position;
       if (remaining <= 0) { await close(); controller.close(); return; }
-      const buffer = Buffer.allocUnsafe(Math.min(64 * 1024, remaining));
       try {
+        if (!handle) {
+          handle = await open(filePath, constants.O_RDONLY | (constants.O_NOFOLLOW || 0));
+          const stat = await handle.stat();
+          if (!stat.isFile() || stat.size !== size) throw new Error("Image changed before it could be streamed.");
+        }
+        const buffer = Buffer.allocUnsafe(Math.min(64 * 1024, remaining));
         const { bytesRead } = await handle.read(buffer, 0, buffer.length, position);
         if (!bytesRead) { await close(); controller.close(); return; }
         position += bytesRead;
@@ -118,7 +125,7 @@ function streamImage(handle: Awaited<ReturnType<typeof open>>, size: number) {
       }
     },
     async cancel() { await close(); },
-  });
+  }, { highWaterMark: 0 });
 }
 
 export async function saveImage(data: Buffer): Promise<string> {
@@ -135,16 +142,14 @@ export async function saveImage(data: Buffer): Promise<string> {
 export async function openImage(file: string) {
   const matched = /^([0-9a-f]{32})\.(png|jpg|gif|webp)$/.exec(file);
   if (!matched) return null;
-  let handle;
-  try { handle = await open(path.join(mediaDirectory(), file), constants.O_RDONLY | (constants.O_NOFOLLOW || 0)); }
+  const filePath = path.join(mediaDirectory(), file);
+  let stat;
+  try { stat = await lstat(filePath); }
   catch (error) {
     if (["ENOENT", "ENOTDIR", "ELOOP"].includes((error as NodeJS.ErrnoException).code || "")) return null;
     throw error;
   }
-  try {
-    const stat = await handle.stat();
-    if (!stat.isFile() || stat.size < 1 || stat.size > MAX_IMAGE_BYTES) { await handle.close(); return null; }
-    const stream = streamImage(handle, stat.size);
-    return { stream, mime: MIME[matched[2] as Extension], size: stat.size };
-  } catch (error) { await handle.close().catch(() => undefined); throw error; }
+  if (!stat.isFile() || stat.size < 1 || stat.size > MAX_IMAGE_BYTES) return null;
+  const stream = streamImage(filePath, stat.size);
+  return { stream, mime: MIME[matched[2] as Extension], size: stat.size };
 }

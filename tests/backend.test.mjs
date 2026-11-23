@@ -218,6 +218,23 @@ test('cancelled image streams close their file descriptors', async (context) => 
   assert.ok(readdirSync('/proc/self/fd').length <= before + 1);
 });
 
+test('unconsumed image responses do not open file descriptors', async (context) => {
+  if (process.platform !== 'linux') return context.skip('/proc/self/fd is only available on Linux');
+  const bytes = Buffer.alloc(1024 * 1024, 0);
+  bytes.write('GIF89a', 0, 'ascii');
+  bytes.writeUInt16LE(2, 6);
+  bytes.writeUInt16LE(2, 8);
+  bytes[bytes.length - 1] = 0x3b;
+  const url = await images.saveImage(bytes);
+  const filename = url.split('/').at(-1);
+  const before = readdirSync('/proc/self/fd').length;
+  const opened = [];
+  for (let index = 0; index < 24; index++) opened.push(await images.openImage(filename));
+  const after = readdirSync('/proc/self/fd').length;
+  for (const image of opened) await image.stream.cancel();
+  assert.ok(after <= before + 1, `unconsumed responses opened ${after - before} file descriptors`);
+});
+
 test.after(() => {
   if (previousDataDir === undefined) delete process.env.DATA_DIR; else process.env.DATA_DIR = previousDataDir;
   rmSync(fixture, { recursive: true, force: true });
