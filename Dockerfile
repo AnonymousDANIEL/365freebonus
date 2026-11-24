@@ -13,6 +13,8 @@ RUN npm run build
 FROM node:24-bookworm-slim AS runner
 WORKDIR /app
 ENV NODE_ENV=production NEXT_TELEMETRY_DISABLED=1 HOSTNAME=0.0.0.0 PORT=3000 DATA_DIR=/data
+RUN apt-get update && apt-get install -y --no-install-recommends fontconfig fonts-dejavu-core fonts-noto-cjk \
+    && rm -rf /var/lib/apt/lists/*
 RUN groupadd --system --gid 1001 app && useradd --system --uid 1001 --gid app app && mkdir -p /data && chown app:app /data
 COPY --from=builder --chown=app:app /app/.next/standalone ./
 COPY --from=builder --chown=app:app /app/.next/static ./.next/static

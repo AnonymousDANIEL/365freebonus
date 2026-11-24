@@ -1,25 +1,28 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
+import sharp from 'sharp';
 import ts from 'typescript';
 
 // Run the production migration and queue against disposable SQLite databases.
 // Only Telegram transport is mocked; no live channel messages or credentials.
 const fixture = mkdtempSync(path.join(tmpdir(), 'telegram-scheduled-text-'));
 writeFileSync(path.join(fixture, 'package.json'), '{"type":"commonjs"}');
-for (const name of ['sqlite', 'telegram-scheduled-messages-types', 'telegram-scheduled-messages']) writeFileSync(path.join(fixture, name + '.js'), ts.transpileModule(
+symlinkSync(fileURLToPath(new URL('../node_modules', import.meta.url)), path.join(fixture, 'node_modules'), 'dir');
+for (const name of ['sqlite', 'telegram-game-tips', 'telegram-game-tips-types', 'telegram-scheduled-messages-types', 'telegram-scheduled-messages']) writeFileSync(path.join(fixture, name + '.js'), ts.transpileModule(
   readFileSync(new URL('../app/lib/' + name + '.ts', import.meta.url), 'utf8'),
   { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, esModuleInterop: true } },
 ).outputText);
 writeFileSync(path.join(fixture, 'telegram-bot.js'), `
 exports.calls=[];exports.onRequest=null;exports.onSend=null;exports.results={};exports.botName='FreeBonus365ChatBot';exports.roles={};
 exports.ids={official:-1001111111111,group:-1002222222222,hot:-1003333333333};
-exports.telegramRequest=async(token,method,p={})=>{
- exports.calls.push({token,method,p});
+exports.telegramRequest=async(token,method,p={},upload)=>{
+ exports.calls.push({token,method,p,upload});
  if(exports.onRequest){const value=await exports.onRequest(method,p);if(value!==undefined)return value;}
  if(method==='getMe')return {ok:true,result:{id:12345678,is_bot:true,username:exports.botName}};
  if(method==='getChat'){
@@ -45,6 +48,7 @@ exports.sendScheduledMessageMedia=(db,token,chatId,caption,id)=>{
 `);
 const require = createRequire(import.meta.url), scheduler = require(path.join(fixture, 'telegram-scheduled-messages.js'));
 const telegram = require(path.join(fixture, 'telegram-bot.js')), { getSqlite } = require(path.join(fixture, 'sqlite.js'));
+const gameTips = require(path.join(fixture, 'telegram-game-tips.js'));
 const oldData = process.env.DATA_DIR, start = Date.parse('2026-11-15T00:59:00Z'), MINUTE = 60_000, DAY = 86_400_000;
 const cipher = 'fixture-saved-ciphertext', token = '12345678:fixture-saved-token';
 let now = start;
@@ -65,6 +69,15 @@ function storeMedia(kind) {
  db().prepare('INSERT INTO telegram_scheduled_message_media(id,kind,name,bytes,mime,created_at) VALUES(?,?,?,?,?,?)').run(id,kind,kind,64,'fixture',now);
  return id;
 }
+async function addGame(game, provider = 'MEGA888') {
+ const id = randomUUID();
+ const bytes = await sharp({create:{width:120,height:80,channels:3,background:'#214b7d'}}).png().toBuffer();
+ const url = 'https://example.com/upload?' + new URLSearchParams({id,provider,game});
+ const response = await gameTips.uploadGameTipsAsset(db(), new Request(url, {method:'POST',headers:{'content-type':'image/png'},body:bytes}), clock);
+ return response.assets.find(asset => asset.id === id);
+}
+const gamePlan = (extra = {}) => ({name:'Game Tips',text:'',gameTipsProvider:'MEGA888',targetKeys:['official'],...extra});
+const gameSlot = at => JSON.parse(db().prepare('SELECT selection_json FROM telegram_game_tip_slots WHERE run_at=?').get(at).selection_json);
 
 test.beforeEach(() => {
  process.env.DATA_DIR = mkdtempSync(path.join(fixture, 'case-')); now = start;
@@ -79,7 +92,90 @@ test.after(() => { if(oldData===undefined) delete process.env.DATA_DIR; else pro
 test('empty scheduler starts healthy and verifies all three destinations without sending', async () => {
  assert.deepEqual(status().plans, []); assert.equal(status().scheduler.workerHealthy, false);
  await tick(); assert.equal(status().scheduler.workerHealthy, true); assert.equal(sends().length, 0); assert.equal(status().targets.filter(t=>t.ready).length,3);
- assert.equal(db().prepare('PRAGMA user_version').get().user_version, 38);
+ assert.equal(db().prepare('PRAGMA user_version').get().user_version, 39);
+});
+
+test('Game Tips sends one generated photo plus its exact names and buttons to all selected channels and rotates across daily slots', async () => {
+ for (const game of ['Dolphin Reef','Iceland','Great Blue','Great Stars','Dragon Maiden','Razor Shark']) await addGame(game);
+ await addGame('Other Platform Game','Other Platform');
+ await create(gamePlan({times:['09:00','09:30'], targetKeys:['official','group']}));
+ assert.deepEqual(status().gameTipsProviders.map(provider=>({...provider})),[{name:'MEGA888',count:6},{name:'Other Platform',count:1}]);
+ assert.equal(onlyPlan().gameTipsProvider,'MEGA888');
+ const first = onlyPlan().nextRunAt;
+ now=first; await tick();
+ const selection=gameSlot(first), caption=gameTips.gameTipsCaption(selection);
+ assert.equal(selection.provider,'MEGA888');
+ assert.equal(sends().length,0);
+ assert.equal(sendsMedia().length,2);
+ for (const { method,p,upload } of sendsMedia()) {
+  assert.equal(method,'sendPhoto'); assert.equal(p.caption,caption); assert.equal(upload.field,'photo');
+  assert.equal(upload.mime,'image/jpeg');
+  assert.deepEqual(p.reply_markup.inline_keyboard, [[{text:'Visit website',url:'https://365freebonus.com/'},{text:'NEED HELP?',url:'https://t.me/FreeBonus365ChatBot'}]]);
+ }
+ const image=sendsMedia()[0].upload.bytes;
+ assert.deepEqual(image,sendsMedia()[1].upload.bytes);
+ const {width,height}=await sharp(image).metadata();
+ assert.deepEqual({width,height},{width:1500,height:900});
+ assert.ok(jobs().every(job=>job.text===''));
+ now=onlyPlan().nextRunAt; await tick();
+ const firstGames=new Set(selection.games.map(game=>game.game));
+ assert.equal(new Set(gameSlot(now).games.map(game=>game.game)).size,3);
+ assert.ok(gameSlot(now).games.every(game=>!firstGames.has(game.game)));
+ assert.equal(onlyPlan().nextRunAt,first+DAY);
+});
+
+test('Game Tips reports a depleted pool and skips the old day at MYT rollover', async () => {
+ const first=await addGame('Dolphin Reef');
+ await addGame('Iceland');
+ await assert.rejects(create(gamePlan()), error=>error.status===400 && /至少需要 3/.test(error.message));
+ await addGame('Great Blue');
+ await create(gamePlan({times:['23:59','00:00','01:00']}));
+ gameTips.updateGameTipsAsset(db(), {...first,enabled:false}, clock);
+ assert.match(onlyPlan().gameTipsIssue,/至少需要 3/);
+ const skippedAt=onlyPlan().nextRunAt;
+ now=Date.parse('2026-11-16T00:00:00+08:00'); await tick();
+ assert.equal(sendsMedia().length,0);
+ assert.deepEqual(jobs().map(job=>job.status),['skipped','skipped']);
+ assert.equal(jobs()[0].run_at,skippedAt);
+ assert.match(jobs()[0].last_error,/日期已结束/);
+ assert.match(jobs()[1].last_error,/至少需要 3/);
+ await addGame('Great Stars');
+ now=onlyPlan().nextRunAt; await tick();
+ assert.equal(sendsMedia().length,1); assert.equal(jobs().at(-1).status,'sent');
+});
+
+test('Game Tips reuses the same photo and caption for a definitive 429 retry and does not repeat an ambiguous send', async () => {
+ for (const name of ['Dolphin Reef','Iceland','Great Blue']) await addGame(name);
+ await create(gamePlan({targetKeys:['official','group']}));
+ telegram.results[telegram.ids.group]=[null];
+ telegram.results[telegram.ids.official]=[{ok:false,code:429,retryAfter:30}];
+ const first=onlyPlan().nextRunAt;
+ now=first; await tick();
+ const firstAttempt=sendsMedia().find(call=>call.p.chat_id===telegram.ids.official);
+ const id=gameSlot(first).games[0].id;
+ const asset=gameTips.listGameTipAssets(db()).find(entry=>entry.id===id);
+ gameTips.updateGameTipsAsset(db(), {...asset,game:'Renamed Game'}, clock);
+ now+=30_000; await tick();
+ const official=sendsMedia().filter(call=>call.p.chat_id===telegram.ids.official);
+ assert.equal(official.length,2);
+ assert.equal(official[1].p.caption,firstAttempt.p.caption);
+ assert.deepEqual(official[1].upload.bytes,firstAttempt.upload.bytes);
+ assert.equal(sendsMedia().filter(call=>call.p.chat_id===telegram.ids.group).length,1);
+ assert.equal(jobs().find(job=>job.target_key==='group').status,'unknown');
+ assert.equal(jobs().find(job=>job.target_key==='official').status,'sent');
+});
+
+test('Game Tips records a broken local image as a failed render without calling Telegram', async () => {
+ const broken=await addGame('Dolphin Reef');
+ await addGame('Iceland');
+ await addGame('Great Blue');
+ await create(gamePlan());
+ db().prepare('UPDATE telegram_game_tips_assets SET image=? WHERE id=?').run(Buffer.from('broken fixture image'),broken.id);
+ now=onlyPlan().nextRunAt; await tick();
+ assert.equal(sendsMedia().length,0); assert.equal(sends().length,0);
+ const [job]=jobs();
+ assert.equal(job.status,'failed'); assert.equal(job.dispatch_started_at,0);
+ assert.match(job.last_error,/无法生成 Game Tips 图片/);
 });
 
 test('disabled draft can be saved without credentials or outbound calls', async () => {

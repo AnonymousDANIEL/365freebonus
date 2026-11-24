@@ -22,7 +22,7 @@
 .cms-scheduled-overview span { color: var(--cms-muted); font-size: .72rem; line-height: 1.7; font-variant-numeric: tabular-nums; }
 .cms-scheduled-overview .cms-scheduled-next { background: var(--cms-accent-bg); }
 .cms-scheduled-next > span { color: var(--cms-green); font-size: .8rem; }
-.cms-scheduled-tabs { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .3rem; padding: .3rem; border: 1px solid var(--cms-line); border-radius: .65rem; background: var(--cms-inset); }
+.cms-scheduled-tabs { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: .3rem; padding: .3rem; border: 1px solid var(--cms-line); border-radius: .65rem; background: var(--cms-inset); }
 .cms-scheduled-tabs > button { display: flex; align-items: center; justify-content: center; gap: .4rem; min-height: 41px; padding: .5rem .3rem; border: 1px solid transparent; border-radius: .4rem; background: transparent; color: var(--cms-muted); font-size: .79rem; cursor: pointer; }
 .cms-scheduled-tabs > button[aria-selected=true] { border-color: var(--cms-line); color: var(--cms-text); background: var(--cms-input); box-shadow: 0 1px 3px #00000008; }
 .cms-scheduled-tabs small { padding: 0 .3rem; background: var(--cms-neutral-bg); border-radius: .25rem; font-size: .65rem; }
@@ -97,6 +97,69 @@
 .cms-scheduled-counts dd { margin: 0; font-size: .85rem; }
 .cms-scheduled-filter { display: flex; align-items: center; gap: .5rem; font-size: .72rem; }
 .cms-scheduled-filter select { border: 1px solid var(--cms-line); border-radius: .4rem; padding: .5rem .7rem; background: var(--cms-input); color: var(--cms-text); font-size: .73rem; }
+.cms-game-tips-plan select {
+  min-width: 0;
+  min-height: 41px;
+  padding: .5rem .7rem;
+  border: 1px solid var(--cms-line);
+  border-radius: .4rem;
+  background: var(--cms-inset);
+  color: var(--cms-text);
+  font-size: .76rem;
+}
+.cms-game-tips-copy {
+  padding: .65rem .8rem;
+  border: 1px solid var(--cms-line);
+  border-radius: .45rem;
+  font-size: .76rem;
+}
+.cms-game-tips-copy summary { cursor: pointer; }
+.cms-scheduled-messages .cms-game-tips-copy p {
+  margin: .55rem 0;
+  color: var(--cms-text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-width: none;
+}
+.cms-game-tips-pills { display: flex; flex-wrap: wrap; gap: .45rem; }
+.cms-scheduled-messages .cms-scheduled-editor :is(.cms-telegram-switch, .cms-scheduled-target-choice) input[type="checkbox"] {
+  width: 17px;
+  height: 17px;
+  min-height: 0;
+  padding: 0;
+  accent-color: var(--cms-green);
+}
+.cms-scheduled-editor .cms-game-tips-upload-list { display: grid; gap: .65rem; }
+.cms-game-tips-upload-row {
+  display: grid;
+  grid-template-columns: minmax(48px, 80px) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: .65rem;
+  padding: .55rem;
+  border: 1px solid var(--cms-line);
+  border-radius: .45rem;
+  background: var(--cms-input);
+}
+.cms-game-tips-upload-row img, .cms-game-tips-image img {
+  display: block;
+  width: 100%;
+  object-fit: contain;
+  border-radius: .4rem;
+  background: var(--cms-inset);
+}
+.cms-game-tips-upload-row img { aspect-ratio: 4 / 3; }
+.cms-game-tips-upload-row label small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cms-game-tips-progress { display: flex; align-items: center; flex-wrap: wrap; gap: .45rem; }
+.cms-game-tips-progress progress { accent-color: var(--cms-green); }
+.cms-game-tips-image-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 14rem), 1fr));
+  gap: .7rem;
+}
+.cms-game-tips-image { padding: .7rem; }
+.cms-game-tips-image img { aspect-ratio: 16 / 9; }
+.cms-game-tips-image strong, .cms-game-tips-image small { display: block; overflow-wrap: anywhere; }
+.cms-game-tips-image small { margin-top: .25rem; color: var(--cms-muted); }
 @media (max-width: 650px) {
   .cms-scheduled-overview, .cms-scheduled-form-grid, .cms-scheduled-attachment { grid-template-columns: 1fr; }
   .cms-scheduled-heading > .cms-scheduled-actions { width: 100%; }
@@ -104,4 +167,5 @@
   .cms-scheduled-timeline time { min-width: 0; }
   .cms-scheduled-tabs { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .cms-scheduled-tabs > button { font-size: .73rem; gap: .3rem; }
+  .cms-game-tips-upload-row { grid-template-columns: 48px minmax(0, 1fr) auto; }
 }

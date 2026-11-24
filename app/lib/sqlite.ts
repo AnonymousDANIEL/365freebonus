@@ -709,6 +709,26 @@ function migrate(db: DatabaseSync) {
       db.exec("COMMIT");
     } catch (error) { db.exec("ROLLBACK"); throw error; }
   }
+  // The Game Tips schedule extends the queue without changing the legacy
+  // migration level. Older binaries can still read ordinary scheduled plans.
+  if (!db.prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='telegram_game_tip_slots'").get()) {
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      const columns = db.prepare("PRAGMA table_info(telegram_scheduled_message_plans)").all() as { name: string }[];
+      if (!columns.some(column => column.name === "game_tips_provider")) {
+        db.exec("ALTER TABLE telegram_scheduled_message_plans ADD COLUMN game_tips_provider TEXT NOT NULL DEFAULT ''");
+      }
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS telegram_game_tip_slots (
+          plan_id TEXT NOT NULL REFERENCES telegram_scheduled_message_plans(id),
+          plan_revision TEXT NOT NULL,run_at INTEGER NOT NULL,provider_key TEXT NOT NULL,selection_json TEXT NOT NULL,
+          PRIMARY KEY(plan_id,run_at,plan_revision)
+        );
+        CREATE INDEX IF NOT EXISTS telegram_game_tip_slots_provider ON telegram_game_tip_slots(provider_key,run_at);
+      `);
+      db.exec("COMMIT");
+    } catch (error) { db.exec("ROLLBACK"); throw error; }
+  }
   migrated.add(db);
 }
 

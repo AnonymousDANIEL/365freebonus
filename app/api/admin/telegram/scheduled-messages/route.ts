@@ -4,6 +4,7 @@ import { telegramScheduledMessageStatus, saveTelegramScheduledMessagePlan,
   saveTelegramScheduledMessageTarget, deleteTelegramScheduledMessageTarget } from "../../../../lib/telegram-promotions";
 import { ScheduledMessageError } from "../../../../lib/telegram-scheduled-messages";
 import type { ScheduledMessageTargetKey } from "../../../../lib/telegram-scheduled-messages-types";
+import { GAME_TIPS_PROVIDER_LIMIT } from "../../../../lib/telegram-game-tips-types";
 import { ApiError, apiError, authorizeAdmin, jsonBody } from "../../_security";
 
 export const dynamic = "force-dynamic";
@@ -16,7 +17,7 @@ const targetKey: z.ZodType<ScheduledMessageTargetKey> = z.union([z.enum(["offici
 const fields = {
   name: z.string().trim().min(1).max(100),
   // Send the owner's text verbatim, including spacing and line breaks.
-  text: z.string().min(1).max(4096).refine(value => Boolean(value.trim())),
+  text: z.string().max(4096),
   times: z.array(z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/)).min(1).max(24)
     .refine(values => new Set(values).size === values.length),
   enabled: z.boolean(),
@@ -24,6 +25,8 @@ const fields = {
   targetKeys: z.array(targetKey).min(1).max(23)
     .refine(values => new Set(values).size === values.length).optional(),
   mediaId: id.nullable().optional(),
+  gameTipsProvider: z.string().trim().refine(value =>
+    Boolean(value) && Array.from(value).length <= GAME_TIPS_PROVIDER_LIMIT && !/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(value)).nullable().optional(),
 };
 // A stable key from the draft prevents lost HTTP responses creating duplicates.
 const create = z.object({ requestId: id, ...fields }).strict();
@@ -39,7 +42,12 @@ const upsertTarget = z.union([
 const removeTarget = z.object({ targetKey: customTargetKey, revision: id }).strict();
 const respond = (body: ReturnType<typeof telegramScheduledMessageStatus>) =>
   Response.json(body, { headers: { "Cache-Control": "no-store" } });
-function planPayload<T extends { text: string; mediaId?: string | null }>(input: T): T {
+function planPayload<T extends { text: string; mediaId?: string | null; gameTipsProvider?: string | null }>(input: T): T {
+  if (input.gameTipsProvider) {
+    if (input.text.trim() || input.mediaId) throw new ApiError(400, "Game Tips 的图片和文案会自动生成，请清除手动文案与附件。");
+  } else if (!input.text.trim()) {
+    throw new ApiError(400, "请输入发送文案。");
+  }
   if (input.mediaId && input.text.length > 1024) throw new ApiError(400, "附上媒体时，文案最多可填写 1,024 字。");
   return input;
 }

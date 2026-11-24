@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import ts from 'typescript';
+import * as gameTipsTypes from '../app/lib/telegram-game-tips-types.ts';
 
 const source = readFileSync(new URL('../app/[adminPath]/TelegramScheduledMessages.tsx', import.meta.url), 'utf8');
 const code = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText;
@@ -37,7 +38,7 @@ function harness(initial = snapshot()) {
     return getValue;
   };
   class FakeDate extends Date { constructor(...args) { super(...(args.length ? args : [time])); } static now() { return time; } }
-  vm.runInNewContext(code, { module: moduleObject, exports: moduleObject.exports, require(name) { if (name === 'react') return react; if (name === 'react/jsx-runtime') return { jsx, jsxs: jsx }; if (name === 'lucide-react') return new Proxy({}, { get: (_, key) => String(key) }); if (name.endsWith('.css')) return {}; throw Error(`Unexpected import ${name}`); },
+  vm.runInNewContext(code, { module: moduleObject, exports: moduleObject.exports, require(name) { if (name === 'react') return react; if (name === 'react/jsx-runtime') return { jsx, jsxs: jsx }; if (name === 'lucide-react') return new Proxy({}, { get: (_, key) => String(key) }); if (name === './TelegramGameTipsLibrary') return { default: 'GameTipsLibrary' }; if (name === '../lib/telegram-game-tips-types') return gameTipsTypes; if (name.endsWith('.css')) return {}; throw Error(`Unexpected import ${name}`); },
     Date: FakeDate, Error, Intl, crypto: { randomUUID: () => '1a111111-1111-4111-8111-111111111111' }, document, window: { confirm: () => true },
     setInterval(fn, ms) { const id = ++serial; intervals.set(id, { fn, ms }); return id; }, clearInterval(id) { intervals.delete(id); },
   });
@@ -91,6 +92,34 @@ test('saving sends unchanged text and an explicit Malaysia date rather than a br
     assert.deepEqual(Array.from(call.body.targetKeys), ['official', 'group', 'hot']);
     assert.equal(call.body.enabled, false); assert.equal(h.form(), undefined);
     assert.match(h.text(), /暂停状态/);
+  } finally { h.close(); }
+});
+
+test('Game Tips creates a disabled Malaysia daily plan with selected channels and no manually authored text or media', async () => {
+  const h = harness(snapshot({ gameTipsProviders: [{ name: 'MEGA888', count: 4 }] }));
+  try {
+    await h.ready();
+    h.button('添加 Game Tips').props.onClick(); h.render();
+    assert.equal(h.field('游戏平台', 'select').props.value, 'MEGA888');
+    assert.equal(h.field('每天重复').props.checked, true);
+    assert.equal(h.field('保存后启用').props.checked, false);
+    assert.ok(h.nodes().some(node => node.type === 'a' && node.props.href === '/api/admin/telegram/game-tips?preview=MEGA888'));
+    assert.ok(!h.nodes().some(node => node.type === 'textarea'));
+    assert.equal(h.field('official').props.checked, false);
+    h.field('official').props.onChange(); h.render();
+    h.field('时间 1').props.onChange({ target: { value: '20:00' } }); h.render();
+    h.button('添加时间').props.onClick(); h.render();
+    h.field('时间 2').props.onChange({ target: { value: '09:30' } }); h.render();
+    assert.match(h.text(), /每天发送 2 次/);
+    await h.form().props.onSubmit({ preventDefault() {} }); h.render();
+    const call = h.calls.find(entry => entry.method === 'POST');
+    assert.equal(call.body.gameTipsProvider, 'MEGA888');
+    assert.equal(call.body.enabled, false);
+    assert.equal(call.body.calendarDate, '');
+    assert.equal(call.body.text, '');
+    assert.equal(call.body.mediaId, null);
+    assert.deepEqual(Array.from(call.body.times), ['09:30', '20:00']);
+    assert.deepEqual(Array.from(call.body.targetKeys), ['official']);
   } finally { h.close(); }
 });
 

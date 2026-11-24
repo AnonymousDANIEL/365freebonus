@@ -1,18 +1,20 @@
 "use client";
 
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { CalendarClock, Check, Clock3, History, LoaderCircle, MessageSquareText, Paperclip, Pause, Pencil, Play, Plus, Radio, RefreshCw, Trash2, Upload, X } from "lucide-react";
+import { CalendarClock, Check, Clock3, Gamepad2, History, Images, LoaderCircle, MessageSquareText, Paperclip, Pause, Pencil, Play, Plus, Radio, RefreshCw, Trash2, Upload, X } from "lucide-react";
+import { gameTipsCaption, gameTipsProviderKey, type GameTipsProvider } from "../lib/telegram-game-tips-types";
 import type { ScheduledMessagePlan, ScheduledMessagePlanInput, ScheduledMessageStatus, ScheduledMessageTarget, ScheduledMessageTargetKey } from "../lib/telegram-scheduled-messages-types";
+import TelegramGameTipsLibrary from "./TelegramGameTipsLibrary";
 import "./telegram-scheduled-messages-admin.css";
 
 type Request = <T>(path: string, method?: string, body?: unknown) => Promise<T>;
 type Props = { request: Request; signInPath: string };
 type Notice = { message: string; error?: boolean; expired?: boolean };
-type Tab = "plans" | "channels" | "time" | "history";
+type Tab = "plans" | "library" | "channels" | "time" | "history";
 type Attachment = NonNullable<ScheduledMessagePlan["media"]>;
 type UploadResponse = Attachment | { id: string; received: number };
-type PlanDraft = Omit<ScheduledMessagePlanInput, "mediaId"> & {
-  calendarDate: string; repeatDaily: boolean; targetKeys: ScheduledMessageTargetKey[]; media: Attachment | null;
+type PlanDraft = Omit<ScheduledMessagePlanInput, "mediaId" | "gameTipsProvider"> & {
+  calendarDate: string; repeatDaily: boolean; targetKeys: ScheduledMessageTargetKey[]; media: Attachment | null; gameTipsProvider?: string;
 };
 type ChannelDraft = { requestId?: string; key?: ScheduledMessageTargetKey; revision?: string; title: string; address: string };
 const endpoint = "/api/admin/telegram/scheduled-messages";
@@ -26,6 +28,7 @@ const dateFormat = new Intl.DateTimeFormat("en-CA", { timeZone: timezone, year: 
 const statusLabels: Record<string, string> = { pending: "待发送", sending: "发送中", sent: "已发送", failed: "发送失败", unknown: "待确认", cancelled: "已取消", skipped: "已跳过" };
 const tabs = [
   { id: "plans", label: "文案管理", icon: MessageSquareText },
+  { id: "library", label: "Game Tips 图库", icon: Images },
   { id: "channels", label: "频道管理", icon: Radio },
   { id: "time", label: "发送排期", icon: CalendarClock },
   { id: "history", label: "发送记录", icon: History },
@@ -42,6 +45,7 @@ function draftOf(plan: ScheduledMessagePlan, today: string, defaults: ScheduledM
     id: plan.id, revision: plan.revision, name: plan.name, text: plan.text, times: [...plan.times], enabled: plan.enabled,
     calendarDate: plan.calendarDate || today, repeatDaily: !plan.calendarDate,
     targetKeys: [...(plan.targetKeys ?? defaults)], media: plan.media ?? null,
+    ...(plan.gameTipsProvider ? { gameTipsProvider: plan.gameTipsProvider } : {}),
   };
 }
 function payloadOf({ media, repeatDaily, ...draft }: PlanDraft): ScheduledMessagePlanInput {
@@ -147,7 +151,10 @@ export default function TelegramScheduledMessages({ request, signInPath }: Props
   async function save(event: FormEvent) {
     event.preventDefault(); if (!draft) return;
     const limit = draft.media ? 1024 : 4096;
-    if (!draft.name.trim() || !draft.text.trim() || draft.text.length > limit) {
+    if (isGameTipsDraft && (!draft.name.trim() || !draft.gameTipsProvider || draft.enabled && !providerReady)) {
+      setNotice({ error: true, message: "请选择游戏平台并填写计划名称。启用计划前，同一平台至少需要 3 款可用游戏。" }); return;
+    }
+    if (!isGameTipsDraft && (!draft.name.trim() || !draft.text.trim() || draft.text.length > limit)) {
       setNotice({ error: true, message: `请填写名称和文案，文案最多 ${limit.toLocaleString()} 个字符。` }); return;
     }
     if (!draft.times.length || draft.times.some(time => !hourMinute.test(time)) || new Set(draft.times).size !== draft.times.length) {
@@ -164,6 +171,14 @@ export default function TelegramScheduledMessages({ request, signInPath }: Props
   function open(plan?: ScheduledMessagePlan) {
     if (draft && !window.confirm("放弃当前未保存的草稿？")) return;
     setDraft(plan ? draftOf(plan, today, defaultTargetKeys) : freshDraft(today, defaultTargetKeys));
+    setTab("plans"); setNotice(null);
+  }
+  function openGameTips() {
+    if (draft && !window.confirm("放弃当前未保存的草稿？")) return;
+    setDraft({
+      ...freshDraft(today, []), name: "Game Tips", repeatDaily: true,
+      gameTipsProvider: readyProviders.length === 1 ? readyProviders[0].name : "",
+    });
     setTab("plans"); setNotice(null);
   }
   async function remove(plan: ScheduledMessagePlan) {
@@ -236,6 +251,15 @@ export default function TelegramScheduledMessages({ request, signInPath }: Props
   const heartbeat = status?.scheduler.heartbeatAt || 0;
   const healthy = Boolean(status?.scheduler.workerHealthy && heartbeat && now - heartbeat < 60_000);
   const targetsReady = Boolean(status?.hasToken && selectedTargets.length && selectedTargets.every(key => targetsByKey.get(key)?.ready));
+  const gameTipsProviders = status?.gameTipsProviders || [];
+  const readyProviders = gameTipsProviders.filter(provider => provider.count >= 3);
+  const readyProviderKeys = new Set(readyProviders.map(provider => gameTipsProviderKey(provider.name)));
+  const isGameTipsDraft = draft?.gameTipsProvider !== undefined;
+  const draftProviderKey = draft?.gameTipsProvider ? gameTipsProviderKey(draft.gameTipsProvider) : "";
+  const draftProvider = gameTipsProviders.find(provider => gameTipsProviderKey(provider.name) === draftProviderKey);
+  const providerReady = (draftProvider?.count ?? 0) >= 3;
+  const gameTipsProviderName = draftProvider?.name ?? draft?.gameTipsProvider ?? "";
+  const gameTipsTimeCount = new Set(draft?.times.filter(time => hourMinute.test(time))).size;
   const pastCount = plans.filter(plan => plan.calendarDate && plan.calendarDate < today).length;
   const visiblePlans = plans.filter(plan => showPast || !plan.calendarDate || plan.calendarDate >= today);
   const dates = [...new Set(visiblePlans.map(plan => plan.calendarDate || ""))].sort((left, right) => {
@@ -246,11 +270,15 @@ export default function TelegramScheduledMessages({ request, signInPath }: Props
   });
   const timeline = upcoming(plans, now);
   const deliveries = (status?.deliveries || []).filter(item => historyFilter === "all" || item.status === historyFilter);
+  function updateGameTipsProviders(providers: GameTipsProvider[]) {
+    epoch.current++;
+    setStatus(currentStatus => currentStatus ? { ...currentStatus, gameTipsProviders: providers } : currentStatus);
+  }
 
   return <section className="cms-settings-form cms-scheduled-messages" aria-labelledby="scheduled-messages-title">
     <div className="cms-settings-panel">
       <div className="cms-scheduled-heading">
-        <div><h2 id="scheduled-messages-title">频道文案定时发布</h2><p>按马来西亚日期安排文案、照片、视频或 GIF，自动发布到所选频道。</p></div>
+        <div><h2 id="scheduled-messages-title">频道文案定时发布</h2><p>按马来西亚时间安排文案、媒体和 Game Tips，自动发布到所选频道。</p></div>
         <div className="cms-scheduled-actions">
           <span className={`cms-scheduled-pill ${healthy ? "cms-scheduled-good" : ""}`}>{healthy ? "后台定时服务运行中" : loading ? "正在连接…" : "定时服务需要检查"}</span>
           <button type="button" className="cms-secondary" disabled={Boolean(busy)} onClick={() => void mutate("refresh", "GET")}><RefreshCw size={14} className={busy === "refresh" ? "cms-spin" : ""} />刷新状态</button>
@@ -273,20 +301,42 @@ export default function TelegramScheduledMessages({ request, signInPath }: Props
             <div className="cms-scheduled-actions">
               {pastCount > 0 && <button type="button" className="cms-secondary" aria-pressed={showPast} onClick={() => setShowPast(value => !value)}><History size={14} />{showPast ? "隐藏过往日期" : "显示过往日期"}</button>}
               <button type="button" className="cms-primary" disabled={Boolean(busy)} onClick={() => open()}><Plus size={15} />添加文案</button>
+              <button type="button" className="cms-secondary" disabled={Boolean(busy)} onClick={openGameTips}><Gamepad2 size={15} />添加 Game Tips</button>
             </div>
           </div>
           {draft && <form ref={editor} className="cms-scheduled-card cms-scheduled-editor" onSubmit={save}>
             <fieldset disabled={Boolean(busy)}>
-              <div className="cms-scheduled-heading"><h3>{draft.id ? "编辑文案计划" : "添加文案计划"}</h3><button type="button" className="cms-icon-button" aria-label="关闭文案编辑" onClick={() => { if (window.confirm("放弃当前未保存的草稿？")) setDraft(null); }}><X size={16} /></button></div>
+              <div className="cms-scheduled-heading"><h3>{isGameTipsDraft ? "Game Tips 发送计划" : draft.id ? "编辑文案计划" : "添加文案计划"}</h3><button type="button" className="cms-icon-button" aria-label="关闭文案编辑" onClick={() => { if (window.confirm("放弃当前未保存的草稿？")) setDraft(null); }}><X size={16} /></button></div>
               {conflict && <div className="cms-scheduled-conflict" role="alert"><span>{current ? "这条计划已有新版本，当前草稿尚未保存。" : "这条计划已被删除，草稿尚未保存。"}</span>{current && <button type="button" className="cms-secondary" onClick={() => { if (window.confirm("加载最新版本会替换当前未保存的草稿，继续？")) setDraft(draftOf(current, today, defaultTargetKeys)); }}>加载最新版本</button>}</div>}
               <div className="cms-scheduled-form-grid">
                 <label>后台名称<input required autoComplete="off" maxLength={100} value={draft.name} onChange={event => setDraft({ ...draft, name: event.target.value })} placeholder="例如：周五上午活动" /><small>供后台辨认这条文案。</small></label>
                 <div className="cms-scheduled-date-field">
                   {!draft.repeatDaily && <label>发送日期（MYT）<input type="date" required value={draft.calendarDate} onChange={event => setDraft({ ...draft, calendarDate: event.target.value })} /></label>}
-                  {draft.repeatDaily && <span className="cms-scheduled-muted">每天使用同一份文案和附件。</span>}
+                  {draft.repeatDaily && <span className="cms-scheduled-muted">{isGameTipsDraft ? "每日按马来西亚时间重新抽图并生成文案。" : "每天使用同一份文案和附件。"}</span>}
                   <label className="cms-telegram-switch"><input type="checkbox" checked={draft.repeatDaily} onChange={event => setDraft({ ...draft, repeatDaily: event.target.checked })} />每天重复</label>
                 </div>
               </div>
+              {isGameTipsDraft ? <div className="cms-scheduled-media cms-game-tips-plan">
+                <div className="cms-scheduled-heading">
+                  <div><h3>随机选图与自动文案</h3><p>每次从同一平台抽 3 款不同游戏，合成一张图，再以相同顺序生成文案。</p></div>
+                  <button type="button" className="cms-secondary" onClick={() => setTab("library")}><Images size={14} />管理图库</button>
+                </div>
+                <label>游戏平台<select value={gameTipsProviderName} required onChange={event => setDraft({ ...draft, gameTipsProvider: event.target.value })}>
+                  <option value="">选择游戏平台</option>
+                  {draft.gameTipsProvider && !draftProvider && <option value={draft.gameTipsProvider}>{draft.gameTipsProvider} · 0 款可用</option>}
+                  {gameTipsProviders.map(provider => <option key={provider.name} value={provider.name}>{provider.name} · {provider.count} 款可用</option>)}
+                </select></label>
+                {!providerReady && <small className="cms-scheduled-error">请在图库为此平台准备至少 3 款不同且已启用的游戏。</small>}
+                <details className="cms-game-tips-copy">
+                  <summary>查看文案格式</summary>
+                  <p>{gameTipsCaption({
+                    provider: gameTipsProviderName || "游戏平台",
+                    games: [{ game: "游戏名称 1" }, { game: "游戏名称 2" }, { game: "游戏名称 3" }],
+                  })}</p>
+                  <small className="cms-scheduled-muted">Telegram 按钮 · Visit website · NEED HELP?</small>
+                </details>
+                {providerReady && <a className="cms-secondary cms-scheduled-save-channel" href={`/api/admin/telegram/game-tips?preview=${encodeURIComponent(gameTipsProviderName)}`} target="_blank" rel="noopener noreferrer"><Images size={14} />预览合成图样式 ↗</a>}
+              </div> : <>
               <label>发送文案<textarea required rows={7} maxLength={draft.media ? 1024 : 4096} value={draft.text} onChange={event => setDraft({ ...draft, text: event.target.value })} placeholder="输入要发布的文案" /><small>{draft.text.length.toLocaleString()} / {draft.media ? "1,024 · 文案会作为附件说明一起发送。" : "4,096 · 保留文字、表情及换行。"}</small></label>
               <div className="cms-scheduled-media">
                 <div className="cms-scheduled-heading">
@@ -305,6 +355,7 @@ export default function TelegramScheduledMessages({ request, signInPath }: Props
                   <div><strong>{describeMedia(draft.media)}</strong><button type="button" className="cms-secondary" onClick={() => setDraft({ ...draft, media: null })}><X size={14} />移除附件</button></div>
                 </div>}
               </div>
+              </>}
               <div role="group" aria-labelledby="scheduled-target-choices" className="cms-scheduled-time-fields">
                 <div className="cms-scheduled-heading"><h3 id="scheduled-target-choices">发送频道</h3><button type="button" className="cms-secondary" onClick={() => setTab("channels")}><Radio size={14} />管理频道</button></div>
                 <div className="cms-scheduled-target-choices">{targets.map(target => {
@@ -319,11 +370,12 @@ export default function TelegramScheduledMessages({ request, signInPath }: Props
               </div>
               <div className="cms-scheduled-time-fields"><div className="cms-scheduled-heading"><h3>发送时间（MYT）</h3><button type="button" className="cms-secondary" disabled={draft.times.length >= 24} onClick={() => setDraft({ ...draft, times: [...draft.times, ""] })}><Plus size={14} />添加时间</button></div>
                 {draft.times.map((time, index) => <div className="cms-scheduled-time-input" key={index}><label>时间 {index + 1}<input type="time" step="60" required value={time} onChange={event => setDraft({ ...draft, times: draft.times.map((value, i) => i === index ? event.target.value : value) })} /></label><button type="button" className="cms-icon-button" disabled={draft.times.length === 1} aria-label={`移除时间 ${index + 1}`} onClick={() => setDraft({ ...draft, times: draft.times.filter((_, i) => i !== index) })}><Trash2 size={14} /></button></div>)}
-                <small>{draft.repeatDaily ? "每天按所选时间发布。" : "只在所选日期发布。隔天的文案和附件可另加一条计划。"}</small>
+                <small>{isGameTipsDraft ? `${draft.repeatDaily ? "每天" : "所选日期"}发送 ${gameTipsTimeCount} 次，每个设定时间向所有勾选频道各发送 1 次。` : draft.repeatDaily ? "每天按所选时间发布。" : "只在所选日期发布。隔天的文案和附件可另加一条计划。"}</small>
+                {isGameTipsDraft && !draft.repeatDaily && <small>单日计划可单独安排时间。同日仍启用的每日计划也会照常发布。</small>}
               </div>
               <label className="cms-telegram-switch"><input type="checkbox" role="switch" checked={draft.enabled} onChange={event => setDraft({ ...draft, enabled: event.target.checked })} />保存后启用自动发送</label>
               {draft.enabled && !targetsReady && <small className="cms-scheduled-error">启用时将核实所选频道的发布权限。也可先暂停保存。</small>}
-              <div className="cms-scheduled-actions"><button className="cms-primary" type="submit" disabled={conflict}>{busy === "save" ? <LoaderCircle size={15} className="cms-spin" /> : <Check size={15} />}保存文案与时间</button><span className="cms-scheduled-muted">草稿需保存后才会生效</span></div>
+              <div className="cms-scheduled-actions"><button className="cms-primary" type="submit" disabled={conflict || isGameTipsDraft && draft.enabled && !providerReady}>{busy === "save" ? <LoaderCircle size={15} className="cms-spin" /> : <Check size={15} />}{isGameTipsDraft ? "保存 Game Tips 排期" : "保存文案与时间"}</button><span className="cms-scheduled-muted">草稿需保存后才会生效</span></div>
             </fieldset>
           </form>}
           {!visiblePlans.length && !draft && <div className="cms-scheduled-empty"><strong>目前没有待排文案</strong><p>添加一条文案，选择日期、时间和频道，再启用自动发布。</p></div>}
@@ -336,17 +388,22 @@ export default function TelegramScheduledMessages({ request, signInPath }: Props
                   <div><h3>{plan.name}</h3><span className={`cms-scheduled-pill ${plan.enabled && !past ? "cms-scheduled-good" : ""}`}>{past ? "日期已过" : plan.enabled ? "已启用" : "已暂停"}</span></div>
                   <div className="cms-scheduled-actions">
                     <button type="button" className="cms-secondary" disabled={Boolean(busy)} onClick={() => open(plan)}><Pencil size={14} />编辑</button>
-                    {!past && <button type="button" className="cms-secondary" disabled={Boolean(busy)} onClick={() => void mutate(`toggle-${plan.id}`, "PUT", payloadOf({ ...draftOf(plan, today, defaultTargetKeys), enabled: !plan.enabled }), plan.enabled ? "计划已暂停。" : "计划已启用。")}>{plan.enabled ? <Pause size={14} /> : <Play size={14} />}{plan.enabled ? "暂停" : "启用"}</button>}
+                    {!past && <button type="button" className="cms-secondary" disabled={Boolean(busy) || Boolean(plan.gameTipsProvider && !plan.enabled && !readyProviderKeys.has(gameTipsProviderKey(plan.gameTipsProvider)))} onClick={() => void mutate(`toggle-${plan.id}`, "PUT", payloadOf({ ...draftOf(plan, today, defaultTargetKeys), enabled: !plan.enabled }), plan.enabled ? "计划已暂停。" : "计划已启用。")}>{plan.enabled ? <Pause size={14} /> : <Play size={14} />}{plan.enabled ? "暂停" : "启用"}</button>}
                     <button type="button" className="cms-icon-button" aria-label={`删除计划 ${plan.name}`} disabled={Boolean(busy)} onClick={() => void remove(plan)}><Trash2 size={15} /></button>
                   </div>
                 </div>
-                <p className="cms-scheduled-copy">{plan.text}</p>
+                {plan.gameTipsProvider ? <div className="cms-scheduled-attachment-label"><Gamepad2 size={15} />{plan.gameTipsProvider} · 随机 3 款游戏 · 3 图合成和自动文案</div> : <p className="cms-scheduled-copy">{plan.text}</p>}
+                {plan.gameTipsIssue && <p className="cms-scheduled-error">{plan.gameTipsIssue}</p>}
                 {plan.media && <div className="cms-scheduled-attachment-label"><Paperclip size={14} />{describeMedia(plan.media)}</div>}
                 <div className="cms-scheduled-plan-times">{plan.times.map(time => <span key={time}><Clock3 size={12} />{time}</span>)}</div>
                 <small className="cms-scheduled-muted">频道 · {targetTitles(plan).join("、")}<br />下次 · {displayTime(plan.nextRunAt)}　最近安排 · {displayTime(plan.lastRunAt)}</small>
               </article>;
             })}
           </div>)}
+        </div>
+        <div id="scheduled-panel-library" role="tabpanel" aria-labelledby="scheduled-tab-library" hidden={tab !== "library"} className="cms-scheduled-panel">
+          <TelegramGameTipsLibrary request={request} signInPath={signInPath} active={tab === "library"}
+            onProvidersChanged={updateGameTipsProviders} onSchedule={openGameTips} />
         </div>
         <div id="scheduled-panel-channels" role="tabpanel" aria-labelledby="scheduled-tab-channels" hidden={tab !== "channels"} className="cms-scheduled-panel">
           <div className="cms-scheduled-heading">
@@ -386,7 +443,7 @@ export default function TelegramScheduledMessages({ request, signInPath }: Props
               <div><strong>{row.plan.name}</strong><small>{row.at <= now ? "已到时间，等待后台处理" : targetTitles(row.plan).join("、")}</small></div>
             </li>)}</ol> : <div className="cms-scheduled-empty">接下来 24 小时没有已启用的发送安排。</div>}
           </div>
-          <div className="cms-scheduled-note"><p>每日排期会在马来西亚时间 00:00 换日，下一天使用自己的文案和附件。</p><p>关闭页面或刷新后，已保存的安排仍由后台发送。遇到 Telegram 回执不明时，可在发送记录核对「待确认」状态。</p></div>
+          <div className="cms-scheduled-note"><p>每日排期会在马来西亚时间 00:00 换日。Game Tips 到每个设定时间会重新从所选平台抽图。</p><p>关闭页面或刷新后，已保存的安排仍由后台发送。遇到 Telegram 回执不明时，可在发送记录核对「待确认」状态。</p></div>
         </div>
         <div id="scheduled-panel-history" role="tabpanel" aria-labelledby="scheduled-tab-history" hidden={tab !== "history"} className="cms-scheduled-panel">
           <dl className="cms-scheduled-counts">{Object.entries(statusLabels).map(([key, label]) => <div key={key}><dt>{label}</dt><dd>{status.counts[key] || 0}</dd></div>)}</dl>
