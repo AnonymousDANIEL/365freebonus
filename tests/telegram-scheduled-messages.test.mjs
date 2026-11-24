@@ -709,11 +709,20 @@ test('Game Tips routing audit distinguishes direct group deliveries, linked-chan
  telegram.calls.length=0;
  const report=await scheduler.inspectGameTipsGroupRoutes(db(),decrypt,now);
  assert.deepEqual(JSON.parse(JSON.stringify(report)),{
-  group:'verified',since:now-DAY,direct:{sent:0,latestAt:null},
+  group:'supergroup',since:now-DAY,direct:{sent:0,latestAt:null},
   throughLinkedChannel:{sent:1,latestAt:sentAt},activePlansSelectingGroup:0,newPostsToLinkedWithoutGroup:1,
   relay:{sampledCopies:1,latestAt:now},
  });
  assert.deepEqual(telegram.calls.map(call=>call.method),['getChat']);
+ telegram.onRequest=()=>({ok:true,result:{id:telegram.ids.group,type:'channel',username:'join365freebonusgroup',linked_chat_id:telegram.ids.official}});
+ const broadcast=await scheduler.inspectGameTipsGroupRoutes(db(),decrypt,now);
+ assert.equal(broadcast.group,'channel');
+ assert.equal(broadcast.throughLinkedChannel,null);
+ telegram.onRequest=()=>({ok:false,code:400});
+ const cached=await scheduler.inspectGameTipsGroupRoutes(db(),decrypt,now);
+ assert.equal(cached.group,'cached');
+ assert.equal(cached.relay.sampledCopies,1);
+ assert.equal(cached.throughLinkedChannel,null);
 });
 
 test('startup worker polls on the server and recovers its running flag after failure', async t => {

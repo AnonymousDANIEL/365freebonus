@@ -169,16 +169,24 @@ export async function inspectGameTipsGroupRoutes(db: DatabaseSync, decrypt: Decr
   const stored = cipher(db);
   if (!stored) return null;
   const group = await telegramRequest(decrypt(stored), "getChat", { chat_id: RELAY_DEFAULT_TARGET }).catch(() => null);
-  if (!group?.ok || !validChat(group.result.id) || !["group", "supergroup"].includes(String(group.result.type))
-    || String(group.result.username).toLowerCase() !== RELAY_DEFAULT_TARGET.slice(1)) return { group: "unverified" as const };
-
-  const groupId = group.result.id, linkedId = validChat(group.result.linked_chat_id) ? group.result.linked_chat_id : 0;
+  const live = group?.ok && validChat(group.result.id) && ["group", "supergroup", "channel"].includes(String(group.result.type))
+    && String(group.result.username).toLowerCase() === RELAY_DEFAULT_TARGET.slice(1) ? group.result : null;
+  const targetRows = targets(db);
+  const savedKey = channelDefinitions(db, hotChatId(db)).find(target => target.address === RELAY_DEFAULT_TARGET)?.key;
+  const savedChatId = identityCurrent(db) ? targetRows.find(target => target.target_key === savedKey && target.ready === 1)?.chat_id : undefined;
+  const relayTarget = db.prepare(`SELECT r.target_chat_id FROM telegram_relay_state r
+    JOIN telegram_promotion_settings p ON p.id='primary' AND p.relay_revision=r.revision
+    WHERE r.id='primary' AND p.relay_chat_id=? AND r.target_verified_at>0`).get(RELAY_DEFAULT_TARGET) as { target_chat_id: number } | undefined;
+  const groupId = live?.id ?? savedChatId ?? relayTarget?.target_chat_id;
+  if (!validChat(groupId)) return { group: "unverified" as const };
+  // A broadcast channel's linked chat is its own discussion group, not a source of incoming copies.
+  const linkedId = live?.type === "supergroup" && validChat(live.linked_chat_id) ? live.linked_chat_id : 0;
   const since = now - DAY;
   const history = db.prepare(`SELECT COUNT(*) AS sent, MAX(sent_at) AS latestAt FROM telegram_scheduled_message_deliveries
     WHERE game_tips_provider<>'' AND target_chat_id=? AND status='sent' AND sent_at>=?`);
   const direct = history.get(groupId, since) as { sent: number; latestAt: number | null };
   const throughLinkedChannel = linkedId ? history.get(linkedId, since) as typeof direct : null;
-  const channelIds = new Map(targets(db).map(target => [target.target_key, target.chat_id]));
+  const channelIds = new Map(targetRows.map(target => [target.target_key, target.chat_id]));
   const plans = db.prepare(`SELECT target_keys_json FROM telegram_scheduled_message_plans
     WHERE game_tips_provider<>'' AND enabled=1 AND deleted_at=0 AND next_run_at>0`).all() as Pick<Plan, "target_keys_json">[];
   const destinations = plans.map(plan => parseTargetKeys(plan.target_keys_json).map(key => channelIds.get(key)));
@@ -192,7 +200,7 @@ export async function inspectGameTipsGroupRoutes(db: DatabaseSync, decrypt: Decr
       AND o.media_kind='photo' AND instr(o.caption, '365FreeBonus X ')>0
     ORDER BY o.sent_at DESC LIMIT 100`).all(groupId, since) as { caption: string; sentAt: number }[];
   const gameTipsCopies = relayCopies.filter(row => isGeneratedGameTipsCaption(row.caption));
-  return { group: "verified" as const, since, direct, throughLinkedChannel, activePlansSelectingGroup, newPostsToLinkedWithoutGroup,
+  return { group: live ? String(live.type) : "cached", since, direct, throughLinkedChannel, activePlansSelectingGroup, newPostsToLinkedWithoutGroup,
     relay: { sampledCopies: gameTipsCopies.length, latestAt: gameTipsCopies[0]?.sentAt ?? null } };
 }
 
