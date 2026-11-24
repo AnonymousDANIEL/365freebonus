@@ -30,6 +30,8 @@ const endpoint = "/api/admin/telegram/game-tips";
 const logoEndpoint = `${endpoint}/logo`;
 const backgroundEndpoint = `${endpoint}/background`;
 const imageTypes = "image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp";
+const galleryPageSize = 48;
+const initialGalleryView = { providerKey: "", query: "", limit: galleryPageSize };
 const slotFields = [
   { field: "x", label: "距左边" }, { field: "y", label: "距上边" },
   { field: "width", label: "宽度" }, { field: "height", label: "高度" },
@@ -108,6 +110,7 @@ export default function TelegramGameTipsLibrary({
 }: Props) {
   const [data, setData] = useState<GameTipsLibrary | null>(null);
   const [selectedProvider, setSelectedProvider] = useState("");
+  const [galleryView, setGalleryView] = useState(initialGalleryView);
   const [logoDraft, setLogoDraft] = useState<LogoDraft | null>(null);
   const [backgroundDraft, setBackgroundDraft] = useState<BackgroundDraft | null>(null);
   const [pending, setPending] = useState<UploadDraft[]>([]);
@@ -143,6 +146,10 @@ export default function TelegramGameTipsLibrary({
     ?? (!selectedProvider || !pending.length && !edit && !logoDraft && !backgroundDraft ? providers[0] : undefined);
   const currentKey = current ? gameTipsProviderKey(current.name) : "";
   const assets = current ? allAssets.filter(image => gameTipsProviderKey(image.provider) === currentKey) : [];
+  const { query, limit } = galleryView.providerKey === currentKey ? galleryView : initialGalleryView;
+  const searchKey = gameTipsProviderKey(query);
+  const matches = searchKey ? assets.filter(asset => gameTipsProviderKey(asset.game).includes(searchKey)) : assets;
+  const visibleAssets = matches.slice(0, limit);
   const platformPlans = current ? plans.filter(plan => plan.gameTipsProvider
     && gameTipsProviderKey(plan.gameTipsProvider) === currentKey
     && (!plan.calendarDate || plan.calendarDate >= today)) : [];
@@ -159,6 +166,7 @@ export default function TelegramGameTipsLibrary({
     if (key === currentKey) return;
     if ((pending.length > 0 || edit || logoDraft || backgroundDraft) && !window.confirm("切换平台会放弃当前未保存的内容，继续？")) return;
     setSelectedProvider(key);
+    setGalleryView(initialGalleryView);
     setPending([]);
     setEdit(null);
     setLogoDraft(null);
@@ -208,6 +216,7 @@ export default function TelegramGameTipsLibrary({
       setSelectedProvider(key);
       setLogoDraft(null);
       if (key !== currentKey) {
+        setGalleryView(initialGalleryView);
         setPending([]);
         setEdit(null);
         setBackgroundDraft(null);
@@ -518,6 +527,11 @@ export default function TelegramGameTipsLibrary({
     </form>
     <div className="cms-scheduled-heading">
       <div><h3>已上传图片</h3><p>每个平台至少需要 3 款不同游戏，才可启用对应的发送计划。</p></div>
+      {assets.length > 0 && <label className="cms-scheduled-filter">搜索游戏名称
+        <input type="search" value={query} onChange={event => setGalleryView({
+          providerKey: currentKey, query: event.target.value, limit: galleryPageSize,
+        })} />
+      </label>}
     </div>
     {edit && <form className="cms-scheduled-card cms-scheduled-editor" onSubmit={saveEdit}>
       <fieldset disabled={Boolean(busy)}>
@@ -535,7 +549,11 @@ export default function TelegramGameTipsLibrary({
       </fieldset>
     </form>}
     {!assets.length && <div className="cms-scheduled-empty"><Images size={15} /><strong>{current.name} 还没有游戏图片</strong><p>上传至少 3 款不同游戏后即可启用 Game Tips 排期。</p></div>}
-    {active && assets.length > 0 && <div className="cms-game-tips-image-grid">{assets.map(asset => <article className="cms-scheduled-card cms-game-tips-image" key={asset.id}>
+    {active && assets.length > 0 && <small className="cms-scheduled-muted" aria-live="polite">
+      显示 {visibleAssets.length} / {matches.length} 张{searchKey && ` · 该平台共 ${assets.length} 张`}
+    </small>}
+    {active && assets.length > 0 && !matches.length && <div className="cms-scheduled-empty">没有找到符合名称的游戏图片。</div>}
+    {active && visibleAssets.length > 0 && <div className="cms-game-tips-image-grid">{visibleAssets.map(asset => <article className="cms-scheduled-card cms-game-tips-image" key={asset.id}>
       <img src={`${endpoint}?id=${asset.id}`} alt={`${asset.provider} · ${asset.game}`} loading="lazy" />
       <div><strong>{asset.game}</strong><small>{asset.provider}</small></div>
       <div className="cms-scheduled-heading">
@@ -546,6 +564,11 @@ export default function TelegramGameTipsLibrary({
         </div>
       </div>
     </article>)}</div>}
+    {active && visibleAssets.length < matches.length && <div className="cms-scheduled-actions">
+      <button type="button" className="cms-secondary" onClick={() => setGalleryView({
+        providerKey: currentKey, query, limit: limit + galleryPageSize,
+      })}>加载更多</button>
+    </div>}
     </>}
     {!data && busy === "read" && <p className="cms-scheduled-loading" role="status"><LoaderCircle size={15} className="cms-spin" />正在读取图库…</p>}
   </div>;

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
@@ -198,23 +198,53 @@ test("an unqueued disabled asset can still be deleted and cleanup is a no-op on 
   assert.equal(db.prepare("SELECT length(image) AS bytes FROM telegram_game_tips_assets").get().bytes, 0);
 });
 
-test("retained deleted bytes count toward the asset cap until a terminal delivery permits reclamation", async t => {
-  const db = database(t), id = randomUUID();
+test("counting actual image bytes allows more than 250 games in one platform", async t => {
+  const db = database(t), image = await png();
+  const initial = await uploadGameTipsAsset(db, uploadRequest(image));
+  const duplicateBytes = db.prepare(`INSERT INTO telegram_game_tips_assets
+    (id, provider, provider_key, game, game_key, enabled, image, upload_hash, created_at, updated_at)
+    SELECT ?, provider, provider_key, ?, ?, enabled, image, upload_hash, created_at, updated_at
+    FROM telegram_game_tips_assets WHERE id = ?`);
+  for (let i = 1; i < 250; i++) duplicateBytes.run(randomUUID(), `Test ${i}`, `test ${i}`, initial.assets[0].id);
+  const uploaded = await uploadGameTipsAsset(db, uploadRequest(image, { game: "Great Blue" }));
+  assert.equal(uploaded.assets.length, 251);
+  assert.deepEqual(uploaded.providers, [{ name: "MEGA888", count: 251 }]);
+});
+
+test("retained deleted bytes count toward library capacity until the terminal delivery permits reclamation", async t => {
+  const db = new DatabaseSync(path.join(fixture, "image-capacity.sqlite")), id = randomUUID();
+  t.after(() => db.close());
   const created = await uploadGameTipsAsset(db, uploadRequest(await png(), { id }));
+  db.prepare("UPDATE telegram_game_tips_assets SET image = zeroblob(?) WHERE id = ?").run(128 * 1024 * 1024, id);
   db.exec(`CREATE TABLE telegram_game_tip_slots(plan_id TEXT, plan_revision TEXT, run_at INTEGER, selection_json TEXT);
     CREATE TABLE telegram_scheduled_message_deliveries(plan_id TEXT, plan_revision TEXT, run_at INTEGER, status TEXT);
     INSERT INTO telegram_scheduled_message_deliveries VALUES ('a', 'b', 123, 'pending');`);
   db.prepare("INSERT INTO telegram_game_tip_slots VALUES ('a', 'b', 123, ?)")
     .run(JSON.stringify({ provider: "MEGA888", games: [{ id, game: "Dolphin Reef" }] }));
   deleteGameTipsAsset(db, created.assets[0]);
-  const insert = db.prepare(`INSERT INTO telegram_game_tips_assets(id,provider,provider_key,game,game_key,enabled,image,upload_hash,created_at,updated_at)
-    VALUES (?, 'MEGA888', 'mega888', ?, ?, 1, X'01', '', 0, 0)`);
-  for (let i = 0; i < 249; i++) insert.run(randomUUID(), `Test ${i}`, `test ${i}`);
-  await assert.rejects(uploadGameTipsAsset(db, uploadRequest(await png())), { status: 409 });
+  await assert.rejects(uploadGameTipsAsset(db, uploadRequest(await png())), { status: 507, message: /图库已达 128 MiB/ });
+  assert.equal(gameTipsLibrary(db).assets.length, 0);
   db.exec("UPDATE telegram_scheduled_message_deliveries SET status = 'sent'");
   await uploadGameTipsAsset(db, uploadRequest(await png()));
   assert.equal(db.prepare("SELECT length(image) AS bytes FROM telegram_game_tips_assets WHERE id = ?").get(id).bytes, 0);
-  assert.equal(listGameTipAssets(db).length, 250);
+  assert.equal(listGameTipAssets(db).length, 1);
+});
+
+test("SQLite running out of pages reports insufficient storage and leaves the library usable", async t => {
+  const db = database(t);
+  await uploadGameTipsAsset(db, uploadRequest(await png()));
+  const { page_count } = db.prepare("PRAGMA page_count").get();
+  db.exec(`PRAGMA max_page_count = ${page_count}`);
+  const width = 240, height = 160, channels = 3;
+  const texture = await sharp(randomBytes(width * height * channels), { raw: { width, height, channels } }).png().toBuffer();
+  await assert.rejects(uploadGameTipsAsset(db, uploadRequest(texture, { game: "Great Blue" })), {
+    status: 507, message: /服务器剩余储存空间不足/,
+  });
+  assert.equal(db.isTransaction, false);
+  assert.equal(listGameTipAssets(db).length, 1);
+  db.exec(`PRAGMA max_page_count = ${page_count + 100}`);
+  await uploadGameTipsAsset(db, uploadRequest(texture, { game: "Great Blue" }));
+  assert.equal(listGameTipAssets(db).length, 2);
 });
 
 test("logo-first providers show with no games, preserve canonical naming and expose only the current transparent WebP", async t => {

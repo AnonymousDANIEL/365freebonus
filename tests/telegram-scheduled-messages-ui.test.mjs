@@ -282,6 +282,42 @@ test('active and disabled Game Tips images expose Delete and only send a revisio
   } finally { h.close(); }
 });
 
+test('Game Tips gallery bounds rendered cards, searches across the platform and refreshes after deletion', async () => {
+  const mainAssets = Array.from({ length: 60 }, (_, index) => ({
+    id: `mega-${index}`, provider: 'MEGA888', game: `Game ${String(index + 1).padStart(3, '0')}`, enabled: true, updatedAt: 1,
+  }));
+  const otherAsset = { id: 'other-image', provider: 'PUSSY88', game: 'Game 060', enabled: true, updatedAt: 2 };
+  const initial = { assets: [...mainAssets, otherAsset], providers: [{ name: 'MEGA888', count: 60 }, { name: 'PUSSY88', count: 1 }] };
+  const h = harness(initial, { library: true, props: {
+    active: true, plans: [], today: '2026-11-15', onProvidersChanged() {}, onSchedule() {}, onEditSchedule() {},
+  } });
+  const cards = () => h.nodes().filter(node => node.type === 'article' && node.props.className.includes('cms-game-tips-image'));
+  try {
+    await h.ready();
+    assert.equal(cards().length, 48);
+    assert.match(h.text(), /显示 48 \/ 60 张/);
+    h.button('加载更多').props.onClick(); h.render();
+    assert.equal(cards().length, 60);
+    assert.match(h.text(), /显示 60 \/ 60 张/);
+
+    h.field('搜索游戏名称').props.onChange({ target: { value: '  ＧＡＭＥ　０６０ ' } }); h.render();
+    assert.deepEqual(cards().map(card => h.nodes(card).find(node => node.type === 'img').props.alt), ['MEGA888 · Game 060']);
+    assert.match(h.text(), /显示 1 \/ 1 张 · 该平台共 60 张/);
+    h.mutation(() => ({ assets: [...mainAssets.slice(0, -1), otherAsset], providers: [{ name: 'MEGA888', count: 59 }, initial.providers[1]] }));
+    h.button('删除图片 Game 060').props.onClick(); await h.ready();
+    assert.equal(cards().length, 0);
+    assert.match(h.text(), /显示 0 \/ 0 张 · 该平台共 59 张/);
+    assert.match(h.text(), /没有找到符合名称的游戏图片/);
+
+    h.button('PUSSY881 款游戏可用').props.onClick(); h.render();
+    assert.equal(h.field('搜索游戏名称').props.value, '');
+    assert.equal(cards().length, 1);
+    h.button('MEGA88859 款游戏可用').props.onClick(); h.render();
+    assert.equal(cards().length, 48);
+    assert.match(h.text(), /显示 48 \/ 59 张/);
+  } finally { h.close(); }
+});
+
 test('clock and countdown follow server time even when the browser clock differs', async () => {
   const h = harness();
   try {

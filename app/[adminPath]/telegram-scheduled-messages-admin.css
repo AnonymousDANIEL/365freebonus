@@ -97,7 +97,8 @@
 .cms-scheduled-counts dt { color: var(--cms-muted); font-size: .67rem; }
 .cms-scheduled-counts dd { margin: 0; font-size: .85rem; }
 .cms-scheduled-filter { display: flex; align-items: center; gap: .5rem; font-size: .72rem; }
-.cms-scheduled-filter select { border: 1px solid var(--cms-line); border-radius: .4rem; padding: .5rem .7rem; background: var(--cms-input); color: var(--cms-text); font-size: .73rem; }
+.cms-scheduled-filter :is(select, input) { border: 1px solid var(--cms-line); border-radius: .4rem; padding: .5rem .7rem; background: var(--cms-input); color: var(--cms-text); font-size: .73rem; }
+.cms-scheduled-filter input { min-width: 0; }
 .cms-game-tips-plan select {
   min-width: 0;
   min-height: 41px;

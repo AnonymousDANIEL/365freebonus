@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { statfsSync } from "node:fs";
+import { dirname } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import sharp, { type OverlayOptions } from "sharp";
 import { GAME_TIPS_DEFAULT_SLOTS, GAME_TIPS_NAME_LIMIT, GAME_TIPS_PROVIDER_LIMIT, GAME_TIPS_UPLOAD_LIMIT,
@@ -9,7 +11,10 @@ export { gameTipsProviderKey } from "./telegram-game-tips-types";
 
 const initialized = new WeakSet<DatabaseSync>();
 const uploadIdPattern = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
-const maxAssets = 250;
+const maxLibraryImageMiB = 128;
+const maxLibraryImageBytes = maxLibraryImageMiB * 1024 * 1024;
+const minimumFreeDiskBytes = 64 * 1024 * 1024;
+const sqliteFull = 13;
 const maxPixels = 24_000_000;
 const maxStoredBytes = 256 * 1024;
 const maxLogoBytes = 96 * 1024;
@@ -45,6 +50,8 @@ export function ensureGameTipsAssets(db: DatabaseSync) {
   ) STRICT;
   CREATE UNIQUE INDEX IF NOT EXISTS telegram_game_tips_unique_live_game
   ON telegram_game_tips_assets(provider_key, game_key) WHERE enabled = 1;
+  CREATE INDEX IF NOT EXISTS telegram_game_tips_image_bytes
+  ON telegram_game_tips_assets(length(image)) WHERE length(image) > 0;
   CREATE INDEX IF NOT EXISTS telegram_game_tips_deleted_pending_cleanup
   ON telegram_game_tips_assets(id) WHERE deleted_at <> 0 AND length(image) > 0;
   CREATE TABLE IF NOT EXISTS telegram_game_tips_logos (
@@ -207,6 +214,25 @@ function ensureDistinctGame(db: DatabaseSync, names: Names, id: string) {
   }
 }
 
+function gameTipsDiskFull() {
+  return new GameTipsError("服务器剩余储存空间不足，暂时无法上传 Game Tips 图片。", 507);
+}
+
+function ensureAssetUploadSpace(db: DatabaseSync, imageBytes: number) {
+  const { bytes } = db.prepare(`SELECT COALESCE(SUM(length(image)), 0) AS bytes
+    FROM telegram_game_tips_assets WHERE length(image) > 0`).get() as { bytes: number };
+  if (bytes + imageBytes > maxLibraryImageBytes) {
+    throw new GameTipsError(`Game Tips 图库已达 ${maxLibraryImageMiB} MiB 容量上限，请先删除不再使用的图片。`, 507);
+  }
+
+  const databasePath = db.location();
+  if (databasePath) {
+    const disk = statfsSync(dirname(databasePath), { bigint: true });
+    // Leave room for both the new SQLite pages and their write-ahead log entries.
+    if (disk.bavail * disk.bsize < BigInt(minimumFreeDiskBytes + 3 * imageBytes)) throw gameTipsDiskFull();
+  }
+}
+
 export async function uploadGameTipsAsset(db: DatabaseSync, request: Request, clock = Date.now): Promise<GameTipsLibrary> {
   ensureGameTipsAssets(db);
   const params = new URL(request.url).searchParams;
@@ -223,17 +249,20 @@ export async function uploadGameTipsAsset(db: DatabaseSync, request: Request, cl
   db.exec("BEGIN IMMEDIATE");
   try {
     if (!uploadMatches(db, id, hash)) {
-      releaseDeletedGameTipsAssets(db);
-      const { count } = db.prepare("SELECT COUNT(*) AS count FROM telegram_game_tips_assets WHERE length(image) > 0").get() as { count: number };
-      if (count >= maxAssets) throw new GameTipsError(`图库最多可保存 ${maxAssets} 张图片。`, 409);
       ensureDistinctGame(db, names, id);
+      releaseDeletedGameTipsAssets(db);
+      ensureAssetUploadSpace(db, image.length);
       const now = clock();
       db.prepare(`INSERT INTO telegram_game_tips_assets
         (id, provider, provider_key, game, game_key, enabled, image, upload_hash, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?)`).run(id, names.provider, names.providerKey, names.game, names.gameKey, image, hash, now, now);
     }
     db.exec("COMMIT");
-  } catch (error) { db.exec("ROLLBACK"); throw error; }
+  } catch (error) {
+    if (db.isTransaction) db.exec("ROLLBACK");
+    if ((error as { errcode?: number }).errcode === sqliteFull) throw gameTipsDiskFull();
+    throw error;
+  }
   return gameTipsLibrary(db);
 }
 
