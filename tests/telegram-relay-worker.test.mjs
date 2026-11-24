@@ -10,7 +10,7 @@ import ts from 'typescript';
 // no user credentials, production data or external network requests are used.
 const fixture = mkdtempSync(path.join(tmpdir(), 'telegram-photo-relay-'));
 writeFileSync(path.join(fixture, 'package.json'), '{"type":"commonjs"}');
-for (const name of ['sqlite', 'telegram-relay-content', 'telegram-caption-watch-cycle', 'telegram-caption-watch-status', 'telegram-relay']) {
+for (const name of ['sqlite', 'telegram-relay-content', 'telegram-game-tips-captions', 'telegram-caption-watch-cycle', 'telegram-caption-watch-status', 'telegram-relay']) {
   writeFileSync(path.join(fixture, `${name}.js`), ts.transpileModule(
     readFileSync(new URL(`../app/lib/${name}.ts`, import.meta.url), 'utf8'),
     { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, esModuleInterop: true } },
@@ -104,6 +104,7 @@ const media = require(path.join(fixture, 'telegram-relay-media.js'));
 const personalEdit = require(path.join(fixture, 'telegram-account.js'));
 const { getSqlite } = require(path.join(fixture, 'sqlite.js'));
 const { relayKeyboard } = require(path.join(fixture, 'telegram-relay-content.js'));
+const { gameTipsCaption } = require(path.join(fixture, 'telegram-game-tips-captions.js'));
 const previousDataDir = process.env.DATA_DIR;
 const now = 1_800_000_000_000;
 const source = -1001230001;
@@ -225,6 +226,38 @@ test('only captioned attached media enter the queue, including received third-pa
   await deliver();
   assert.equal(sends()[0].method,'sendAnimation');
   assert.equal(sends()[0].parameters.animation,'gif-9');
+});
+
+test('generated Game Tips never enter the bot or personal-account relay queue', async t => {
+  await configureAccount(t);
+  const caption = gameTipsCaption('MEGA888', 'bonus-roundup');
+  await poll(now + 5_000, [photo(1, { caption, reply_markup: undefined }), photo(2, { caption: 'Ordinary Game Tips from our own group' })]);
+  assert.equal(await relay.enqueuePersonalRelayMedia(accountPhoto({ caption })), true);
+  assert.equal(await relay.enqueuePersonalRelayMedia(accountPhoto({ caption: 'Another ordinary Game Tips photo', sourceMessageId: 2004 })), true);
+  assert.deepEqual(jobs().map(job => job.source_message_id), [1002, 2004]);
+  await deliver(now + 5_000); await deliver(now + 8_000);
+  assert.equal(sends().length, 2);
+  assert.ok(sends().every(call => call.parameters.caption.includes('ordinary') || call.parameters.caption.includes('Ordinary')));
+});
+
+test('previously queued branded copies are cancelled before send, while ordinary photos and history are preserved', async () => {
+  configure();
+  await poll(now, [photo(1), photo(2), photo(3)]);
+  await deliver(now);
+  const [alreadySent, queuedCopy, ordinary] = jobs();
+  assert.equal(alreadySent.status, 'sent');
+  getSqlite().prepare("UPDATE telegram_relay_outbox SET caption=?,media_bytes=? WHERE id=?")
+    .run(`${gameTipsCaption('MEGA888', 'featured-selection')}/`, Buffer.from('old relay body'), queuedCopy.id);
+  await deliver(now + 3_000);
+  const [history, cancelled, delivered] = jobs();
+  assert.deepEqual({ ...history }, { ...alreadySent, caption_watch_next_at: history.caption_watch_next_at });
+  assert.equal(cancelled.status, 'cancelled');
+  assert.match(cancelled.last_error, /定时任务选定的频道/);
+  assert.equal(cancelled.attempts, 0);
+  assert.equal(cancelled.media_bytes, null);
+  assert.equal(delivered.id, ordinary.id);
+  assert.equal(delivered.status, 'sent');
+  assert.deepEqual(sends().map(call => call.parameters.photo), ['photo-1','photo-3']);
 });
 
 test('updates older than activation are ignored and no prior private or group history is imported',async()=>{

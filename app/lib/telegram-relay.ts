@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { getSqlite } from "./sqlite";
 import { telegramRelayUpdates, telegramRequest } from "./telegram-bot";
-import { inspectRelayDelivery, normalizeRelayCaptionEntities, prepareRelayMessage, relayKeyboard, type RelayCaptionEntity } from "./telegram-relay-content";
+import { inspectRelayDelivery, isGeneratedGameTipsCaption, normalizeRelayCaptionEntities, prepareRelayMessage, relayKeyboard, type RelayCaptionEntity } from "./telegram-relay-content";
 import { downloadBotRelayMedia, relayMediaIdentity, relayMediaMaxBytes } from "./telegram-relay-media";
 import { relayCaptionWatchStatus, safeCaptionWatchReason, captionWatchReasonMessage } from "./telegram-caption-watch-status";
 import { captionWatchFocus, completeCaptionWatchFocus, deferCaptionWatchFocus, isCaptionWatchFocusCurrent,
@@ -66,6 +66,7 @@ const ACCOUNT_CAPTION_UNCERTAIN_ERROR = "个人账号备用补正结果未能确
 const REPAIRABLE_CAPTION_ERRORS = [CAPTION_CHANGED_ERROR, CUSTOM_EMOJI_CHANGED_ERROR, CAPTION_LINKS_CHANGED_ERROR, CAPTION_BUTTONS_CHANGED_ERROR];
 const CAPTION_EDIT_WINDOW_MS = 24 * 60 * 60 * 1000;
 const SOURCE_CAPTION_ERROR = "来源文案更新未能完整验证，已停止编辑原贴，避免改变文案、Emoji 或格式；媒体不会重复发送。";
+const GAME_TIPS_RELAY_SKIP = "网站生成的 Game Tips 仅按定时任务选定的频道发布，已取消自动转发。";
 
 function transaction<T>(db: DatabaseSync, work: () => T): T {
   db.exec("BEGIN IMMEDIATE");
@@ -1305,6 +1306,13 @@ export async function deliverTelegramRelayOnce(decryptToken: DecryptToken, clock
         AND NOT EXISTS(SELECT 1 FROM telegram_personal_account a JOIN telegram_personal_sources s
           WHERE a.id='primary' AND a.stage='connected' AND a.generation=account_generation
             AND s.chat_id=source_chat_id AND s.selected=1 AND s.joined=1 AND s.blocked=0 AND s.selected_at<=queued_at)`).run();
+    }
+    const brandedCandidates = db.prepare(`SELECT id,caption FROM telegram_relay_outbox
+      WHERE status='pending' AND revision=? AND instr(caption,'365FreeBonus X ')>0`).all(current.relay_revision) as { id: number; caption: string }[];
+    for (const candidate of brandedCandidates) {
+      if (!isGeneratedGameTipsCaption(candidate.caption)) continue;
+      db.prepare(`UPDATE telegram_relay_outbox SET status='cancelled',last_error=?,lease_id='',lease_until=0,media_bytes=NULL
+        WHERE id=? AND status='pending'`).run(GAME_TIPS_RELAY_SKIP, candidate.id);
     }
     if (runtime.ready_until <= now || runtime.target_chat_id >= 0 || runtime.send_lease_until > now || runtime.next_send_at > now) return null;
     const job = db.prepare(`SELECT * FROM telegram_relay_outbox WHERE status='pending' AND revision=? AND next_attempt_at<=?

@@ -9,14 +9,18 @@ import ts from 'typescript';
 
 const fixture = mkdtempSync(path.join(tmpdir(), 'telegram-relay-content-'));
 writeFileSync(path.join(fixture, 'package.json'), '{"type":"commonjs"}');
-for (const name of ['telegram-relay-content', 'telegram-bot']) {
+for (const name of ['telegram-relay-content', 'telegram-game-tips-captions', 'telegram-bot']) {
   writeFileSync(path.join(fixture, `${name}.js`), ts.transpileModule(
     readFileSync(new URL(`../app/lib/${name}.ts`, import.meta.url), 'utf8'),
     { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, esModuleInterop: true } },
   ).outputText);
 }
 const require = createRequire(import.meta.url);
-const { prepareRelayMessage, normalizeRelayCaptionEntities, relayCaptionEntitiesMatch, relayCaptionFormattingMatches, inspectRelayDelivery, isRelayCustomEmojiId, relayKeyboard, RELAY_WEBSITE, RELAY_DEFAULT_TARGET } = require(path.join(fixture, 'telegram-relay-content.js'));
+const { prepareRelayMessage, isGeneratedGameTipsCaption, normalizeRelayCaptionEntities, relayCaptionEntitiesMatch,
+  relayCaptionFormattingMatches, inspectRelayDelivery, isRelayCustomEmojiId, relayKeyboard, RELAY_WEBSITE, RELAY_DEFAULT_TARGET } =
+  require(path.join(fixture, 'telegram-relay-content.js'));
+const { gameTipsCaption, GAME_TIPS_CAPTION_BODIES, GAME_TIPS_CAPTION_PRESETS } =
+  require(path.join(fixture, 'telegram-game-tips-captions.js'));
 const transport = require(path.join(fixture, 'telegram-bot.js'));
 const https = require('node:https');
 const now = 1_800_000_000_123;
@@ -40,6 +44,31 @@ test('relay buttons contain exactly the three owner destinations', () => {
   ]);
   const first = relayKeyboard(); first[0][0].url = 'https://invalid.example';
   assert.equal(relayKeyboard()[0][0].url, RELAY_WEBSITE, 'callers cannot mutate future keyboards');
+});
+
+test('site-generated Game Tips from every caption preset are skipped even if Telegram strips the buttons', () => {
+  for (const preset of GAME_TIPS_CAPTION_PRESETS) for (const body of [undefined, ...GAME_TIPS_CAPTION_BODIES]) {
+    const caption = gameTipsCaption('MEGA888', preset.id, body);
+    assert.equal(isGeneratedGameTipsCaption(caption), true, preset.id);
+    assert.equal(prepare(message({ caption, reply_markup: undefined })), null);
+    assert.equal(isGeneratedGameTipsCaption(caption.replace(/\n/gu, '\r\n') + '/'), true);
+  }
+  const legacy = gameTipsCaption('MEGA888').replace('News Update Game Tips🔥', 'Game Tips🔥');
+  assert.equal(prepare(message({ caption: legacy })), null);
+});
+
+test('ordinary game-themed media and similar branding with a different destination continue to relay', () => {
+  const caption = gameTipsCaption('MEGA888');
+  for (const ordinary of [
+    'Game Tips🔥\n\nHere are some helpful game tips: https://source.example',
+    caption.replace('365FreeBonus X ', 'Someone else X '),
+    caption.replace('News Update Game Tips🔥', 'Other updates'),
+    caption.replace('🔥Free Credit Trusted Wallet🔥\n', ''),
+    caption.replace('https://365freebonus.com', 'https://365freebonus.com.example'),
+  ]) {
+    assert.equal(isGeneratedGameTipsCaption(ordinary), false);
+    assert.ok(prepare(message({ caption: ordinary })));
+  }
 });
 
 test('date-time formats preserve the empty original-text format and reject invalid options', () => {

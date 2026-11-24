@@ -4,6 +4,9 @@ export const RELAY_WEBSITE = "https://365freebonus.com/";
 export const RELAY_DEFAULT_TARGET = "@join365freebonusgroup";
 const OFFICIAL_CHANNEL = "https://t.me/join365freebonus";
 const HELP_BOT = "https://t.me/FreeBonus365ChatBot";
+const GAME_TIPS_HEADINGS = new Set(["Game Tips🔥", "News Update Game Tips🔥", "Featured Game Picks🔥", "Game Tips & Bonus Roundup🔥"]);
+const GAME_TIPS_PROVIDER_PREFIX = "365FreeBonus X ";
+const GAME_TIPS_FOOTER = "🔥Free Credit Trusted Wallet🔥\nFind Free Bonus Offers\n🌐 EXPLORE BONUS OFFERS:\nhttps://365freebonus.com";
 const linkTypes = new Set(["url", "text_link", "mention", "text_mention", "email", "phone_number"]);
 const hiddenLinkTypes = new Set(["text_link", "text_mention"]);
 
@@ -380,6 +383,17 @@ function ownOrigin(message: Record<string, unknown>, botId: number, targetChatId
     || record(origin?.chat)?.id === targetChatId || record(origin?.sender_chat)?.id === targetChatId;
 }
 
+/** Identify this site's scheduled posters even when Telegram omits the original buttons. */
+export function isGeneratedGameTipsCaption(caption: string): boolean {
+  const sections = caption.trim().replace(/\r\n/gu, "\n").split(/\n(?:[ \t]*\n)+/u);
+  if (sections.length < 4 || !GAME_TIPS_HEADINGS.has(sections[0]) || !sections[1].startsWith(GAME_TIPS_PROVIDER_PREFIX)) return false;
+  const provider = sections[1].slice(GAME_TIPS_PROVIDER_PREFIX.length).trim();
+  if (!provider || Array.from(provider).length > 48 || /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(provider)) return false;
+  // Previously queued relay copies have the same footer URL with a trailing slash.
+  const footer = sections.at(-1);
+  return footer === GAME_TIPS_FOOTER || footer === `${GAME_TIPS_FOOTER}/`;
+}
+
 export function prepareRelayMessage(
   message: Record<string, unknown>,
   context: { botId: number; targetChatId: number; startedAt: number },
@@ -392,7 +406,8 @@ export function prepareRelayMessage(
     || message.date * 1000 < Math.floor(context.startedAt / 1000) * 1000) return null;
   if (message.has_protected_content === true || chat.has_protected_content === true || message.paid_media != null
     || ownOrigin(message, context.botId, context.targetChatId) || ownKeyboard(message.reply_markup)) return null;
-  if (typeof message.caption !== "string" || !message.caption.trim() || message.caption.length > 16_384) return null;
+  if (typeof message.caption !== "string" || !message.caption.trim() || message.caption.length > 16_384
+    || isGeneratedGameTipsCaption(message.caption)) return null;
   let mediaKind: RelayMessage["mediaKind"];
   let media: Record<string, unknown> | undefined;
   if (Array.isArray(message.photo)) {

@@ -6,6 +6,7 @@ import { readScheduledMessageMedia, sendScheduledMessageMedia } from "./telegram
 import { ensureGameTipsAssets, gameTipsProviderBackgroundId, gameTipsProviderKey, gameTipsProviderLogo, gameTipsProviders, listGameTipAssets, releaseDeletedGameTipsAssets, renderGameTips } from "./telegram-game-tips";
 import { DEFAULT_GAME_TIPS_CAPTION_PRESET_ID, GAME_TIPS_CAPTION_BODIES, gameTipsCaption, isGameTipsCaptionPresetId } from "./telegram-game-tips-captions";
 import { GAME_TIPS_PROVIDER_LIMIT, type GameTipsProvider, type GameTipsSelection } from "./telegram-game-tips-types";
+import { isGeneratedGameTipsCaption, RELAY_DEFAULT_TARGET } from "./telegram-relay-content";
 import type { ScheduledMessageStatus, ScheduledMessagePlan, ScheduledMessagePlanInput, ScheduledMessageTargetInput, ScheduledMessageTargetKey } from "./telegram-scheduled-messages-types";
 
 type Decrypt = (ciphertext: string) => string;
@@ -161,6 +162,38 @@ export function scheduledMessageStatus(db: DatabaseSync, clock = Date.now): Sche
         ready: current && row?.ready === 1, lastError: row?.last_error || (stored && !current ? CHANGED_ERROR : !stored ? TOKEN_ERROR : !row ? TARGET_ERROR : "") };
     }),
     scheduler: { workerHealthy: state.heartbeat_at > 0 && now - state.heartbeat_at < 30_000, heartbeatAt: state.heartbeat_at || null, lastTickAt: state.last_tick_at || null, lastCompletedAt: state.last_completed_at || null, nextRunAt: next.length ? Math.min(...next) : null, lastError: state.last_error || (hasBlockedPlan(db) ? CHANGED_ERROR : gameTipsIssue || "") } };
+}
+
+/** Read-only routing evidence for the site's public group. Keep user content and private chat IDs out of logs. */
+export async function inspectGameTipsGroupRoutes(db: DatabaseSync, decrypt: Decrypt, now = Date.now()) {
+  const stored = cipher(db);
+  if (!stored) return null;
+  const group = await telegramRequest(decrypt(stored), "getChat", { chat_id: RELAY_DEFAULT_TARGET }).catch(() => null);
+  if (!group?.ok || !validChat(group.result.id) || !["group", "supergroup"].includes(String(group.result.type))
+    || String(group.result.username).toLowerCase() !== RELAY_DEFAULT_TARGET.slice(1)) return { group: "unverified" as const };
+
+  const groupId = group.result.id, linkedId = validChat(group.result.linked_chat_id) ? group.result.linked_chat_id : 0;
+  const since = now - DAY;
+  const history = db.prepare(`SELECT COUNT(*) AS sent, MAX(sent_at) AS latestAt FROM telegram_scheduled_message_deliveries
+    WHERE game_tips_provider<>'' AND target_chat_id=? AND status='sent' AND sent_at>=?`);
+  const direct = history.get(groupId, since) as { sent: number; latestAt: number | null };
+  const throughLinkedChannel = linkedId ? history.get(linkedId, since) as typeof direct : null;
+  const channelIds = new Map(targets(db).map(target => [target.target_key, target.chat_id]));
+  const plans = db.prepare(`SELECT target_keys_json FROM telegram_scheduled_message_plans
+    WHERE game_tips_provider<>'' AND enabled=1 AND deleted_at=0 AND next_run_at>0`).all() as Pick<Plan, "target_keys_json">[];
+  const destinations = plans.map(plan => parseTargetKeys(plan.target_keys_json).map(key => channelIds.get(key)));
+  const activePlansSelectingGroup = destinations.filter(ids => ids.includes(groupId)).length;
+  const newPostsToLinkedWithoutGroup = linkedId ? destinations.filter(ids => ids.includes(linkedId) && !ids.includes(groupId)).length : 0;
+
+  // The relay's target identity is pinned for the lifetime of a settings revision.
+  const relayCopies = db.prepare(`SELECT o.caption, o.sent_at AS sentAt FROM telegram_relay_outbox o
+    JOIN telegram_relay_state r ON r.id='primary' AND r.revision=o.revision
+    WHERE r.target_chat_id=? AND o.status='sent' AND o.sent_at>=?
+      AND o.media_kind='photo' AND instr(o.caption, '365FreeBonus X ')>0
+    ORDER BY o.sent_at DESC LIMIT 100`).all(groupId, since) as { caption: string; sentAt: number }[];
+  const gameTipsCopies = relayCopies.filter(row => isGeneratedGameTipsCaption(row.caption));
+  return { group: "verified" as const, since, direct, throughLinkedChannel, activePlansSelectingGroup, newPostsToLinkedWithoutGroup,
+    relay: { sampledCopies: gameTipsCopies.length, latestAt: gameTipsCopies[0]?.sentAt ?? null } };
 }
 
 /** Permission checks only; this method never publishes a message. */
@@ -712,8 +745,11 @@ export function startTelegramScheduledMessageWorker(decrypt: Decrypt) {
     try {
       await deliverScheduledMessagesOnce(decrypt, Date.now, owner); reported = false;
       if (Date.now() - lastReport >= 60_000) {
-        const status = scheduledMessageStatus(getSqlite());
+        const db = getSqlite(), status = scheduledMessageStatus(db);
         console.info("Telegram scheduled text worker status.", JSON.stringify({ planCount: status.plans.length, enabledPlanCount: status.plans.filter(p => p.enabled).length, targetReadyCount: status.targets.filter(t => t.ready).length, workerHealthy: status.scheduler.workerHealthy, nextRunAt: status.scheduler.nextRunAt, pending: status.counts.pending, sending: status.counts.sending, failed: status.counts.failed, unknown: status.counts.unknown }));
+        if (!lastReport) void inspectGameTipsGroupRoutes(db, decrypt).then(audit => {
+          if (audit) console.info("Game Tips Group routing audit.", JSON.stringify(audit));
+        }).catch(() => console.info("Game Tips Group routing audit unavailable."));
         lastReport = Date.now();
       }
     } catch { if (!reported) console.error("Telegram scheduled text worker could not process its queue."); reported = true; }

@@ -14,7 +14,7 @@ import ts from 'typescript';
 const fixture = mkdtempSync(path.join(tmpdir(), 'telegram-scheduled-text-'));
 writeFileSync(path.join(fixture, 'package.json'), '{"type":"commonjs"}');
 symlinkSync(fileURLToPath(new URL('../node_modules', import.meta.url)), path.join(fixture, 'node_modules'), 'dir');
-for (const name of ['sqlite', 'telegram-game-tips', 'telegram-game-tips-types', 'telegram-game-tips-captions', 'telegram-scheduled-messages-types', 'telegram-scheduled-messages']) writeFileSync(path.join(fixture, name + '.js'), ts.transpileModule(
+for (const name of ['sqlite', 'telegram-game-tips', 'telegram-game-tips-types', 'telegram-game-tips-captions', 'telegram-relay-content', 'telegram-scheduled-messages-types', 'telegram-scheduled-messages']) writeFileSync(path.join(fixture, name + '.js'), ts.transpileModule(
   readFileSync(new URL('../app/lib/' + name + '.ts', import.meta.url), 'utf8'),
   { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, esModuleInterop: true } },
 ).outputText);
@@ -686,6 +686,34 @@ test('transient tick database failure releases lease and healthy tick clears sta
  t.mock.method(database,'prepare',sql=>{if(!failed&&sql.startsWith('SELECT 1 FROM telegram_scheduled_message_plans')){failed=true;throw new Error('temporary database contention');}return prepare(sql);});
  await assert.rejects(tick()); assert.match(status().scheduler.lastError,/自动重试/); assert.equal(db().prepare("SELECT lease_until FROM telegram_scheduled_message_runtime").get().lease_until,0);
  now+=5000; await tick(); assert.equal(status().scheduler.lastError,''); assert.equal(status().scheduler.workerHealthy,true);
+});
+
+test('Game Tips routing audit distinguishes direct group deliveries, linked-channel posts and relay copies', async () => {
+ for (const game of ['Dolphin Reef', 'Iceland', 'Great Blue']) await addGame(game);
+ await create(gamePlan({targetKeys:['official']}));
+ now=onlyPlan().nextRunAt;
+ await tick();
+ assert.equal(sendsMedia().length,1);
+ assert.equal(sendsMedia()[0].p.chat_id,telegram.ids.official);
+ const sentAt=now, caption=sendsMedia()[0].p.caption;
+ now+=3000;
+ db().prepare("UPDATE telegram_relay_state SET target_chat_id=?,revision='current' WHERE id='primary'").run(telegram.ids.group);
+ const relay=db().prepare(`INSERT INTO telegram_relay_outbox
+  (source_chat_id,source_message_id,fingerprint,queued_at,revision,media_kind,file_id,file_unique_id,caption,status,sent_at)
+  VALUES (?,?,?,?,?,'photo','','',?,'sent',?)`);
+ relay.run(telegram.ids.official,123,'a',now,'current',caption,now);
+ relay.run(telegram.ids.official,124,'b',now,'old',caption,now);
+ relay.run(telegram.ids.official,125,'c',now,'current','Ordinary photo from 365FreeBonus X another brand',now);
+ telegram.onRequest=(method,p)=>method==='getChat' && p.chat_id==='@join365freebonusgroup'
+  ? {ok:true,result:{id:telegram.ids.group,type:'supergroup',username:'join365freebonusgroup',linked_chat_id:telegram.ids.official}} : undefined;
+ telegram.calls.length=0;
+ const report=await scheduler.inspectGameTipsGroupRoutes(db(),decrypt,now);
+ assert.deepEqual(JSON.parse(JSON.stringify(report)),{
+  group:'verified',since:now-DAY,direct:{sent:0,latestAt:null},
+  throughLinkedChannel:{sent:1,latestAt:sentAt},activePlansSelectingGroup:0,newPostsToLinkedWithoutGroup:1,
+  relay:{sampledCopies:1,latestAt:now},
+ });
+ assert.deepEqual(telegram.calls.map(call=>call.method),['getChat']);
 });
 
 test('startup worker polls on the server and recovers its running flag after failure', async t => {
