@@ -15,9 +15,9 @@ export type GameTipsAsset = {
   updatedAt: number;
 };
 
-export type GameTipsProvider = { name: string; count: number };
+export type GameTipsProvider = { name: string; count: number; logoId?: string };
 export type GameTipsLibrary = { assets: GameTipsAsset[]; providers: GameTipsProvider[] };
-export type GameTipsSelection = { provider: string; games: Array<{ id: string; game: string }> };
+export type GameTipsSelection = { provider: string; logoId?: string; games: Array<{ id: string; game: string }> };
 
 export function gameTipsCaption(selection: { provider: string; games: Array<{ game: string }> }): string {
   return [

@@ -121,7 +121,87 @@
   overflow-wrap: anywhere;
   max-width: none;
 }
-.cms-game-tips-pills { display: flex; flex-wrap: wrap; gap: .45rem; }
+.cms-game-tips-platforms {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 13rem), 1fr));
+  gap: .65rem;
+}
+.cms-game-tips-platform-button {
+  display: flex;
+  align-items: center;
+  gap: .65rem;
+  min-width: 0;
+  padding: .6rem;
+  border: 1px solid var(--cms-line);
+  border-radius: .55rem;
+  background: var(--cms-input);
+  color: var(--cms-text);
+  text-align: left;
+  cursor: pointer;
+}
+.cms-game-tips-platform-button[aria-pressed=true] {
+  border-color: var(--cms-green);
+  background: var(--cms-accent-bg);
+}
+.cms-game-tips-platform-button:disabled { cursor: default; }
+.cms-game-tips-platform-button strong,
+.cms-game-tips-platform-button small,
+.cms-game-tips-platform-schedule li strong,
+.cms-game-tips-platform-schedule li small {
+  display: block;
+  overflow-wrap: anywhere;
+}
+.cms-game-tips-platform-button strong, .cms-game-tips-platform-schedule li strong { font-size: .77rem; }
+.cms-game-tips-platform-button small, .cms-game-tips-platform-schedule li small {
+  margin-top: .25rem;
+  color: var(--cms-muted);
+  font-size: .68rem;
+}
+.cms-game-tips-platform-logo {
+  display: grid;
+  place-items: center;
+  width: 50px;
+  height: 50px;
+  flex-shrink: 0;
+  overflow: hidden;
+  border: 1px solid var(--cms-line);
+  border-radius: .5rem;
+  background: var(--cms-inset);
+  color: var(--cms-muted);
+}
+.cms-game-tips-platform-logo img,
+.cms-game-tips-logo-preview img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.cms-game-tips-platform-detail .cms-game-tips-platform-heading {
+  display: flex;
+  align-items: center;
+  gap: .75rem;
+}
+.cms-game-tips-platform-detail .cms-game-tips-platform-logo { width: 64px; height: 64px; }
+.cms-game-tips-logo-preview {
+  width: min(100%, 160px);
+  height: 96px;
+  padding: .35rem;
+  border: 1px solid var(--cms-line);
+  border-radius: .45rem;
+  background: var(--cms-input);
+}
+.cms-game-tips-platform-schedule h3 { display: flex; align-items: center; gap: .45rem; }
+.cms-game-tips-platform-schedule ul { display: grid; gap: .5rem; margin: 0; padding: 0; list-style: none; }
+.cms-game-tips-platform-schedule li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: .55rem;
+  min-width: 0;
+  padding: .55rem;
+  border: 1px solid var(--cms-line);
+  border-radius: .4rem;
+}
 .cms-scheduled-messages .cms-scheduled-editor :is(.cms-telegram-switch, .cms-scheduled-target-choice) input[type="checkbox"] {
   width: 17px;
   height: 17px;

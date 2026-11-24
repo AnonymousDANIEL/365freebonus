@@ -3,7 +3,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { getSqlite } from "./sqlite";
 import { telegramRequest } from "./telegram-bot";
 import { readScheduledMessageMedia, sendScheduledMessageMedia } from "./telegram-scheduled-media";
-import { ensureGameTipsAssets, gameTipsCaption, gameTipsProviderKey, gameTipsProviders, listGameTipAssets, renderGameTips } from "./telegram-game-tips";
+import { ensureGameTipsAssets, gameTipsCaption, gameTipsProviderKey, gameTipsProviderLogo, gameTipsProviders, listGameTipAssets, renderGameTips } from "./telegram-game-tips";
 import { GAME_TIPS_PROVIDER_LIMIT, type GameTipsProvider, type GameTipsSelection } from "./telegram-game-tips-types";
 import type { ScheduledMessageStatus, ScheduledMessagePlan, ScheduledMessagePlanInput, ScheduledMessageTargetInput, ScheduledMessageTargetKey } from "./telegram-scheduled-messages-types";
 
@@ -344,6 +344,7 @@ function parseGameTipsSelection(value: string): GameTipsSelection | null {
   try {
     const selection = JSON.parse(value) as GameTipsSelection;
     if (typeof selection.provider !== "string" || !selection.provider || !Array.isArray(selection.games) || selection.games.length !== 3
+      || selection.logoId !== undefined && (typeof selection.logoId !== "string" || !UUID.test(selection.logoId))
       || selection.games.some(game => !game || typeof game.id !== "string" || !UUID.test(game.id) || typeof game.game !== "string" || !game.game)) return null;
     return selection;
   } catch { return null; }
@@ -380,7 +381,12 @@ function pickGameTips(db: DatabaseSync, row: Plan, at: number): GameTipsSelectio
     const left = gameTipsProviderKey(a.game), right = gameTipsProviderKey(b.game);
     return compare(left, right, usedToday) || compare(left, right, usedYesterday);
   });
-  const selection: GameTipsSelection = { provider: candidates[0].provider, games: candidates.slice(0, 3).map(({ id, game }) => ({ id, game })) };
+  const logo = gameTipsProviderLogo(db, row.game_tips_provider);
+  const selection: GameTipsSelection = {
+    provider: logo?.name ?? candidates[0].provider,
+    ...(logo ? { logoId: logo.logoId } : {}),
+    games: candidates.slice(0, 3).map(({ id, game }) => ({ id, game })),
+  };
   db.prepare("INSERT INTO telegram_game_tip_slots(plan_id,plan_revision,run_at,provider_key,selection_json) VALUES(?,?,?,?,?)")
     .run(row.id, row.revision, at, key, JSON.stringify(selection));
   return selection;

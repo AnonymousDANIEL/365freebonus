@@ -6,7 +6,9 @@ import ts from 'typescript';
 import * as gameTipsTypes from '../app/lib/telegram-game-tips-types.ts';
 
 const source = readFileSync(new URL('../app/[adminPath]/TelegramScheduledMessages.tsx', import.meta.url), 'utf8');
-const code = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText;
+const librarySource = readFileSync(new URL('../app/[adminPath]/TelegramGameTipsLibrary.tsx', import.meta.url), 'utf8');
+const compile = (value) => ts.transpileModule(value, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText;
+const code = compile(source), libraryCode = compile(librarySource);
 const flush = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(); };
 const serverTime = Date.parse('2026-11-15T04:00:00Z');
 function snapshot(overrides = {}) {
@@ -19,7 +21,7 @@ const plan = (overrides = {}) => ({ id: 'plan-one', revision: 'revision-one', na
 // Run the actual component with isolated React hooks and JSX nodes. Requests,
 // document visibility and clocks are controlled; no browser login or Telegram
 // network access is involved. Tests exercise user events and async races.
-function harness(initial = snapshot()) {
+function harness(initial = snapshot(), { library, props = {}, confirm = () => true } = {}) {
   const hooks = [], effects = [], intervals = new Map(), listeners = new Map(), calls = [];
   let index = 0, tree, time = serverTime + 7200000, serial = 0, getValue = initial, nextGet, nextMutation, upload;
   const jsx = (type, props) => ({ type, props: props || {} });
@@ -38,11 +40,11 @@ function harness(initial = snapshot()) {
     return getValue;
   };
   class FakeDate extends Date { constructor(...args) { super(...(args.length ? args : [time])); } static now() { return time; } }
-  vm.runInNewContext(code, { module: moduleObject, exports: moduleObject.exports, require(name) { if (name === 'react') return react; if (name === 'react/jsx-runtime') return { jsx, jsxs: jsx }; if (name === 'lucide-react') return new Proxy({}, { get: (_, key) => String(key) }); if (name === './TelegramGameTipsLibrary') return { default: 'GameTipsLibrary' }; if (name === '../lib/telegram-game-tips-types') return gameTipsTypes; if (name.endsWith('.css')) return {}; throw Error(`Unexpected import ${name}`); },
-    Date: FakeDate, Error, Intl, crypto: { randomUUID: () => '1a111111-1111-4111-8111-111111111111' }, document, window: { confirm: () => true },
+  vm.runInNewContext(library ? libraryCode : code, { module: moduleObject, exports: moduleObject.exports, require(name) { if (name === 'react') return react; if (name === 'react/jsx-runtime') return { jsx, jsxs: jsx }; if (name === 'lucide-react') return new Proxy({}, { get: (_, key) => String(key) }); if (name === './TelegramGameTipsLibrary') return { default: 'GameTipsLibrary' }; if (name === '../lib/telegram-game-tips-types') return gameTipsTypes; if (name.endsWith('.css')) return {}; throw Error(`Unexpected import ${name}`); },
+    Date: FakeDate, Error, Intl, URLSearchParams, crypto: { randomUUID: () => '1a111111-1111-4111-8111-111111111111' }, document, window: { confirm },
     setInterval(fn, ms) { const id = ++serial; intervals.set(id, { fn, ms }); return id; }, clearInterval(id) { intervals.delete(id); },
   });
-  function render() { index = 0; tree = moduleObject.exports.default({ request, signInPath: '/sign-in' }); for (const effect of effects.splice(0)) effect(); return tree; }
+  function render() { index = 0; tree = moduleObject.exports.default({ request, signInPath: '/sign-in', ...props }); for (const effect of effects.splice(0)) effect(); return tree; }
   function nodes(node, found = []) { if (arguments.length === 0) node = tree; if (!node || typeof node !== 'object') return found; if (Array.isArray(node)) { node.forEach(item => nodes(item, found)); return found; } found.push(node); nodes(node.props?.children, found); return found; }
   function text(node) { if (node == null || typeof node === 'boolean') return ''; if (typeof node !== 'object') return String(node); if (Array.isArray(node)) return node.map(text).join(''); return text(node.props?.children); }
   function button(label) { const node = nodes().find(n => n.type === 'button' && (text(n) === label || n.props['aria-label'] === label)); assert.ok(node, `button ${label}`); return node; }
@@ -120,6 +122,75 @@ test('Game Tips creates a disabled Malaysia daily plan with selected channels an
     assert.equal(call.body.mediaId, null);
     assert.deepEqual(Array.from(call.body.times), ['09:30', '20:00']);
     assert.deepEqual(Array.from(call.body.targetKeys), ['official']);
+  } finally { h.close(); }
+});
+
+test('a platform opens its own Game Tips draft even when another platform is also ready', async () => {
+  const h = harness(snapshot({ gameTipsProviders: [{ name: 'MEGA888', count: 4 }, { name: '918KISS', count: 3 }] }));
+  try {
+    await h.ready();
+    h.nodes().find(node => node.type === 'GameTipsLibrary').props.onSchedule('918KISS');
+    h.render();
+    assert.equal(h.field('游戏平台', 'select').props.value, '918KISS');
+    assert.equal(h.field('后台名称').props.value, 'Game Tips · 918KISS');
+  } finally { h.close(); }
+});
+
+test('platform cards show only their own games and schedule and keep pending files on a cancelled switch', async () => {
+  const scheduled = [plan({ name: 'Morning', gameTipsProvider: 'MEGA888' }), plan({ name: 'Evening', gameTipsProvider: 'PUSSY88' })];
+  const calls = [];
+  const asset = { id: 'image-one', provider: ' mega888 ', game: 'Dolphin Reef', enabled: true, updatedAt: 9 };
+  const h = harness({ assets: [asset],
+    providers: [{ name: 'MEGA888', count: 1, logoId: 'logo-one' }, { name: 'PUSSY88', count: 0, logoId: 'logo-two' }],
+  }, { library: true, confirm: () => false, props: { active: true, plans: scheduled, today: '2026-11-15',
+    onProvidersChanged() {}, onSchedule: provider => calls.push(provider), onEditSchedule: item => calls.push(item.name) } });
+  try {
+    await h.ready();
+    assert.ok(h.nodes().some(node => node.type === 'img' && node.props.src === '/api/admin/telegram/game-tips/logo?id=logo-one'));
+    assert.match(h.text(), /Dolphin Reef/); assert.match(h.text(), /Morning/); assert.doesNotMatch(h.text(), /Evening/);
+    h.button('编辑排期 Morning').props.onClick();
+    h.button('添加此平台排期').props.onClick();
+    const newImage = { name: 'Ice Land.png', type: 'image/png', size: 512 };
+    const fileField = h.nodes().find(node => node.props['aria-label'] === '选择 Game Tips 图片');
+    fileField.props.onChange({ target: { files: [newImage] } }); h.render();
+    h.button('PUSSY880 款游戏可用').props.onClick(); h.render();
+    assert.equal(h.field('游戏名称').props.value, 'Ice Land');
+    assert.match(h.text(), /Dolphin Reef/); assert.doesNotMatch(h.text(), /Evening/);
+    h.button('移除待上传图片 Ice Land.png').props.onClick(); h.render();
+    h.button('PUSSY880 款游戏可用').props.onClick(); h.render();
+    assert.match(h.text(), /Evening/); assert.doesNotMatch(h.text(), /Dolphin Reef|Morning/);
+    h.button('添加此平台排期').props.onClick();
+    assert.deepEqual(calls, ['Morning', 'MEGA888', 'PUSSY88']);
+  } finally { h.close(); }
+});
+
+test('creating a platform posts one logo and replacing it submits the displayed logo revision', async () => {
+  const h = harness({ assets: [], providers: [] }, { library: true, props: { active: true, plans: [], today: '2026-11-15',
+    onProvidersChanged() {}, onSchedule() {}, onEditSchedule() {},
+  } });
+  const file = { name: '918kiss.png', type: 'image/png', size: 512 };
+  const current = { assets: [], providers: [{ name: '918KISS', count: 0, logoId: 'logo-old' }] };
+  try {
+    await h.ready();
+    h.button('新增平台').props.onClick(); h.render();
+    h.field('平台名称').props.onChange({ target: { value: '918KISS' } }); h.render();
+    const selectLogo = () => h.nodes().find(node => node.props['aria-label'] === '选择平台 Logo');
+    assert.equal(selectLogo().props.multiple, undefined);
+    selectLogo().props.onChange({ target: { files: [file] } }); h.render();
+    h.mutation(() => current);
+    await h.form().props.onSubmit({ preventDefault() {} }); h.render();
+    const create = h.calls.find(call => call.method === 'POST');
+    assert.equal(create.body, file);
+    assert.match(create.path, /^\/api\/admin\/telegram\/game-tips\/logo\?id=.+&provider=918KISS$/);
+    assert.match(h.text(), /918KISS 还没有游戏图片/);
+    h.button('更换平台 Logo').props.onClick(); h.render();
+    assert.equal(h.field('平台名称').props.readOnly, true);
+    selectLogo().props.onChange({ target: { files: [file] } }); h.render();
+    h.mutation(() => ({ ...current, providers: [{ ...current.providers[0], logoId: 'logo-new' }] }));
+    await h.form().props.onSubmit({ preventDefault() {} }); h.render();
+    const replace = h.calls.filter(call => call.method === 'POST').at(-1);
+    assert.match(replace.path, /previousId=logo-old$/);
+    assert.ok(h.nodes().some(node => node.type === 'img' && node.props.src === '/api/admin/telegram/game-tips/logo?id=logo-new'));
   } finally { h.close(); }
 });
 

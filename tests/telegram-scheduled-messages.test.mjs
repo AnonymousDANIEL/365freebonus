@@ -76,6 +76,13 @@ async function addGame(game, provider = 'MEGA888') {
  const response = await gameTips.uploadGameTipsAsset(db(), new Request(url, {method:'POST',headers:{'content-type':'image/png'},body:bytes}), clock);
  return response.assets.find(asset => asset.id === id);
 }
+async function uploadLogo(provider, background, previousId = '') {
+ const id = randomUUID();
+ const bytes = await sharp({create:{width:200,height:100,channels:4,background}}).png().toBuffer();
+ const url = 'https://example.com/logo?' + new URLSearchParams({id,provider,previousId});
+ await gameTips.uploadGameTipsLogo(db(), new Request(url, {method:'POST',headers:{'content-type':'image/png'},body:bytes}));
+ return id;
+}
 const gamePlan = (extra = {}) => ({name:'Game Tips',text:'',gameTipsProvider:'MEGA888',targetKeys:['official'],...extra});
 const gameSlot = at => JSON.parse(db().prepare('SELECT selection_json FROM telegram_game_tip_slots WHERE run_at=?').get(at).selection_json);
 
@@ -144,17 +151,42 @@ test('Game Tips reports a depleted pool and skips the old day at MYT rollover', 
  assert.equal(sendsMedia().length,1); assert.equal(jobs().at(-1).status,'sent');
 });
 
+test('Game Tips platforms keep separate times and select their own canonical logo name and games', async () => {
+ const megaLogo = await uploadLogo('MEGA888', '#e12047');
+ const kissLogo = await uploadLogo('918KISS', '#34e658');
+ for (const name of ['Dolphin Reef','Iceland','Great Blue']) await addGame(name, 'Mega888');
+ for (const name of ['Great Stars','Dragon Maiden','Razor Shark']) await addGame(name, '918kiss');
+ await create(gamePlan({name:'First platform',gameTipsProvider:'mega888',times:['09:00']}));
+ await create(gamePlan({name:'Second platform',gameTipsProvider:'918KISS',times:['09:02']}));
+ now = start + MINUTE; await tick();
+ assert.equal(sendsMedia().length,1);
+ assert.equal(gameSlot(now).logoId,megaLogo);
+ assert.equal(gameSlot(now).provider,'MEGA888');
+ assert.ok(sendsMedia()[0].p.caption.includes('365FreeBonus X MEGA888\n\n'));
+ assert.ok(sendsMedia()[0].p.caption.includes('Dolphin Reef'));
+ assert.ok(!sendsMedia()[0].p.caption.includes('Great Stars'));
+ now += 2 * MINUTE; await tick();
+ assert.equal(sendsMedia().length,2);
+ assert.equal(gameSlot(now).logoId,kissLogo);
+ assert.ok(sendsMedia()[1].p.caption.includes('365FreeBonus X 918KISS\n\n'));
+ assert.ok(sendsMedia()[1].p.caption.includes('Great Stars'));
+ assert.ok(!sendsMedia()[1].p.caption.includes('Dolphin Reef'));
+});
+
 test('Game Tips reuses the same photo and caption for a definitive 429 retry and does not repeat an ambiguous send', async () => {
+ const logo = await uploadLogo('MEGA888', '#e12047');
  for (const name of ['Dolphin Reef','Iceland','Great Blue']) await addGame(name);
- await create(gamePlan({targetKeys:['official','group']}));
+ await create(gamePlan({targetKeys:['official','group'],times:['09:00','09:05']}));
  telegram.results[telegram.ids.group]=[null];
  telegram.results[telegram.ids.official]=[{ok:false,code:429,retryAfter:30}];
  const first=onlyPlan().nextRunAt;
  now=first; await tick();
  const firstAttempt=sendsMedia().find(call=>call.p.chat_id===telegram.ids.official);
+ assert.equal(gameSlot(first).logoId,logo);
  const id=gameSlot(first).games[0].id;
  const asset=gameTips.listGameTipAssets(db()).find(entry=>entry.id===id);
  gameTips.updateGameTipsAsset(db(), {...asset,game:'Renamed Game'}, clock);
+ const newLogo = await uploadLogo('MEGA888', '#42c754', logo);
  now+=30_000; await tick();
  const official=sendsMedia().filter(call=>call.p.chat_id===telegram.ids.official);
  assert.equal(official.length,2);
@@ -163,6 +195,9 @@ test('Game Tips reuses the same photo and caption for a definitive 429 retry and
  assert.equal(sendsMedia().filter(call=>call.p.chat_id===telegram.ids.group).length,1);
  assert.equal(jobs().find(job=>job.target_key==='group').status,'unknown');
  assert.equal(jobs().find(job=>job.target_key==='official').status,'sent');
+ now = onlyPlan().nextRunAt; await tick();
+ assert.equal(gameSlot(now).logoId,newLogo);
+ assert.ok(sendsMedia().slice(-2).every(call=>call.p.caption.includes('Renamed Game')));
 });
 
 test('Game Tips records a broken local image as a failed render without calling Telegram', async () => {

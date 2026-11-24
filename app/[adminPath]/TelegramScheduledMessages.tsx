@@ -173,11 +173,12 @@ export default function TelegramScheduledMessages({ request, signInPath }: Props
     setDraft(plan ? draftOf(plan, today, defaultTargetKeys) : freshDraft(today, defaultTargetKeys));
     setTab("plans"); setNotice(null);
   }
-  function openGameTips() {
+  function openGameTips(provider?: string) {
     if (draft && !window.confirm("放弃当前未保存的草稿？")) return;
+    const chosen = provider || (readyProviders.length === 1 ? readyProviders[0].name : "");
     setDraft({
-      ...freshDraft(today, []), name: "Game Tips", repeatDaily: true,
-      gameTipsProvider: readyProviders.length === 1 ? readyProviders[0].name : "",
+      ...freshDraft(today, []), name: provider ? `Game Tips · ${provider}` : "Game Tips", repeatDaily: true,
+      gameTipsProvider: chosen,
     });
     setTab("plans"); setNotice(null);
   }
@@ -301,7 +302,7 @@ export default function TelegramScheduledMessages({ request, signInPath }: Props
             <div className="cms-scheduled-actions">
               {pastCount > 0 && <button type="button" className="cms-secondary" aria-pressed={showPast} onClick={() => setShowPast(value => !value)}><History size={14} />{showPast ? "隐藏过往日期" : "显示过往日期"}</button>}
               <button type="button" className="cms-primary" disabled={Boolean(busy)} onClick={() => open()}><Plus size={15} />添加文案</button>
-              <button type="button" className="cms-secondary" disabled={Boolean(busy)} onClick={openGameTips}><Gamepad2 size={15} />添加 Game Tips</button>
+              <button type="button" className="cms-secondary" disabled={Boolean(busy)} onClick={() => openGameTips()}><Gamepad2 size={15} />添加 Game Tips</button>
             </div>
           </div>
           {draft && <form ref={editor} className="cms-scheduled-card cms-scheduled-editor" onSubmit={save}>
@@ -403,7 +404,7 @@ export default function TelegramScheduledMessages({ request, signInPath }: Props
         </div>
         <div id="scheduled-panel-library" role="tabpanel" aria-labelledby="scheduled-tab-library" hidden={tab !== "library"} className="cms-scheduled-panel">
           <TelegramGameTipsLibrary request={request} signInPath={signInPath} active={tab === "library"}
-            onProvidersChanged={updateGameTipsProviders} onSchedule={openGameTips} />
+            plans={plans} today={today} onProvidersChanged={updateGameTipsProviders} onSchedule={openGameTips} onEditSchedule={open} />
         </div>
         <div id="scheduled-panel-channels" role="tabpanel" aria-labelledby="scheduled-tab-channels" hidden={tab !== "channels"} className="cms-scheduled-panel">
           <div className="cms-scheduled-heading">

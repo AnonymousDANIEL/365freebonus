@@ -11,6 +11,9 @@ const uploadIdPattern = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}
 const maxAssets = 250;
 const maxPixels = 24_000_000;
 const maxStoredBytes = 256 * 1024;
+const maxLogoBytes = 96 * 1024;
+const maxProviderLogos = 100;
+const maxLogoRevisions = 200;
 const allowedFormats: Record<string, string> = { jpeg: "image/jpeg", png: "image/png", webp: "image/webp" };
 const assetFields = "id, provider, game, enabled, created_at AS createdAt, updated_at AS updatedAt";
 type AssetRow = Omit<GameTipsAsset, "enabled"> & { enabled: number };
@@ -37,7 +40,17 @@ export function ensureGameTipsAssets(db: DatabaseSync) {
     deleted_at INTEGER NOT NULL DEFAULT 0
   ) STRICT;
   CREATE UNIQUE INDEX IF NOT EXISTS telegram_game_tips_unique_live_game
-  ON telegram_game_tips_assets(provider_key, game_key) WHERE enabled = 1;`);
+  ON telegram_game_tips_assets(provider_key, game_key) WHERE enabled = 1;
+  CREATE TABLE IF NOT EXISTS telegram_game_tips_logos (
+    id TEXT PRIMARY KEY,
+    provider_key TEXT NOT NULL,
+    name TEXT NOT NULL,
+    active INTEGER NOT NULL CHECK (active IN (0, 1)),
+    image BLOB NOT NULL,
+    upload_hash TEXT NOT NULL
+  ) STRICT;
+  CREATE UNIQUE INDEX IF NOT EXISTS telegram_game_tips_current_logo
+  ON telegram_game_tips_logos(provider_key) WHERE active = 1;`);
   if (!db.isTransaction) initialized.add(db);
 }
 
@@ -70,9 +83,23 @@ export function listGameTipAssets(db: DatabaseSync, provider?: string): GameTips
 
 export function gameTipsProviders(db: DatabaseSync): GameTipsProvider[] {
   ensureGameTipsAssets(db);
-  const rows = db.prepare(`SELECT MIN(provider) AS name, COUNT(*) AS count FROM telegram_game_tips_assets
-    WHERE enabled = 1 GROUP BY provider_key ORDER BY provider_key`).all() as GameTipsProvider[];
-  return rows.map(({ name, count }) => ({ name, count }));
+  const rows = db.prepare(`WITH game_providers AS (
+      SELECT provider_key, MIN(provider) AS name, COUNT(*) AS count FROM telegram_game_tips_assets
+      WHERE enabled = 1 GROUP BY provider_key
+    ), current_logos AS (
+      SELECT provider_key, id, name FROM telegram_game_tips_logos WHERE active = 1
+    )
+    SELECT COALESCE(l.name, g.name) AS name, COALESCE(g.count, 0) AS count, l.id AS logoId
+    FROM game_providers g FULL OUTER JOIN current_logos l ON l.provider_key = g.provider_key
+    ORDER BY COALESCE(g.provider_key, l.provider_key)`).all() as Array<{ name: string; count: number; logoId: string | null }>;
+  return rows.map(({ name, count, logoId }) => ({ name, count, ...(logoId ? { logoId } : {}) }));
+}
+
+export function gameTipsProviderLogo(db: DatabaseSync, provider: string): { name: string; logoId: string } | undefined {
+  ensureGameTipsAssets(db);
+  const row = db.prepare("SELECT name, id AS logoId FROM telegram_game_tips_logos WHERE provider_key = ? AND active = 1")
+    .get(gameTipsProviderKey(provider)) as { name: string; logoId: string } | undefined;
+  return row && { ...row };
 }
 
 export function gameTipsLibrary(db: DatabaseSync): GameTipsLibrary {
@@ -83,6 +110,12 @@ export function gameTipsLibrary(db: DatabaseSync): GameTipsLibrary {
 }
 
 function invalidImage() { return new GameTipsError("请选择可识别的 JPG、PNG 或 WebP 静态图片。", 415); }
+
+function uploadContentType(request: Request): string {
+  const declared = (request.headers.get("content-type") || "application/octet-stream").split(";", 1)[0].trim().toLowerCase();
+  if (declared !== "application/octet-stream" && !Object.values(allowedFormats).includes(declared)) throw invalidImage();
+  return declared;
+}
 
 async function readUpload(request: Request): Promise<Buffer> {
   const tooLarge = () => new GameTipsError("每张图片最多 4 MB。", 413);
@@ -110,17 +143,22 @@ async function readUpload(request: Request): Promise<Buffer> {
   return Buffer.concat(chunks, size);
 }
 
-async function normalizeImage(bytes: Buffer, declared: string): Promise<Buffer> {
+async function decodeImage(bytes: Buffer, declared: string) {
   const signature = bytes.subarray(0, 12);
   const detected = signature.subarray(0, 3).equals(Buffer.from([255, 216, 255])) ? "jpeg"
     : signature.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])) ? "png"
     : signature.toString("ascii", 0, 4) === "RIFF" && signature.toString("ascii", 8, 12) === "WEBP" ? "webp" : null;
   if (!detected || declared !== "application/octet-stream" && declared !== allowedFormats[detected]) throw invalidImage();
+  const input = sharp(bytes, { limitInputPixels: maxPixels, sequentialRead: true, failOn: "warning" });
+  const { format, width, height, pages } = await input.metadata();
+  if (format !== detected || (pages ?? 1) !== 1 || width < 32 || height < 32 || width * height > maxPixels) throw invalidImage();
+  return input.timeout({ seconds: 4 }).autoOrient();
+}
+
+async function normalizeImage(bytes: Buffer, declared: string): Promise<Buffer> {
   try {
-    const input = sharp(bytes, { limitInputPixels: maxPixels, sequentialRead: true, failOn: "warning" });
-    const { format, width, height, pages } = await input.metadata();
-    if (format !== detected || (pages ?? 1) !== 1 || width < 32 || height < 32 || width * height > maxPixels) throw invalidImage();
-    const decoded = await input.timeout({ seconds: 4 }).autoOrient().resize({ width: 640, height: 440, fit: "inside", withoutEnlargement: true })
+    const input = await decodeImage(bytes, declared);
+    const decoded = await input.resize({ width: 640, height: 440, fit: "inside", withoutEnlargement: true })
       .flatten({ background: "#0b1637" }).jpeg({ quality: 88 }).toBuffer();
     if (decoded.length <= maxStoredBytes) return decoded;
     return await sharp(decoded).jpeg({ quality: 68 }).toBuffer();
@@ -149,8 +187,7 @@ export async function uploadGameTipsAsset(db: DatabaseSync, request: Request, cl
   const id = params.get("id") ?? "";
   if (!uploadIdPattern.test(id)) throw new GameTipsError("上传编号不正确，请重新选择图片。");
   const names = namesOf(params.get("provider") ?? "", params.get("game") ?? "");
-  const declared = (request.headers.get("content-type") || "application/octet-stream").split(";", 1)[0].trim().toLowerCase();
-  if (declared !== "application/octet-stream" && !Object.values(allowedFormats).includes(declared)) throw invalidImage();
+  const declared = uploadContentType(request);
   const bytes = await readUpload(request);
   const hash = createHash("sha256").update(JSON.stringify([names.provider, names.game])).update(bytes).digest("hex");
   if (uploadMatches(db, id, hash)) return gameTipsLibrary(db);
@@ -224,9 +261,9 @@ function imageBytes(db: DatabaseSync, id: string): Uint8Array {
   return row.image;
 }
 
-function privatePreview(image: Uint8Array): Response {
+function privatePreview(image: Uint8Array, type = "image/jpeg"): Response {
   return new Response(new Uint8Array(image), {
-    headers: { "Cache-Control": "private, no-store", "Content-Type": "image/jpeg", "X-Content-Type-Options": "nosniff" },
+    headers: { "Cache-Control": "private, no-store", "Content-Type": type, "X-Content-Type-Options": "nosniff" },
   });
 }
 
@@ -236,15 +273,99 @@ export function gameTipsImagePreview(db: DatabaseSync, id: string): Response {
   return privatePreview(imageBytes(db, id));
 }
 
+async function normalizeLogo(bytes: Buffer, declared: string): Promise<Buffer> {
+  let image: Buffer;
+  try {
+    const input = await decodeImage(bytes, declared);
+    image = await input.resize({ width: 360, height: 220, fit: "inside", withoutEnlargement: true })
+      .webp({ quality: 86, alphaQuality: 90 }).toBuffer();
+    if (image.length > maxLogoBytes) image = await sharp(image).webp({ quality: 68, alphaQuality: 78 }).toBuffer();
+  } catch { throw invalidImage(); }
+  if (image.length > maxLogoBytes) throw new GameTipsError("请换一张较小的平台 Logo 图片。", 413);
+  return image;
+}
+
+function logoUploadMatches(db: DatabaseSync, id: string, hash: string) {
+  const existing = db.prepare("SELECT upload_hash FROM telegram_game_tips_logos WHERE id = ?").get(id) as { upload_hash: string } | undefined;
+  if (!existing) return false;
+  if (existing.upload_hash !== hash) throw new GameTipsError("这个 Logo 上传编号已使用，请重新选择图片。", 409);
+  return true;
+}
+
+function releaseRetiredLogos(db: DatabaseSync) {
+  const hasSlots = db.prepare("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'telegram_game_tip_slots'").get();
+  // Retain the identity for upload replays and the bytes only while a queued send can need them.
+  db.exec(`UPDATE telegram_game_tips_logos AS logo SET image = X''
+    WHERE active = 0 AND length(image) > 0 ${hasSlots ? `AND NOT EXISTS (
+      SELECT 1 FROM telegram_game_tip_slots s
+      JOIN telegram_scheduled_message_deliveries d
+        ON d.plan_id = s.plan_id AND d.plan_revision = s.plan_revision AND d.run_at = s.run_at
+      WHERE s.provider_key = logo.provider_key AND json_extract(s.selection_json, '$.logoId') = logo.id
+        AND d.status IN ('pending', 'sending')
+    )` : ""}`);
+}
+
+export async function uploadGameTipsLogo(db: DatabaseSync, request: Request): Promise<GameTipsLibrary> {
+  ensureGameTipsAssets(db);
+  const params = new URL(request.url).searchParams;
+  const id = params.get("id") ?? "", previousId = params.get("previousId") ?? "";
+  if (!uploadIdPattern.test(id) || previousId && !uploadIdPattern.test(previousId)) {
+    throw new GameTipsError("Logo 上传编号不正确，请重新选择图片。");
+  }
+  const provider = nameLabel(params.get("provider") ?? "", GAME_TIPS_PROVIDER_LIMIT, "平台名称");
+  const providerKey = gameTipsProviderKey(provider);
+  const declared = uploadContentType(request);
+  const bytes = await readUpload(request);
+  const hash = createHash("sha256").update(JSON.stringify([providerKey, previousId])).update(bytes).digest("hex");
+  if (logoUploadMatches(db, id, hash)) return gameTipsLibrary(db);
+  const image = await normalizeLogo(bytes, declared);
+
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    if (!logoUploadMatches(db, id, hash)) {
+      const existing = gameTipsProviderLogo(db, provider);
+      if ((existing?.logoId ?? "") !== previousId) throw new GameTipsError("平台 Logo 已更新，请刷新图库后再上传。", 409);
+      if (!existing) {
+        const { count } = db.prepare("SELECT COUNT(*) AS count FROM telegram_game_tips_logos WHERE active = 1").get() as { count: number };
+        if (count >= maxProviderLogos) throw new GameTipsError(`图库最多可保存 ${maxProviderLogos} 个平台 Logo。`, 409);
+      } else db.prepare("UPDATE telegram_game_tips_logos SET active = 0 WHERE id = ?").run(existing.logoId);
+      releaseRetiredLogos(db);
+      const { count } = db.prepare("SELECT COUNT(*) AS count FROM telegram_game_tips_logos WHERE length(image) > 0").get() as { count: number };
+      if (count >= maxLogoRevisions) throw new GameTipsError("待发队列暂时占用了较多 Logo 版本，请等发送结束后再试。", 409);
+      db.prepare("INSERT INTO telegram_game_tips_logos(id, provider_key, name, active, image, upload_hash) VALUES (?, ?, ?, 1, ?, ?)")
+        .run(id, providerKey, existing?.name ?? provider, image, hash);
+    }
+    db.exec("COMMIT");
+  } catch (error) { db.exec("ROLLBACK"); throw error; }
+  return gameTipsLibrary(db);
+}
+
+function logoBytes(db: DatabaseSync, id: string, activeOnly = false): Uint8Array {
+  const row = db.prepare(`SELECT image FROM telegram_game_tips_logos WHERE id = ? AND length(image) > 0 ${activeOnly ? "AND active = 1" : ""}`)
+    .get(id) as { image: Uint8Array } | undefined;
+  if (!row) throw new GameTipsError("找不到这个平台 Logo。", 404);
+  return row.image;
+}
+
+export function gameTipsLogoPreview(db: DatabaseSync, id: string): Response {
+  ensureGameTipsAssets(db);
+  if (!uploadIdPattern.test(id)) throw new GameTipsError("Logo 编号不正确。");
+  return privatePreview(logoBytes(db, id, true), "image/webp");
+}
+
 export async function gameTipsPosterPreview(db: DatabaseSync, name: string): Promise<Response> {
   const provider = nameLabel(name, GAME_TIPS_PROVIDER_LIMIT, "平台名称");
   const games = listGameTipAssets(db, provider).slice(0, 3);
   if (games.length < 3) throw new GameTipsError("预览需要同一平台至少三款已启用的游戏。");
-  return privatePreview(await renderGameTips(db, { provider: games[0].provider, games }));
+  const logo = gameTipsProviderLogo(db, provider);
+  return privatePreview(await renderGameTips(db, { provider: logo?.name ?? games[0].provider, games, logoId: logo?.logoId }));
 }
 
 const width = 1500, height = 900;
 const cardWidth = 450, cardOffset = 475, cardLeft = 50;
+const logoPlate = Buffer.from(`<svg width="280" height="96" xmlns="http://www.w3.org/2000/svg">
+  <rect x="1" y="1" width="278" height="94" rx="18" fill="#151841" stroke="#d7b363" stroke-width="2"/>
+</svg>`);
 const posterBackground = Buffer.from(`<svg width="${width}" height="${height}" xmlns="http://www.w3.org/2000/svg">
   <defs>
     <linearGradient id="base" x1="0" y1="0" x2="0" y2="1" gradientUnits="objectBoundingBox">
@@ -290,13 +411,20 @@ export async function renderGameTips(db: DatabaseSync, selection: GameTipsSelect
     throw new GameTipsError("Game Tips 海报需要三款不同的游戏。");
   }
   const images = selection.games.map(game => imageBytes(db, game.id));
+  const logo = selection.logoId ? logoBytes(db, selection.logoId) : null;
   const overlays = [
-    posterLabel(`365FreeBonus  X  ${selection.provider}`, 750, 87, 1160, 64, 42, "#f7dfaa"),
+    posterLabel(`365FreeBonus  X  ${selection.provider}`, logo ? 625 : 750, 87, logo ? 815 : 1160, 64, 42, "#f7dfaa"),
     posterLabel("GAME TIPS", 750, 172, 1250, 108, 100, "#ffcf63"),
     posterLabel("3 FEATURED GAMES", 750, 246, 900, 42, 35, "#c3dbff"),
     posterLabel("EXPLORE BONUS OFFERS", 750, 807, 510, 34, 29, "#ffe29a"),
     posterLabel("365freebonus.com", 750, 839, 490, 24, 23, "#f3f7ff"),
   ];
+  if (logo) {
+    const plate = { input: logoPlate, left: 1050, top: 39 };
+    overlays.push(Promise.resolve(plate),
+      sharp(logo).resize(254, 76, { fit: "contain", background: "#00000000" }).png().toBuffer()
+        .then(input => ({ input, left: plate.left + 13, top: plate.top + 10 })));
+  }
   for (const [index, game] of selection.games.entries()) {
     const center = cardLeft + index * cardOffset + cardWidth / 2;
     overlays.push(

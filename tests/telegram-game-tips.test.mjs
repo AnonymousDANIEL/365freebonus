@@ -20,8 +20,9 @@ for (const source of ["telegram-game-tips-types", "telegram-game-tips"]) {
   writeFileSync(path.join(fixture, `${source}.js`), outputText);
 }
 const require = createRequire(import.meta.url);
-const { deleteGameTipsAsset, gameTipsCaption, gameTipsImagePreview, gameTipsLibrary, gameTipsPosterPreview, gameTipsProviders, listGameTipAssets,
-  renderGameTips, updateGameTipsAsset, uploadGameTipsAsset } = require(path.join(fixture, "telegram-game-tips.js"));
+const { deleteGameTipsAsset, gameTipsCaption, gameTipsImagePreview, gameTipsLibrary, gameTipsLogoPreview, gameTipsPosterPreview,
+  gameTipsProviderLogo, gameTipsProviders, listGameTipAssets,
+  renderGameTips, updateGameTipsAsset, uploadGameTipsAsset, uploadGameTipsLogo } = require(path.join(fixture, "telegram-game-tips.js"));
 
 test.after(() => rmSync(fixture, { recursive: true, force: true }));
 
@@ -41,6 +42,13 @@ function uploadRequest(image, { id = randomUUID(), provider = "MEGA888", game = 
     method: "POST",
     headers: { "content-type": contentType, ...(length && { "content-length": length }) },
     body: image,
+  });
+}
+
+function logoRequest(image, { id = randomUUID(), provider = "MEGA888", previousId = "", contentType = "image/png" } = {}) {
+  const query = new URLSearchParams({ id, provider, previousId });
+  return new Request(`https://directory.example/api/admin/telegram/game-tips/logo?${query}`, {
+    method: "POST", headers: { "content-type": contentType }, body: image,
   });
 }
 
@@ -157,4 +165,59 @@ test("enabled and queued images cannot be deleted and a retired ID cannot be res
   assert.deepEqual(deleteGameTipsAsset(db, disabled.assets[0]), { assets: [], providers: [] });
   assert.throws(() => gameTipsImagePreview(db, id), { status: 404 });
   await assert.rejects(uploadGameTipsAsset(db, uploadRequest(image, { id })), { status: 409 });
+});
+
+test("logo-first providers show with no games, preserve canonical naming and expose only the current transparent WebP", async t => {
+  const db = database(t), id = randomUUID(), second = randomUUID();
+  const image = await sharp({ create: { width: 512, height: 280, channels: 4, background: "#ff000063" } }).png().toBuffer();
+  const first = await uploadGameTipsLogo(db, logoRequest(image, { id }));
+  assert.deepEqual(first, { assets: [], providers: [{ name: "MEGA888", count: 0, logoId: id }] });
+  assert.deepEqual(await uploadGameTipsLogo(db, logoRequest(image, { id })), first);
+  assert.deepEqual(gameTipsProviderLogo(db, "ｍｅｇａ888"), { name: "MEGA888", logoId: id });
+  const preview = gameTipsLogoPreview(db, id);
+  assert.equal(preview.headers.get("content-type"), "image/webp");
+  assert.equal(preview.headers.get("cache-control"), "private, no-store");
+  const previewData = Buffer.from(await preview.arrayBuffer());
+  const { format, width, height, hasAlpha } = await sharp(previewData).metadata();
+  assert.equal(format, "webp");
+  assert.ok(width <= 360 && height <= 220 && hasAlpha);
+  assert.ok(previewData.byteLength <= 96 * 1024);
+  const next = await png("#19fb19");
+  await assert.rejects(uploadGameTipsLogo(db, logoRequest(next, { id })), { status: 409 });
+  await assert.rejects(uploadGameTipsLogo(db, logoRequest(next, { id: second })), { status: 409 });
+  await assert.rejects(uploadGameTipsLogo(db, logoRequest(next, { id: second, previousId: id, contentType: "image/jpeg" })), { status: 415 });
+  await uploadGameTipsAsset(db, uploadRequest(next, { provider: "mega888" }));
+  const replaced = await uploadGameTipsLogo(db, logoRequest(next, { id: second, previousId: id, provider: " mega888 " }));
+  assert.deepEqual(replaced.providers, [{ name: "MEGA888", count: 1, logoId: second }]);
+  assert.throws(() => gameTipsLogoPreview(db, id), { status: 404 });
+  assert.deepEqual(await uploadGameTipsLogo(db, logoRequest(image, { id })), replaced);
+  assert.equal(db.prepare("SELECT length(image) AS bytes FROM telegram_game_tips_logos WHERE id = ?").get(id).bytes, 0);
+});
+
+test("replacing a logo keeps queued poster output identical and reclaims prior bytes once the queue is terminal", async t => {
+  const db = database(t), id = randomUUID(), second = randomUUID();
+  await uploadGameTipsLogo(db, logoRequest(await png("#fb1919"), { id }));
+  for (const game of ["Dolphin Reef", "Iceland", "Great Blue"]) {
+    await uploadGameTipsAsset(db, uploadRequest(await png("#1919fb"), { game, provider: "mega888" }));
+  }
+  const games = listGameTipAssets(db), selection = { provider: "MEGA888", games, logoId: id };
+  db.exec(`CREATE TABLE telegram_game_tip_slots(plan_id TEXT, plan_revision TEXT, run_at INTEGER, provider_key TEXT, selection_json TEXT);
+    CREATE TABLE telegram_scheduled_message_deliveries(plan_id TEXT, plan_revision TEXT, run_at INTEGER, status TEXT);
+    INSERT INTO telegram_scheduled_message_deliveries VALUES ('a', 'b', 123, 'pending');`);
+  db.prepare("INSERT INTO telegram_game_tip_slots VALUES ('a', 'b', 123, 'mega888', ?)").run(JSON.stringify(selection));
+  const before = await renderGameTips(db, selection);
+  await uploadGameTipsLogo(db, logoRequest(await png("#19fb19"), { id: second, previousId: id }));
+  assert.throws(() => gameTipsLogoPreview(db, id), { status: 404 });
+  assert.deepEqual(await renderGameTips(db, selection), before);
+  const { data: firstPoster, info } = await sharp(before).raw().toBuffer({ resolveWithObject: true });
+  const preview = await gameTipsPosterPreview(db, "mega888");
+  const secondPoster = await sharp(Buffer.from(await preview.arrayBuffer())).raw().toBuffer();
+  const position = (1180 + 87 * info.width) * info.channels;
+  assert.ok(firstPoster[position] > 200 && firstPoster[position + 1] < 60);
+  assert.ok(secondPoster[position + 1] > 200 && secondPoster[position] < 60);
+  assert.equal(gameTipsCaption(selection), gameTipsCaption({ ...selection, logoId: second }));
+
+  db.exec("UPDATE telegram_scheduled_message_deliveries SET status = 'sent'");
+  await uploadGameTipsLogo(db, logoRequest(await png("#19fb19"), { provider: "Other" }));
+  assert.equal(db.prepare("SELECT length(image) AS bytes FROM telegram_game_tips_logos WHERE id = ?").get(id).bytes, 0);
 });
