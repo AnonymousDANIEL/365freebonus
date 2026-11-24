@@ -15,6 +15,7 @@ const id = z.string().uuid();
 const customTargetKey = z.custom<`custom:${string}`>(value =>
   typeof value === "string" && value.startsWith("custom:") && id.safeParse(value.slice(7)).success);
 const targetKey: z.ZodType<ScheduledMessageTargetKey> = z.union([z.enum(["official", "group", "hot"]), customTargetKey]);
+const selectedTargets = z.array(targetKey).min(1).max(23).refine(values => new Set(values).size === values.length);
 const fields = {
   name: z.string().trim().min(1).max(100),
   // Send the owner's text verbatim, including spacing and line breaks.
@@ -23,15 +24,14 @@ const fields = {
     .refine(values => new Set(values).size === values.length),
   enabled: z.boolean(),
   calendarDate: z.string().regex(/^(?:\d{4}-\d{2}-\d{2})?$/).nullable().optional(),
-  targetKeys: z.array(targetKey).min(1).max(23)
-    .refine(values => new Set(values).size === values.length).optional(),
+  targetKeys: selectedTargets.optional(),
   mediaId: id.nullable().optional(),
   gameTipsProvider: z.string().trim().refine(value =>
     Boolean(value) && Array.from(value).length <= GAME_TIPS_PROVIDER_LIMIT && !/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(value)).nullable().optional(),
   gameTipsCaptionPresetId: z.string().refine(isGameTipsCaptionPresetId).nullable().optional(),
 };
 // A stable key from the draft prevents lost HTTP responses creating duplicates.
-const create = z.object({ requestId: id, ...fields }).strict();
+const create = z.object({ requestId: id, ...fields, targetKeys: selectedTargets }).strict();
 const update = z.object({ id, revision: id, ...fields }).strict();
 const remove = z.object({ id, revision: id }).strict();
 const verify = z.object({ action: z.literal("verify") }).strict();
@@ -39,9 +39,9 @@ const targetFields = { action: z.literal("upsertTarget"), title: z.string().trim
   address: z.string().trim().min(1).max(150) };
 const upsertTarget = z.union([
   z.object({ ...targetFields, requestId: id }).strict(),
-  z.object({ ...targetFields, key: customTargetKey, revision: id }).strict(),
+  z.object({ ...targetFields, key: targetKey, revision: id }).strict(),
 ]);
-const removeTarget = z.object({ targetKey: customTargetKey, revision: id }).strict();
+const removeTarget = z.object({ targetKey, revision: id }).strict();
 const respond = (body: ReturnType<typeof telegramScheduledMessageStatus>) =>
   Response.json(body, { headers: { "Cache-Control": "no-store" } });
 function planPayload<T extends { text: string; id?: string; mediaId?: string | null; gameTipsProvider?: string | null; gameTipsCaptionPresetId?: string | null }>(input: T): T {

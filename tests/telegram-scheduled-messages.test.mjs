@@ -63,7 +63,10 @@ const sendsMedia = () => telegram.calls.filter(c => ['sendPhoto','sendVideo','se
 const jobs = () => db().prepare('SELECT * FROM telegram_scheduled_message_deliveries ORDER BY run_at,target_key').all();
 const onlyPlan = () => status().plans[0];
 function close() { const filename = path.join(process.env.DATA_DIR, 'directory.sqlite'); globalThis.__directorySqlite?.get(filename)?.close(); globalThis.__directorySqlite?.delete(filename); }
-function input(extra={}) { return { requestId: randomUUID(), name: 'Daily news', text: 'First line\n\nExact text 🔥', times: ['09:00'], enabled: true, ...extra }; }
+function input(extra={}) {
+ return { requestId: randomUUID(), name: 'Daily news', text: 'First line\n\nExact text 🔥', times: ['09:00'], enabled: true,
+  targetKeys: ['official','group','hot'], ...extra };
+}
 async function create(extra={}) { return scheduler.saveScheduledMessagePlan(db(), input(extra), decrypt, clock); }
 async function update(extra={}) { const p = onlyPlan(); return scheduler.saveScheduledMessagePlan(db(), { id:p.id, revision:p.revision, name:p.name, text:p.text, times:p.times, enabled:p.enabled, ...extra }, decrypt, clock); }
 function storeMedia(kind) {
@@ -366,6 +369,19 @@ test('disabled draft can be saved without credentials or outbound calls', async 
  await tick(); assert.equal(sends().length,0);
 });
 
+test('new regular and Game Tips plans require explicit nonempty channel selections', async () => {
+ for (const draft of [{}, gamePlan()]) for (const targetKeys of [undefined, []]) {
+  await assert.rejects(create({ ...draft, targetKeys }), error => error.status === 400 && /至少一个/.test(error.message));
+ }
+ assert.deepEqual(status().plans, []);
+ assert.deepEqual(telegram.calls, []);
+ await create({ targetKeys: ['official'] });
+ await update({ text: 'Saved without changing the channel' });
+ assert.deepEqual(onlyPlan().targetKeys, ['official']);
+ now = onlyPlan().nextRunAt; await tick();
+ assert.deepEqual(sends().map(call => call.p.chat_id), [telegram.ids.official]);
+});
+
 test('enable resolves fixed public usernames and checks permissions on every channel', async () => {
  await create(); assert.deepEqual(status().targets.map(t=>t.chatId), Object.values(telegram.ids).map(String));
  assert.equal(telegram.calls.filter(c=>c.method==='getChatMember').length,3); assert.equal(sends().length,0);
@@ -401,6 +417,9 @@ test('due slot sends matching text to all three channels and rolls to tomorrow',
 
 test('upgrading a v37 database retains fixed legacy targets and dispatched occurrence deduplication', async () => {
  await create(); now=onlyPlan().nextRunAt; await tick();
+ const exact = db().prepare("SELECT target_keys_json FROM telegram_scheduled_message_plans").get().target_keys_json;
+ assert.deepEqual(JSON.parse(exact), ['group','hot','official']);
+ db().exec("UPDATE telegram_scheduled_message_plans SET target_keys_json=''");
  const before=onlyPlan(), ids=jobs().map(job=>job.id);
  db().exec(`DROP TABLE telegram_scheduled_message_media;
    DROP TABLE telegram_scheduled_message_channels;
@@ -413,6 +432,74 @@ test('upgrading a v37 database retains fixed legacy targets and dispatched occur
  assert.deepEqual(onlyPlan(),before);
  assert.deepEqual(onlyPlan().targetKeys,['official','group','hot']);
  await tick();assert.equal(sends().length,3);assert.deepEqual(jobs().map(job=>job.id),ids);
+});
+
+test('untouched built-in channels are editable and deletable without changing the separate Hot video destination', async () => {
+ const target = key => status().targets.find(row => row.key === key);
+ const save = (row, fields) => scheduler.saveScheduledMessageTarget(db(), {
+  key: row.key, revision: row.revision, title: row.title, address: row.address, ...fields,
+ }, decrypt, clock);
+ const remove = row => scheduler.deleteScheduledMessageTarget(db(), { key: row.key, revision: row.revision }, clock);
+ const official = target('official'), group = target('group'), hot = target('hot');
+ assert.ok([official, group, hot].every(row => row.editable && /^[a-f0-9-]{36}$/.test(row.revision)));
+ assert.deepEqual(status().targets.map(row => row.revision), [official, group, hot].map(row => row.revision));
+
+ await create({ targetKeys: ['official'] });
+ await save(official, { title: 'Renamed official' });
+ const renamed = target('official');
+ assert.equal(renamed.title, 'Renamed official');
+ assert.notEqual(renamed.revision, official.revision);
+ await assert.rejects(save(official, { title: 'Stale rename' }), error => error.status === 409);
+ await assert.rejects(save(renamed, { address: '-1004444444444' }), /启用的发送计划/);
+ assert.throws(() => remove(renamed), /启用的发送计划/);
+ remove(group);
+ assert.equal(target('group'), undefined);
+ await assert.rejects(create({ enabled: false, targetKeys: ['group'] }), /所选频道已不存在/);
+
+ const savedHot = -1004444444444, separateHot = -1005555555555;
+ telegram.onRequest = (method, params) => {
+  if (method === 'getChat' && params.chat_id === savedHot) return { ok: true, result: { id: savedHot, type: 'channel' } };
+ };
+ await save(hot, { title: 'Scheduled Hot', address: String(savedHot) });
+ assert.equal(target('hot').chatId, String(savedHot));
+ assert.equal(db().prepare("SELECT target_chat_id FROM telegram_hot_video_settings").get().target_chat_id, telegram.ids.hot);
+ db().prepare("UPDATE telegram_hot_video_settings SET target_chat_id=?").run(separateHot);
+ close();
+ assert.equal(target('group'), undefined);
+ assert.equal(target('official').title, 'Renamed official');
+ assert.equal(target('hot').title, 'Scheduled Hot');
+ assert.equal(target('hot').chatId, String(savedHot));
+ await create({ name: 'Separate Hot schedule', targetKeys: ['hot'] });
+ now = onlyPlan().nextRunAt; await tick();
+ assert.deepEqual(sends().map(call => call.p.chat_id).sort(), [telegram.ids.official, savedHot].sort());
+ assert.equal(db().prepare("SELECT target_chat_id FROM telegram_hot_video_settings").get().target_chat_id, separateHot);
+});
+
+test('deselected Game Tips channel is not sent even if a stale retry survives with the current revision', async () => {
+ for (const game of ['Dolphin Reef','Iceland','Great Blue']) await addGame(game);
+ await create(gamePlan({ targetKeys: ['official','group'] }));
+ now = onlyPlan().nextRunAt;
+ telegram.results[telegram.ids.group] = [{ ok: false, code: 429, retryAfter: 60 }];
+ await tick();
+ const pending = jobs().find(job => job.target_key === 'group');
+ assert.equal(pending.status, 'pending');
+ await update({ targetKeys: ['official'] });
+ assert.equal(jobs().find(job => job.id === pending.id).status, 'cancelled');
+
+ // Reproduce a stale, otherwise dispatchable row to exercise the final membership check.
+ const revision = onlyPlan().revision;
+ db().prepare(`INSERT INTO telegram_game_tip_slots(plan_id,plan_revision,run_at,provider_key,selection_json)
+  SELECT plan_id,?,run_at,provider_key,selection_json FROM telegram_game_tip_slots WHERE plan_id=? AND plan_revision=? AND run_at=?`)
+  .run(revision, pending.plan_id, pending.plan_revision, pending.run_at);
+ db().prepare("UPDATE telegram_scheduled_message_deliveries SET plan_revision=?,status='pending' WHERE id=?").run(revision, pending.id);
+ now += MINUTE; await tick();
+ assert.deepEqual(sendsMedia().map(call => call.p.chat_id).sort(), [telegram.ids.official, telegram.ids.group].sort());
+ const stale = jobs().find(job => job.id === pending.id);
+ assert.equal(stale.status, 'cancelled');
+ assert.equal(stale.attempts, pending.attempts);
+ now = onlyPlan().nextRunAt; await tick();
+ assert.equal(sendsMedia().length, 3);
+ assert.equal(sendsMedia().at(-1).p.chat_id, telegram.ids.official);
 });
 
 test('custom channel management verifies publishing access, guards revisions and prevents changing an active target', async () => {

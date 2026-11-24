@@ -28,10 +28,10 @@ const GAME_TIPS_BUTTONS = { inline_keyboard: [[
   { text: "Visit website", url: "https://365freebonus.com/" },
   { text: "NEED HELP?", url: "https://t.me/FreeBonus365ChatBot" },
 ]] };
-const TARGETS: ChannelDefinition[] = [
-  { key: "official", title: "365 Free Bonus Official", address: "@join365freebonus", revision: "", editable: false },
-  { key: "group", title: "365 Free Bonus Group", address: "@join365freebonusgroup", revision: "", editable: false },
-  { key: "hot", title: "🔞365 Free Bonus Hot", address: "", revision: "", editable: false },
+const TARGETS: Omit<ChannelDefinition, "revision" | "editable">[] = [
+  { key: "official", title: "365 Free Bonus Official", address: "@join365freebonus" },
+  { key: "group", title: "365 Free Bonus Group", address: "@join365freebonusgroup" },
+  { key: "hot", title: "🔞365 Free Bonus Hot", address: "" },
 ];
 const DEFAULT_TARGET_KEYS = TARGETS.map(target => target.key);
 export class ScheduledMessageError extends Error { constructor(message: string, readonly status = 400) { super(message); } }
@@ -46,6 +46,8 @@ function transaction<T>(db: DatabaseSync, work: () => T): T {
 }
 function cipher(db: DatabaseSync): string { return (db.prepare("SELECT chat_bot_token_ciphertext FROM telegram_promotion_settings WHERE id='primary'").get() as { chat_bot_token_ciphertext: string } | undefined)?.chat_bot_token_ciphertext || ""; }
 function hotChatId(db: DatabaseSync): number {
+  // The separate Hot video or join-gate setting supplies only the initial scheduled destination.
+  if (channelRow(db, "hot")) return 0;
   const video = (db.prepare("SELECT target_chat_id FROM telegram_hot_video_settings WHERE id='primary'").get() as { target_chat_id: number } | undefined)?.target_chat_id;
   if (validChat(video)) return video;
   const gate = (db.prepare("SELECT target_chat_id FROM telegram_join_gate_settings WHERE id='primary'").get() as { target_chat_id: number } | undefined)?.target_chat_id;
@@ -53,12 +55,20 @@ function hotChatId(db: DatabaseSync): number {
 }
 function runtime(db: DatabaseSync): Runtime { return db.prepare("SELECT * FROM telegram_scheduled_message_runtime WHERE id='primary'").get() as Runtime; }
 function targets(db: DatabaseSync): Target[] { return db.prepare("SELECT * FROM telegram_scheduled_message_targets").all() as Target[]; }
-function customChannels(db: DatabaseSync): Channel[] {
-  return db.prepare("SELECT * FROM telegram_scheduled_message_channels WHERE deleted_at=0 ORDER BY target_key").all() as Channel[];
-}
 function channelDefinitions(db: DatabaseSync, hot: number): ChannelDefinition[] {
-  const fixed = TARGETS.map(target => target.key === "hot" ? { ...target, address: hot ? String(hot) : "" } : target);
-  return [...fixed, ...customChannels(db).map(channel => ({ key: channel.target_key, title: channel.title, address: channel.address, revision: channel.revision, editable: true }))];
+  const stored = db.prepare("SELECT * FROM telegram_scheduled_message_channels ORDER BY target_key").all() as Channel[];
+  const overrides = new Map(stored.map(channel => [channel.target_key, channel]));
+  const view = ({ target_key: key, title, address, revision }: Channel): ChannelDefinition => ({ key, title, address, revision, editable: true });
+  const defaults = TARGETS.flatMap(target => {
+    const override = overrides.get(target.key);
+    if (override) return override.deleted_at === 0 ? [view(override)] : [];
+    const address = target.key === "hot" && hot ? String(hot) : target.address;
+    // Unmodified defaults need a stable version, including changes to the linked Hot address.
+    const version = hash(`${target.key}:${address}`);
+    const revision = `${version.slice(0, 8)}-${version.slice(8, 12)}-4${version.slice(13, 16)}-8${version.slice(17, 20)}-${version.slice(20, 32)}`;
+    return [{ ...target, address, revision, editable: true }];
+  });
+  return [...defaults, ...stored.filter(channel => channel.deleted_at === 0 && validCustomKey(channel.target_key)).map(view)];
 }
 function plan(db: DatabaseSync, id: string): Plan | undefined { return db.prepare("SELECT * FROM telegram_scheduled_message_plans WHERE id=? AND deleted_at=0").get(id) as Plan | undefined; }
 function parseTimes(value: string): string[] { try { const times: unknown = JSON.parse(value); return Array.isArray(times) && times.every(t => typeof t === "string" && TIME.test(t)) ? times : []; } catch { return []; } }
@@ -182,7 +192,7 @@ export async function verifyScheduledMessageTargets(db: DatabaseSync, decrypt: D
   const fixedIds = fixed.filter(target => target.ready).map(target => target.chat_id);
   if (new Set(fixedIds).size !== fixedIds.length) for (const row of fixed) {
     row.ready = 0;
-    row.last_error = "三个默认目标必须是不同的频道，请检查 Hot 频道设置。";
+    row.last_error = "发送目标必须使用不同的频道，请检查频道地址。";
   }
   const knownChats = new Set(fixed.filter(target => validChat(target.chat_id)).map(target => target.chat_id));
   for (const row of verified.filter(target => validCustomKey(target.target_key) && target.ready)) {
@@ -229,24 +239,25 @@ function requireInactiveChannel(db: DatabaseSync, key: ScheduledMessageTargetKey
 }
 export async function saveScheduledMessageTarget(db: DatabaseSync, input: ScheduledMessageTargetInput, decrypt: Decrypt, clock = Date.now): Promise<ScheduledMessageStatus> {
   if (typeof input.title !== "string" || !input.title.trim() || input.title.trim().length > 100 || typeof input.address !== "string"
-    || input.key !== undefined && (!validCustomKey(input.key) || typeof input.revision !== "string" || !UUID.test(input.revision) || input.requestId !== undefined)
+    || input.key !== undefined && (!validTargetKey(input.key) || typeof input.revision !== "string" || !UUID.test(input.revision) || input.requestId !== undefined)
     || input.key === undefined && (typeof input.requestId !== "string" || !UUID.test(input.requestId) || input.revision !== undefined)) {
     throw new ScheduledMessageError("请检查频道名称、地址和版本。");
   }
   const title = input.title.trim(), address = channelAddress(input.address);
   const key = input.key ?? `custom:${input.requestId!}`;
   const changed = transaction(db, () => {
-    const current = channelRow(db, key);
-    if (input.key ? !current || current.deleted_at > 0 || current.revision !== input.revision
-      : current && (current.deleted_at > 0 || current.title !== title || current.address !== address)) {
+    const definitions = channelDefinitions(db, hotChatId(db));
+    const current = definitions.find(target => target.key === key);
+    if (input.key ? !current || current.revision !== input.revision
+      : channelRow(db, key) && (!current || current.title !== title || current.address !== address)) {
       throw new ScheduledMessageError("频道已被修改或请求已处理，请刷新后再保存。", 409);
     }
     if (current?.title === title && current.address === address) return false;
-    if (channelDefinitions(db, hotChatId(db)).some(target => target.key !== key && target.address === address)
+    if (definitions.some(target => target.key !== key && target.address === address)
       || !address.startsWith("@") && targets(db).some(target => target.target_key !== key && String(target.chat_id) === address)) {
       throw new ScheduledMessageError("此频道已在发送目标中，请选择已有频道。");
     }
-    if (!current && customChannels(db).length >= 20) throw new ScheduledMessageError("最多可添加 20 个自定义频道。");
+    if (!current && definitions.filter(target => validCustomKey(target.key)).length >= 20) throw new ScheduledMessageError("最多可添加 20 个自定义频道。");
     if (current && current.address !== address) requireInactiveChannel(db, key);
     db.prepare(`INSERT INTO telegram_scheduled_message_channels(target_key,title,address,revision) VALUES(?,?,?,?)
       ON CONFLICT(target_key) DO UPDATE SET title=excluded.title,address=excluded.address,revision=excluded.revision`)
@@ -262,12 +273,14 @@ export async function saveScheduledMessageTarget(db: DatabaseSync, input: Schedu
   }
 }
 export function deleteScheduledMessageTarget(db: DatabaseSync, input: { key: ScheduledMessageTargetKey; revision: string }, clock = Date.now): ScheduledMessageStatus {
-  if (!validCustomKey(input.key) || !UUID.test(input.revision)) throw new ScheduledMessageError("频道标识无效。");
+  if (!validTargetKey(input.key) || !UUID.test(input.revision)) throw new ScheduledMessageError("频道标识无效。");
   transaction(db, () => {
-    const current = channelRow(db, input.key);
-    if (!current || current.deleted_at || current.revision !== input.revision) throw new ScheduledMessageError("频道已被修改，请刷新后重试。", 409);
+    const current = channelDefinitions(db, hotChatId(db)).find(target => target.key === input.key);
+    if (!current || current.revision !== input.revision) throw new ScheduledMessageError("频道已被修改，请刷新后重试。", 409);
     requireInactiveChannel(db, input.key);
-    db.prepare("UPDATE telegram_scheduled_message_channels SET deleted_at=?,revision=? WHERE target_key=?").run(clock(), randomUUID(), input.key);
+    db.prepare(`INSERT INTO telegram_scheduled_message_channels(target_key,revision,title,address,deleted_at) VALUES(?,?,?,?,?)
+      ON CONFLICT(target_key) DO UPDATE SET deleted_at=excluded.deleted_at,revision=excluded.revision`)
+      .run(input.key, randomUUID(), current.title, current.address, clock());
     clearChannelJobs(db, input.key);
   });
   return scheduledMessageStatus(db, clock);
@@ -280,8 +293,9 @@ function validateInput(input: ScheduledMessagePlanInput) {
   if (input.calendarDate != null && (typeof input.calendarDate !== "string" || input.calendarDate && !Number.isFinite(calendarDay(input.calendarDate)))) {
     throw new ScheduledMessageError("请输入有效的马来西亚日期。");
   }
-  if (input.targetKeys !== undefined && (!Array.isArray(input.targetKeys) || !input.targetKeys.length || input.targetKeys.length > 23
-    || !input.targetKeys.every(validTargetKey) || new Set(input.targetKeys).size !== input.targetKeys.length)) {
+  if (!input.id && input.targetKeys === undefined || input.targetKeys !== undefined &&
+    (!Array.isArray(input.targetKeys) || !input.targetKeys.length || input.targetKeys.length > 23
+      || !input.targetKeys.every(validTargetKey) || new Set(input.targetKeys).size !== input.targetKeys.length)) {
     throw new ScheduledMessageError("请选择至少一个有效且不同的发送频道。");
   }
   if (input.mediaId != null && (typeof input.mediaId !== "string" || !UUID.test(input.mediaId))) throw new ScheduledMessageError("附件标识无效，请重新上传。");
@@ -305,15 +319,16 @@ export async function saveScheduledMessagePlan(db: DatabaseSync, input: Schedule
   const presetId = provider ? captionPresetOrDefault(input.gameTipsCaptionPresetId === undefined
     ? before?.game_tips_caption_preset_id : input.gameTipsCaptionPresetId ?? undefined) : "";
   const text = provider ? "" : input.text;
-  const keys = [...(input.targetKeys ?? parseTargetKeys(before?.target_keys_json || ""))].sort();
-  const keysJson = keys.length === DEFAULT_TARGET_KEYS.length && DEFAULT_TARGET_KEYS.every(key => keys.includes(key)) ? "" : JSON.stringify(keys);
+  const keys = [...(input.targetKeys ?? (before ? parseTargetKeys(before.target_keys_json) : []))].sort();
+  const keysJson = JSON.stringify(keys);
   if (!provider && !text.trim()) throw new ScheduledMessageError("请输入发送文案。");
   if (!provider && input.gameTipsCaptionPresetId != null) throw new ScheduledMessageError("只有 Game Tips 计划可选择 Game Tips 文案。");
   if (provider && input.text.trim()) throw new ScheduledMessageError("Game Tips 会自动生成文案，请清除手动文案。");
   if (provider && mediaId) throw new ScheduledMessageError("Game Tips 自动生成图片，请移除额外附件。");
   if (mediaId && text.length > 1024) throw new ScheduledMessageError("附照片、视频或 GIF 的文案最多 1,024 个字符。");
   const samePayload = (row: Plan) => !row.deleted_at && row.name === name && row.text === text
-    && row.times_json === timesJson && row.calendar_date === calendarDate && row.target_keys_json === keysJson
+    && row.times_json === timesJson && row.calendar_date === calendarDate
+    && JSON.stringify(parseTargetKeys(row.target_keys_json).sort()) === keysJson
     && row.media_id === mediaId && row.game_tips_provider === provider && row.enabled === enabled
     && (!provider || captionPresetOrDefault(row.game_tips_caption_preset_id) === presetId);
   const existing = existingRequest();
@@ -343,7 +358,8 @@ export async function saveScheduledMessagePlan(db: DatabaseSync, input: Schedule
     if (enabled && calendarDate && !sameSchedule && !next) throw new ScheduledMessageError("这一天的发送时间已过，请选未来的日期或时间。");
     if (enabled && !configured(db, keys)) throw new ScheduledMessageError(CHANGED_ERROR, 409);
     if (enablingGameTips && providerCount(gameTipsProviders(db), provider) < 3) throw new ScheduledMessageError(GAME_TIPS_EMPTY);
-    if (!keys.length || keys.some(key => validCustomKey(key) && !customChannels(db).some(channel => channel.target_key === key))) {
+    const definitions = channelDefinitions(db, hotChatId(db));
+    if (!keys.length || keys.some(key => !definitions.some(channel => channel.key === key))) {
       throw new ScheduledMessageError("所选频道已不存在，请重新选择。");
     }
     if (mediaId && !readScheduledMessageMedia(db, mediaId)) throw new ScheduledMessageError("附件已失效，请重新上传。");
@@ -545,7 +561,8 @@ function prepareDispatch(db: DatabaseSync, lease: string, job: Delivery, now: nu
   return transaction(db, () => {
     const row = db.prepare("SELECT * FROM telegram_scheduled_message_deliveries WHERE id=?").get(job.id) as Delivery;
     const current = plan(db, job.plan_id), state = runtime(db), target = targets(db).find(t => t.target_key === job.target_key);
-    if (!owns(db, lease, now) || !identityCurrent(db) || !current?.enabled || current.revision !== job.plan_revision || !target?.ready
+    if (!owns(db, lease, now) || !identityCurrent(db) || !current?.enabled || current.revision !== job.plan_revision
+      || !parseTargetKeys(current.target_keys_json).includes(job.target_key) || !target?.ready
       || target.chat_id !== job.target_chat_id || state.token_hash !== job.token_hash || state.bot_id !== job.bot_id || row.status !== "sending" || row.lease_id !== job.lease_id) {
       db.prepare("UPDATE telegram_scheduled_message_deliveries SET text='',media_id='',status='cancelled',lease_id='',lease_until=0,last_error=? WHERE id=? AND lease_id=? AND status='sending' AND dispatch_started_at=0")
         .run(CHANGED_ERROR, job.id, job.lease_id);
@@ -628,9 +645,10 @@ async function dispatch(db: DatabaseSync, lease: string, job: Delivery, decrypt:
       : code === 400 && job.media_id ? "Telegram 拒绝附件或附件已失效，请检查文件后重新安排。"
       : code === 400 || code === 403 ? TARGET_ERROR : code === 429 ? "Telegram 连续限流，已停止本次发送。" : UNKNOWN_ERROR;
     db.prepare("UPDATE telegram_scheduled_message_deliveries SET status=?,last_error=?,lease_id='',lease_until=0 WHERE id=? AND lease_id=?").run(definitive ? "failed" : "unknown", error, job.id, job.lease_id);
-    if (code === 401 || code === 403) {
+    if ((code === 401 || code === 403) && runtime(db).token_hash === job.token_hash) {
       if (code === 401) db.prepare("UPDATE telegram_scheduled_message_targets SET ready=0,last_error=?").run(error);
-      else db.prepare("UPDATE telegram_scheduled_message_targets SET ready=0,last_error=? WHERE target_key=?").run(error, job.target_key);
+      else if (!db.prepare("UPDATE telegram_scheduled_message_targets SET ready=0,last_error=? WHERE target_key=? AND chat_id=?")
+        .run(error, job.target_key, job.target_chat_id).changes) return;
       db.prepare("UPDATE telegram_scheduled_message_runtime SET next_verify_at=?,last_error=? WHERE id='primary'").run(clock() + 60_000, error);
     }
   });
@@ -653,7 +671,8 @@ export async function deliverScheduledMessagesOnce(decrypt: Decrypt, clock = Dat
     // One read-only startup verification makes the destinations visible;
     // failures back off rather than hammering Telegram every five seconds.
     const identityDirty = stored && (hash(stored) !== state.token_hash || hotChatId(db) !== state.hot_chat_id);
-    if (stored && (identityDirty || clock() >= state.next_verify_at) && (active || !state.next_verify_at || !configured(db, DEFAULT_TARGET_KEYS))) {
+    const keys = channelDefinitions(db, hotChatId(db)).map(target => target.key);
+    if (stored && (identityDirty || clock() >= state.next_verify_at) && (active || !state.next_verify_at || keys.length > 0 && !configured(db, keys))) {
       await verifyScheduledMessageTargets(db, decrypt, clock);
     }
     if (active) {

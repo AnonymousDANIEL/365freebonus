@@ -38,7 +38,7 @@ const route = require(path.join(fixture, 'app/api/admin/telegram/scheduled-messa
 const auth = require(path.join(fixture, 'app/chatgpt-auth.js'));
 const facade = require(path.join(fixture, 'app/lib/telegram-promotions.js'));
 const { ScheduledMessageError } = require(path.join(fixture, 'app/lib/telegram-scheduled-messages.js'));
-const plan = () => ({ requestId: randomUUID(), name: 'Daily reminder', text: 'First line\n\n🎁 Keep this exact line.  ', times: ['00:00', '08:30', '23:59'], enabled: false });
+const plan = () => ({ requestId: randomUUID(), name: 'Daily reminder', text: 'First line\n\n🎁 Keep this exact line.  ', times: ['00:00', '08:30', '23:59'], enabled: false, targetKeys: ['official'] });
 const edit = () => { const { requestId, ...fields } = plan(); return { id: randomUUID(), revision: randomUUID(), ...fields }; };
 function request(method, body, headers = {}) {
   return new Request(`${origin}/api/admin/telegram/scheduled-messages`, { method,
@@ -155,6 +155,7 @@ test('dated plans accept a validated channel selection and private media ID', as
   assert.deepEqual(facade.calls.splice(0), [['save', body]]);
   for (const invalid of [
     { calendarDate: '2026/11/19' },
+    { targetKeys: undefined },
     { targetKeys: ['official', 'official'] },
     { targetKeys: ['@arbitrary-channel'] },
     { targetKeys: [] },
@@ -171,7 +172,7 @@ test('Game Tips plans pass the provider and selected caption preset without acce
   for (const invalid of [
     { gameTipsProvider: ' ' }, { gameTipsProvider: 'x'.repeat(49) }, { gameTipsProvider: 'MEGA\n888' }, { gameTipsProvider: 123 },
     { gameTipsProvider: null }, { text: 'Manual caption' }, { mediaId: randomUUID() },
-    { gameTipsCaptionPresetId: 'made-up' }, { gameTipsCaptionPresetId: '' },
+    { gameTipsCaptionPresetId: 'made-up' }, { gameTipsCaptionPresetId: '' }, { targetKeys: undefined }, { targetKeys: [] },
   ]) uncached(await route.POST(request('POST', { ...body, ...invalid })), 400);
   assert.deepEqual(facade.calls, []);
   const update = { ...edit(), text: '', gameTipsCaptionPresetId: 'bonus-roundup' };
@@ -181,7 +182,7 @@ test('Game Tips plans pass the provider and selected caption preset without acce
   assert.deepEqual(facade.calls, []);
 });
 
-test('custom channel create, edit and removal require stable IDs and explicit revisions', async () => {
+test('custom channel creation and all channel edits and removals require stable IDs and explicit revisions', async () => {
   const requestId = randomUUID();
   const key = `custom:${requestId}`;
   const revision = randomUUID();
@@ -190,14 +191,18 @@ test('custom channel create, edit and removal require stable IDs and explicit re
   uncached(await route.POST(request('POST', { ...target, requestId })), 200);
   uncached(await route.POST(request('POST', { ...target, key, revision })), 200);
   uncached(await route.DELETE(request('DELETE', { targetKey: key, revision })), 200);
+  uncached(await route.POST(request('POST', { ...target, key: 'official', revision })), 200);
+  uncached(await route.DELETE(request('DELETE', { targetKey: 'hot', revision })), 200);
   assert.deepEqual(facade.calls.splice(0), [
     ['saveTarget', { ...saved, requestId }],
     ['saveTarget', { ...saved, key, revision }],
     ['deleteTarget', { key, revision }],
+    ['saveTarget', { ...saved, key: 'official', revision }],
+    ['deleteTarget', { key: 'hot', revision }],
   ]);
-  for (const fields of [{ key }, { key: 'official', revision }, { requestId, revision },
+  for (const fields of [{ key }, { key: 'official' }, { key: 'unknown', revision }, { requestId, revision },
     { requestId, token: 'sensitive' }]) uncached(await route.POST(request('POST', { ...target, ...fields })), 400);
   uncached(await route.DELETE(request('DELETE', { targetKey: key })), 400);
-  uncached(await route.DELETE(request('DELETE', { targetKey: 'hot', revision })), 400);
+  uncached(await route.DELETE(request('DELETE', { targetKey: 'hot' })), 400);
   assert.deepEqual(facade.calls, []);
 });

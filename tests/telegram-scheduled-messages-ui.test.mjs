@@ -14,7 +14,9 @@ const flush = async () => { for (let i = 0; i < 12; i++) await Promise.resolve()
 const serverTime = Date.parse('2026-11-15T04:00:00Z');
 function snapshot(overrides = {}) {
   return { now: serverTime, timezone: 'Asia/Kuala_Lumpur', hasToken: true,
-    targets: ['official', 'group', 'hot'].map(key => ({ key, title: key, chatId: '-1001', ready: true, lastError: '' })),
+    targets: ['official', 'group', 'hot'].map(key => ({
+      key, title: key, address: `@${key}channel`, chatId: '-1001', revision: `revision-${key}`, builtIn: true, editable: true, ready: true, lastError: '',
+    })),
     plans: [], deliveries: [], counts: {},
     messageSummary: { nextRunAt: serverTime + 3600000, counts: {}, lastError: '' },
     gameTipsSummary: { nextRunAt: null, counts: {}, lastError: '' },
@@ -54,9 +56,10 @@ function harness(initial = snapshot(), { library, props = {}, confirm = () => tr
   function button(label) { const node = nodes().find(n => n.type === 'button' && (text(n) === label || n.props['aria-label'] === label)); assert.ok(node, `button ${label}`); return node; }
   function tab(id) { return nodes().find(node => node.props.id === `scheduled-tab-${id}`); }
   function field(label, type = 'input') { const node = nodes().find(n => n.type === 'label' && text(n).startsWith(label)); assert.ok(node, `label ${label}`); const input = nodes(node).find(n => n.type === type); assert.ok(input); return input; }
+  function check(label, checked = true) { field(label).props.onChange({ currentTarget: { checked } }); }
   function form() { return nodes().find(n => n.type === 'form'); }
   render();
-  return { calls, document, render, nodes, text: () => text(tree), button, field, form, tab,
+  return { calls, document, render, nodes, text: () => text(tree), button, field, form, tab, check,
     async ready() { await flush(); render(); },
     setGet(value) { getValue = value; }, deferGet(fn) { nextGet = fn; }, mutation(fn) { nextMutation = fn; }, upload(fn) { upload = fn; },
     async tick(ms) { time += ms; for (const timer of intervals.values()) if (timer.ms === ms) timer.fn(); await flush(); render(); },
@@ -91,12 +94,17 @@ test('saving sends unchanged text and an explicit Malaysia date rather than a br
     h.field('时间 1').props.onChange({ target: { value: '21:00' } }); h.render();
     h.button('添加时间').props.onClick(); h.render();
     h.field('时间 2').props.onChange({ target: { value: '09:00' } }); h.render();
+    for (const key of ['official', 'group', 'hot']) assert.equal(h.field(key).props.checked, false);
+    await h.form().props.onSubmit({ preventDefault() {} }); h.render();
+    assert.match(h.text(), /请至少选择一个发送频道/);
+    assert.ok(h.calls.every(call => call.method === 'GET'));
+    h.check('official'); h.check('hot'); h.render();
     await h.form().props.onSubmit({ preventDefault() {} }); h.render();
     const call = h.calls.find(c => c.method === 'POST');
     assert.equal(call.body.text, copy); assert.equal(call.body.name, 'Daily copy');
     assert.deepEqual(Array.from(call.body.times), ['09:00', '21:00']);
     assert.equal(call.body.calendarDate, '2026-11-15');
-    assert.deepEqual(Array.from(call.body.targetKeys), ['official', 'group', 'hot']);
+    assert.deepEqual(Array.from(call.body.targetKeys), ['official', 'hot']);
     assert.equal(call.body.enabled, false); assert.equal(h.form(), undefined);
     assert.match(h.text(), /暂停状态/);
   } finally { h.close(); }
@@ -129,7 +137,7 @@ test('Game Tips creates a disabled Malaysia daily plan with a caption preset and
     await h.tick(10000);
     assert.equal(preview(), gameTipsCaptions.gameTipsCaption('MEGA888', 'bonus-roundup', bodies[1]));
     assert.equal(h.field('official').props.checked, false);
-    h.field('official').props.onChange(); h.render();
+    h.check('official'); h.render();
     h.field('时间 1').props.onChange({ target: { value: '20:00' } }); h.render();
     h.button('添加时间').props.onClick(); h.render();
     h.field('时间 2').props.onChange({ target: { value: '09:30' } }); h.render();
@@ -359,6 +367,7 @@ test('an interrupted create keeps the same request id for a safe retry', async (
     h.field('后台名称').props.onChange({ target: { value: 'Retry daily copy' } }); h.render();
     h.field('发送文案', 'textarea').props.onChange({ target: { value: 'Exactly once plan' } }); h.render();
     h.field('时间 1').props.onChange({ target: { value: '18:00' } }); h.render();
+    h.check('official'); h.render();
     h.mutation(() => { throw new Error('Response interrupted'); });
     await h.form().props.onSubmit({ preventDefault() {} }); h.render();
     assert.equal(h.field('发送文案', 'textarea').props.value, 'Exactly once plan');
@@ -416,6 +425,50 @@ test('channel management sends stable creation IDs and revision-checked edits', 
   } finally { h.close(); }
 });
 
+test('built-in channels use the shared edit/delete flow without adding a check to a Game Tips draft', async () => {
+  const initial = snapshot({ gameTipsProviders: [{ name: 'MEGA888', count: 4 }] });
+  const h = harness(initial, { props: { workspace: 'gameTips' } });
+  try {
+    await h.ready(); h.tab('plans').props.onClick(); h.render();
+    h.button('添加 Game Tips').props.onClick(); h.render();
+    h.check('group'); h.check('hot'); h.render();
+    assert.equal(h.field('group').props.checked, true);
+    assert.equal(h.field('hot').props.checked, true);
+    h.tab('channels').props.onClick(); h.render();
+    h.button('编辑频道 official').props.onClick(); h.render();
+    assert.equal(h.field('Telegram 频道地址').props.value, '@officialchannel');
+    h.field('频道名称').props.onChange({ target: { value: 'Renamed official' } }); h.render();
+    const renamed = { ...initial.targets[0], title: 'Renamed official', revision: 'updated-official-revision' };
+    const channelForm = () => h.nodes(h.nodes().find(node => node.props.id === 'scheduled-panel-channels')).find(node => node.type === 'form');
+    h.mutation(() => ({ ...initial, targets: [renamed, ...initial.targets.slice(1)] }));
+    await channelForm().props.onSubmit({ preventDefault() {} }); h.render();
+    const edit = h.calls.find(call => call.body?.action === 'upsertTarget');
+    assert.equal(edit.body.key, 'official');
+    assert.equal(edit.body.revision, 'revision-official');
+    h.tab('plans').props.onClick(); h.render();
+    assert.equal(h.field('Renamed official').props.checked, false);
+    assert.equal(h.field('group').props.checked, true);
+    assert.equal(h.field('hot').props.checked, true);
+
+    h.tab('channels').props.onClick(); h.render();
+    h.mutation(() => ({ ...initial, targets: [renamed, initial.targets[1]] }));
+    h.button('删除频道 hot').props.onClick(); await h.ready();
+    const remove = h.calls.find(call => call.method === 'DELETE');
+    assert.deepEqual({ ...remove.body }, { targetKey: 'hot', revision: 'revision-hot' });
+    h.tab('plans').props.onClick(); h.render();
+    assert.match(h.text(), /此计划选择了 1 个已删除的频道/);
+    assert.equal(h.button('保存 Game Tips 排期').props.disabled, true);
+    h.button('从计划移除已删除频道').props.onClick(); h.render();
+    assert.equal(h.field('Renamed official').props.checked, false);
+    assert.equal(h.field('group').props.checked, true);
+    assert.equal(h.button('保存 Game Tips 排期').props.disabled, false);
+    h.field('时间 1').props.onChange({ target: { value: '13:00' } }); h.render();
+    await h.form().props.onSubmit({ preventDefault() {} }); h.render();
+    const create = h.calls.find(call => call.method === 'POST' && call.body?.gameTipsProvider);
+    assert.deepEqual(Array.from(create.body.targetKeys), ['group']);
+  } finally { h.close(); }
+});
+
 test('a video is uploaded in replayable chunks and its ID is associated only when the post is saved', async () => {
   const h = harness();
   const chunkBytes = 4 * 1024 * 1024;
@@ -444,6 +497,7 @@ test('a video is uploaded in replayable chunks and its ID is associated only whe
     h.field('发送文案', 'textarea').props.onChange({ target: { value: 'Video caption' } }); h.render();
     h.field('发送日期').props.onChange({ target: { value: '2026-11-16' } }); h.render();
     h.field('时间 1').props.onChange({ target: { value: '21:00' } }); h.render();
+    h.check('official'); h.render();
     await h.form().props.onSubmit({ preventDefault() {} });
     const post = h.calls.find(call => call.method === 'POST' && !call.path.includes('/upload?'));
     assert.equal(post.body.calendarDate, '2026-11-16');

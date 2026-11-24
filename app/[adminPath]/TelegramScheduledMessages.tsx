@@ -42,8 +42,8 @@ const mediaLabels = { photo: "照片", video: "视频", animation: "GIF" };
 const mediaLimits: Record<string, number> = { "image/jpeg": 10, "image/png": 10, "image/gif": 20, "video/mp4": 50 };
 const mediaExtensions: Record<string, string> = { jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", gif: "image/gif", mp4: "video/mp4" };
 const displayTime = (value: number | null | undefined) => value ? timeFormat.format(value) : "—";
-function freshDraft(today: string, targetKeys: ScheduledMessageTargetKey[]): PlanDraft {
-  return { requestId: crypto.randomUUID(), name: "", text: "", times: [""], enabled: false, calendarDate: today, repeatDaily: false, targetKeys, media: null };
+function freshDraft(today: string): PlanDraft {
+  return { requestId: crypto.randomUUID(), name: "", text: "", times: [""], enabled: false, calendarDate: today, repeatDaily: false, targetKeys: [], media: null };
 }
 function draftOf(plan: ScheduledMessagePlan, today: string, defaults: ScheduledMessageTargetKey[]): PlanDraft {
   return {
@@ -174,11 +174,14 @@ export default function TelegramScheduledMessages({ request, signInPath, workspa
     if (!draft.targetKeys.length) {
       setNotice({ error: true, message: "请至少选择一个发送频道。" }); return;
     }
+    if (missingDraftTargets.length) {
+      setNotice({ error: true, message: "请先从计划移除已删除的频道。" }); return;
+    }
     if (await mutate("save", draft.id ? "PUT" : "POST", payloadOf(draft), draft.enabled ? "计划已保存，后台将按排期发布。" : "计划已保存，处于暂停状态。")) setDraft(null);
   }
   function open(plan?: ScheduledMessagePlan) {
     if (draft && !window.confirm("放弃当前未保存的草稿？")) return;
-    setDraft(plan ? draftOf(plan, today, defaultTargetKeys) : freshDraft(today, defaultTargetKeys));
+    setDraft(plan ? draftOf(plan, today, legacyTargetKeys) : freshDraft(today));
     setCaptionExample(0);
     setTab("plans"); setNotice(null);
   }
@@ -186,7 +189,7 @@ export default function TelegramScheduledMessages({ request, signInPath, workspa
     if (draft && !window.confirm("放弃当前未保存的草稿？")) return;
     const chosen = provider || (readyProviders.length === 1 ? readyProviders[0].name : "");
     setDraft({
-      ...freshDraft(today, []), name: provider && provider.length <= 88 ? `Game Tips · ${provider}` : "Game Tips", repeatDaily: true,
+      ...freshDraft(today), name: provider && provider.length <= 88 ? `Game Tips · ${provider}` : "Game Tips", repeatDaily: true,
       gameTipsProvider: chosen, gameTipsCaptionPresetId: DEFAULT_GAME_TIPS_CAPTION_PRESET_ID,
     });
     setCaptionExample(0);
@@ -242,21 +245,29 @@ export default function TelegramScheduledMessages({ request, signInPath, workspa
       setNotice({ error: true, message: "请填写频道名称和 Telegram 地址。" }); return;
     }
     const payload = { ...channelDraft, action: "upsertTarget", title: channelDraft.title.trim(), address: channelDraft.address.trim() };
-    if (await mutate("save-channel", "POST", payload, "频道已保存，可在文案计划中选择。", "这个频道")) setChannelDraft(null);
+    if (await mutate("save-channel", "POST", payload, "频道已保存，可在发送计划中选择。", "这个频道")) setChannelDraft(null);
   }
   async function removeChannel(target: ScheduledMessageTarget) {
-    if (!window.confirm(`删除「${target.title}」？请先从仍使用该频道的计划移除它。`)) return;
+    if (!window.confirm(`删除「${target.title}」？此频道将从文案定时和 Game Tips 的频道列表移除。`)) return;
     if (await mutate(`delete-channel-${target.key}`, "DELETE", { targetKey: target.key, revision: target.revision }, "频道已删除。", "这个频道") && channelDraft?.key === target.key) setChannelDraft(null);
+  }
+  function setTargetChecked(key: ScheduledMessageTargetKey, checked: boolean) {
+    setDraft(previous => {
+      if (!previous || checked === previous.targetKeys.includes(key)) return previous;
+      const targetKeys = checked ? [...previous.targetKeys, key] : previous.targetKeys.filter(value => value !== key);
+      return { ...previous, targetKeys };
+    });
   }
   const now = anchor.current.now + Math.max(0, clientNow - anchor.current.receivedAt);
   const today = localDate(now);
   const plans = (status?.plans || []).filter(plan => Boolean(plan.gameTipsProvider) === gameTips);
   const current = draft?.id ? plans.find(plan => plan.id === draft.id) : null;
   const conflict = Boolean(draft?.id && (!current || current.revision !== draft.revision));
-  const targets = status?.targets || [], defaultTargetKeys = targets.filter(target => !target.editable).map(target => target.key);
+  const targets = status?.targets || [], legacyTargetKeys = targets.filter(target => !target.key.startsWith("custom:")).map(target => target.key);
   const targetsByKey = new Map(targets.map(target => [target.key, target]));
   const selectedTargets = draft?.targetKeys || [];
-  const targetTitles = (plan: ScheduledMessagePlan) => (plan.targetKeys ?? defaultTargetKeys).map(key => targetsByKey.get(key)?.title || key);
+  const missingDraftTargets = selectedTargets.filter(key => !targetsByKey.has(key));
+  const targetTitles = (plan: ScheduledMessagePlan) => (plan.targetKeys ?? legacyTargetKeys).map(key => targetsByKey.get(key)?.title || "已删除频道");
   const editedChannel = channelDraft?.key ? targetsByKey.get(channelDraft.key) : undefined;
   const channelConflict = Boolean(channelDraft?.key && editedChannel?.revision !== channelDraft.revision);
   const enabledPlans = plans.filter(plan => plan.enabled && (!plan.calendarDate || plan.calendarDate >= today));
@@ -330,7 +341,7 @@ export default function TelegramScheduledMessages({ request, signInPath, workspa
           {draft && <form ref={editor} className="cms-scheduled-card cms-scheduled-editor" onSubmit={save}>
             <fieldset disabled={Boolean(busy)}>
               <div className="cms-scheduled-heading"><h3>{isGameTipsDraft ? "Game Tips 发送计划" : draft.id ? "编辑文案计划" : "添加文案计划"}</h3><button type="button" className="cms-icon-button" aria-label="关闭文案编辑" onClick={() => { if (window.confirm("放弃当前未保存的草稿？")) setDraft(null); }}><X size={16} /></button></div>
-              {conflict && <div className="cms-scheduled-conflict" role="alert"><span>{current ? "这条计划已有新版本，当前草稿尚未保存。" : "这条计划已被删除，草稿尚未保存。"}</span>{current && <button type="button" className="cms-secondary" onClick={() => { if (window.confirm("加载最新版本会替换当前未保存的草稿，继续？")) setDraft(draftOf(current, today, defaultTargetKeys)); }}>加载最新版本</button>}</div>}
+              {conflict && <div className="cms-scheduled-conflict" role="alert"><span>{current ? "这条计划已有新版本，当前草稿尚未保存。" : "这条计划已被删除，草稿尚未保存。"}</span>{current && <button type="button" className="cms-secondary" onClick={() => { if (window.confirm("加载最新版本会替换当前未保存的草稿，继续？")) setDraft(draftOf(current, today, legacyTargetKeys)); }}>加载最新版本</button>}</div>}
               <div className="cms-scheduled-form-grid">
                 <label>后台名称<input required autoComplete="off" maxLength={100} value={draft.name} onChange={event => setDraft({ ...draft, name: event.target.value })} placeholder="例如：周五上午活动" /><small>供后台辨认这条文案。</small></label>
                 <div className="cms-scheduled-date-field">
@@ -388,12 +399,17 @@ export default function TelegramScheduledMessages({ request, signInPath, workspa
                 <div className="cms-scheduled-target-choices">{targets.map(target => {
                   const checked = selectedTargets.includes(target.key);
                   return <label key={target.key} className="cms-scheduled-target-choice">
-                    <input type="checkbox" checked={checked} onChange={() => setDraft({ ...draft, targetKeys: checked ? selectedTargets.filter(key => key !== target.key) : [...selectedTargets, target.key] })} />
+                    <input type="checkbox" checked={checked} onChange={event => setTargetChecked(target.key, event.currentTarget.checked)} />
                     <span><strong>{target.title}</strong><small>{target.address || target.chatId || "尚未连接"}</small></span>
                     <span className={target.ready ? "cms-scheduled-ready-text" : "cms-scheduled-muted"}>{target.ready ? "可发布" : "待检查"}</span>
                   </label>;
                 })}</div>
-                {!selectedTargets.length && <small>至少选择一个频道。</small>}
+                {targets.length ? <small>此计划只会发到你勾选的频道。</small> : <small>请先添加发送频道。</small>}
+                {missingDraftTargets.length > 0 && <div className="cms-scheduled-conflict" role="alert">
+                  <span>此计划选择了 {missingDraftTargets.length} 个已删除的频道。请移除后再保存。</span>
+                  <button type="button" className="cms-secondary" onClick={() => setDraft(previous => previous
+                    && { ...previous, targetKeys: previous.targetKeys.filter(key => targetsByKey.has(key)) })}>从计划移除已删除频道</button>
+                </div>}
               </div>
               <div className="cms-scheduled-time-fields"><div className="cms-scheduled-heading"><h3>发送时间（MYT）</h3><button type="button" className="cms-secondary" disabled={draft.times.length >= 24} onClick={() => setDraft({ ...draft, times: [...draft.times, ""] })}><Plus size={14} />添加时间</button></div>
                 {draft.times.map((time, index) => <div className="cms-scheduled-time-input" key={index}><label>时间 {index + 1}<input type="time" step="60" required value={time} onChange={event => setDraft({ ...draft, times: draft.times.map((value, i) => i === index ? event.target.value : value) })} /></label><button type="button" className="cms-icon-button" disabled={draft.times.length === 1} aria-label={`移除时间 ${index + 1}`} onClick={() => setDraft({ ...draft, times: draft.times.filter((_, i) => i !== index) })}><Trash2 size={14} /></button></div>)}
@@ -402,7 +418,7 @@ export default function TelegramScheduledMessages({ request, signInPath, workspa
               </div>
               <label className="cms-telegram-switch"><input type="checkbox" role="switch" checked={draft.enabled} onChange={event => setDraft({ ...draft, enabled: event.target.checked })} />保存后启用自动发送</label>
               {draft.enabled && !targetsReady && <small className="cms-scheduled-error">启用时将核实所选频道的发布权限。也可先暂停保存。</small>}
-              <div className="cms-scheduled-actions"><button className="cms-primary" type="submit" disabled={conflict || isGameTipsDraft && draft.enabled && !providerReady}>{busy === "save" ? <LoaderCircle size={15} className="cms-spin" /> : <Check size={15} />}{isGameTipsDraft ? "保存 Game Tips 排期" : "保存文案与时间"}</button><span className="cms-scheduled-muted">草稿需保存后才会生效</span></div>
+              <div className="cms-scheduled-actions"><button className="cms-primary" type="submit" disabled={conflict || missingDraftTargets.length > 0 || isGameTipsDraft && draft.enabled && !providerReady}>{busy === "save" ? <LoaderCircle size={15} className="cms-spin" /> : <Check size={15} />}{isGameTipsDraft ? "保存 Game Tips 排期" : "保存文案与时间"}</button><span className="cms-scheduled-muted">草稿需保存后才会生效</span></div>
             </fieldset>
           </form>}
           {!visiblePlans.length && !draft && <div className="cms-scheduled-empty">
@@ -413,17 +429,19 @@ export default function TelegramScheduledMessages({ request, signInPath, workspa
             <h4 className="cms-scheduled-day"><CalendarClock size={15} />{date ? <><time dateTime={date}>{date}</time>{date === today && <span className="cms-scheduled-pill cms-scheduled-good">今天</span>}</> : "每天重复"}</h4>
             {visiblePlans.filter(plan => (plan.calendarDate || "") === date).sort((left, right) => left.times[0].localeCompare(right.times[0])).map(plan => {
               const past = Boolean(date && date < today);
+              const missingTargets = plan.targetKeys?.some(key => !targetsByKey.has(key));
               return <article className="cms-scheduled-card" key={plan.id}>
                 <div className="cms-scheduled-heading">
                   <div><h3>{plan.name}</h3><span className={`cms-scheduled-pill ${plan.enabled && !past ? "cms-scheduled-good" : ""}`}>{past ? "日期已过" : plan.enabled ? "已启用" : "已暂停"}</span></div>
                   <div className="cms-scheduled-actions">
                     <button type="button" className="cms-secondary" disabled={Boolean(busy)} onClick={() => open(plan)}><Pencil size={14} />编辑</button>
-                    {!past && <button type="button" className="cms-secondary" disabled={Boolean(busy) || Boolean(plan.gameTipsProvider && !plan.enabled && !readyProviderKeys.has(gameTipsProviderKey(plan.gameTipsProvider)))} onClick={() => void mutate(`toggle-${plan.id}`, "PUT", payloadOf({ ...draftOf(plan, today, defaultTargetKeys), enabled: !plan.enabled }), plan.enabled ? "计划已暂停。" : "计划已启用。")}>{plan.enabled ? <Pause size={14} /> : <Play size={14} />}{plan.enabled ? "暂停" : "启用"}</button>}
+                    {!past && <button type="button" className="cms-secondary" disabled={Boolean(busy) || !plan.enabled && (missingTargets || Boolean(plan.gameTipsProvider && !readyProviderKeys.has(gameTipsProviderKey(plan.gameTipsProvider))))} onClick={() => void mutate(`toggle-${plan.id}`, "PUT", payloadOf({ ...draftOf(plan, today, legacyTargetKeys), enabled: !plan.enabled }), plan.enabled ? "计划已暂停。" : "计划已启用。")}>{plan.enabled ? <Pause size={14} /> : <Play size={14} />}{plan.enabled ? "暂停" : "启用"}</button>}
                     <button type="button" className="cms-icon-button" aria-label={`删除计划 ${plan.name}`} disabled={Boolean(busy)} onClick={() => void remove(plan)}><Trash2 size={15} /></button>
                   </div>
                 </div>
                 {plan.gameTipsProvider ? <div className="cms-scheduled-attachment-label"><Gamepad2 size={15} />{plan.gameTipsProvider} · {GAME_TIPS_CAPTION_PRESETS.find(preset => preset.id === (plan.gameTipsCaptionPresetId || DEFAULT_GAME_TIPS_CAPTION_PRESET_ID))?.label} · 随机 3 款游戏</div> : <p className="cms-scheduled-copy">{plan.text}</p>}
                 {plan.gameTipsIssue && <p className="cms-scheduled-error">{plan.gameTipsIssue}</p>}
+                {missingTargets && !past && <p className="cms-scheduled-error">此计划有已删除的频道，请编辑并更新发送频道。</p>}
                 {plan.media && <div className="cms-scheduled-attachment-label"><Paperclip size={14} />{describeMedia(plan.media)}</div>}
                 <div className="cms-scheduled-plan-times">{plan.times.map(time => <span key={time}><Clock3 size={12} />{time}</span>)}</div>
                 <small className="cms-scheduled-muted">频道 · {targetTitles(plan).join("、")}<br />下次 · {displayTime(plan.nextRunAt)}　最近安排 · {displayTime(plan.lastRunAt)}</small>
@@ -455,13 +473,14 @@ export default function TelegramScheduledMessages({ request, signInPath, workspa
               <button type="submit" className="cms-primary cms-scheduled-save-channel" disabled={channelConflict}>{busy === "save-channel" ? <LoaderCircle size={15} className="cms-spin" /> : <Check size={15} />}保存频道</button>
             </fieldset>
           </form>}
+          {!targets.length && <div className="cms-scheduled-empty">尚未添加发送频道。</div>}
           <div className="cms-scheduled-targets">{targets.map(target => <div key={target.key}>
             <div><strong>{target.title}</strong><small>{target.address || target.chatId || "尚未连接"}</small></div>
             <span className={`cms-scheduled-pill ${target.ready ? "cms-scheduled-good" : "cms-scheduled-attention"}`}>{target.ready ? "可发布" : "需要检查"}</span>
-            {target.editable ? <div className="cms-scheduled-target-actions">
+            <div className="cms-scheduled-target-actions">
               <button type="button" className="cms-secondary" disabled={Boolean(busy)} aria-label={`编辑频道 ${target.title}`} onClick={() => editChannel(target)}><Pencil size={14} />编辑</button>
-              <button type="button" className="cms-icon-button" disabled={Boolean(busy)} aria-label={`删除频道 ${target.title}`} onClick={() => void removeChannel(target)}><Trash2 size={15} /></button>
-            </div> : <span className="cms-scheduled-muted">内置频道</span>}
+              <button type="button" className="cms-secondary" disabled={Boolean(busy)} aria-label={`删除频道 ${target.title}`} onClick={() => void removeChannel(target)}><Trash2 size={14} />删除</button>
+            </div>
             {target.lastError && <p className="cms-scheduled-error">{target.lastError}</p>}
           </div>)}</div>
         </div>
