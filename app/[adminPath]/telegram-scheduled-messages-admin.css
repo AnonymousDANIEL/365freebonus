@@ -295,6 +295,8 @@
   gap: .7rem;
 }
 .cms-game-tips-image { padding: .7rem; }
+.cms-game-tips-image .cms-scheduled-actions { gap: .35rem; }
+.cms-scheduled-messages .cms-game-tips-delete { color: var(--cms-error); }
 .cms-game-tips-image img { aspect-ratio: 16 / 9; }
 .cms-game-tips-image strong, .cms-game-tips-image small { display: block; overflow-wrap: anywhere; }
 .cms-game-tips-image small { margin-top: .25rem; color: var(--cms-muted); }

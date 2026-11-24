@@ -332,7 +332,7 @@ export default function TelegramGameTipsLibrary({
       setData(result);
       onProvidersChanged(result.providers);
       setEdit(current => current?.id === asset.id ? null : current);
-      setNotice({ message: method === "PUT" ? "游戏图片设置已保存。" : "已删除停用的游戏图片。" });
+      setNotice({ message: method === "PUT" ? "游戏图片设置已保存。" : "游戏图片已删除。" });
     } catch (error) {
       setNotice(errorNotice(error));
       if (error instanceof Error && "status" in error && error.status === 409) setReload(value => value + 1);
@@ -346,7 +346,7 @@ export default function TelegramGameTipsLibrary({
     if (edit && edit.updatedAt === editCurrent?.updatedAt) void mutateAsset("PUT", edit);
   }
   function removeImage(asset: GameTipsAsset) {
-    if (!asset.enabled && window.confirm(`删除已停用的游戏图片「${asset.game}」？`)) void mutateAsset("DELETE", asset);
+    if (!busyRef.current && window.confirm(`删除「${asset.game}」的游戏图片？`)) void mutateAsset("DELETE", asset);
   }
 
   return <div className="cms-scheduled-panel cms-game-tips-library">
@@ -542,7 +542,7 @@ export default function TelegramGameTipsLibrary({
         <span className={`cms-scheduled-pill ${asset.enabled ? "cms-scheduled-good" : ""}`}>{asset.enabled ? "可用于抽图" : "已停用"}</span>
         <div className="cms-scheduled-actions">
           <button type="button" className="cms-secondary" aria-label={`编辑图片 ${asset.game}`} disabled={Boolean(busy)} onClick={() => { setNotice(null); setEdit(asset); }}><Pencil size={13} />编辑</button>
-          {!asset.enabled && <button type="button" className="cms-icon-button" aria-label={`删除停用图片 ${asset.game}`} disabled={Boolean(busy)} onClick={() => removeImage(asset)}><Trash2 size={13} /></button>}
+          <button type="button" className="cms-secondary cms-game-tips-delete" aria-label={`删除图片 ${asset.game}`} disabled={Boolean(busy)} onClick={() => removeImage(asset)}><Trash2 size={13} />删除</button>
         </div>
       </div>
     </article>)}</div>}

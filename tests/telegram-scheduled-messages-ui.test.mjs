@@ -249,6 +249,39 @@ test('creating a platform posts one logo and replacing it submits the displayed 
   } finally { h.close(); }
 });
 
+test('active and disabled Game Tips images expose Delete and only send a revision-checked request after confirmation', async () => {
+  const active = { id: 'active-image', provider: 'MEGA888', game: 'Dolphin Reef', enabled: true, updatedAt: 17 };
+  const disabled = { id: 'disabled-image', provider: 'MEGA888', game: 'Iceland', enabled: false, updatedAt: 11 };
+  const confirmation = [];
+  const providerUpdates = [];
+  const h = harness({ assets: [active, disabled], providers: [{ name: 'MEGA888', count: 1, logoId: 'logo-one' }] }, {
+    library: true,
+    confirm: message => { confirmation.push(message); return confirmation.length > 1; },
+    props: { active: true, plans: [], today: '2026-11-15',
+      onProvidersChanged: providers => providerUpdates.push(providers), onSchedule() {}, onEditSchedule() {},
+    },
+  });
+  try {
+    await h.ready();
+    const removeActive = h.button('删除图片 Dolphin Reef');
+    assert.ok(removeActive.props.children.includes('删除'));
+    assert.ok(h.button('删除图片 Iceland').props.children.includes('删除'));
+    removeActive.props.onClick(); await h.ready();
+    assert.deepEqual(confirmation, ['删除「Dolphin Reef」的游戏图片？']);
+    assert.ok(!h.calls.some(call => call.method === 'DELETE'));
+    h.mutation(() => ({ assets: [disabled], providers: [{ name: 'MEGA888', count: 0, logoId: 'logo-one' }] }));
+    h.button('删除图片 Dolphin Reef').props.onClick(); await h.ready();
+    const deletes = h.calls.filter(call => call.method === 'DELETE');
+    assert.equal(deletes.length, 1);
+    assert.equal(deletes[0].path, '/api/admin/telegram/game-tips');
+    assert.deepEqual({ ...deletes[0].body }, { id: 'active-image', updatedAt: 17 });
+    assert.equal(providerUpdates[0][0].count, 0);
+    assert.match(h.text(), /游戏图片已删除/);
+    assert.doesNotMatch(h.text(), /Dolphin Reef/);
+    assert.ok(h.button('删除图片 Iceland'));
+  } finally { h.close(); }
+});
+
 test('clock and countdown follow server time even when the browser clock differs', async () => {
   const h = harness();
   try {

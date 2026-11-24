@@ -45,6 +45,8 @@ export function ensureGameTipsAssets(db: DatabaseSync) {
   ) STRICT;
   CREATE UNIQUE INDEX IF NOT EXISTS telegram_game_tips_unique_live_game
   ON telegram_game_tips_assets(provider_key, game_key) WHERE enabled = 1;
+  CREATE INDEX IF NOT EXISTS telegram_game_tips_deleted_pending_cleanup
+  ON telegram_game_tips_assets(id) WHERE deleted_at <> 0 AND length(image) > 0;
   CREATE TABLE IF NOT EXISTS telegram_game_tips_logos (
     id TEXT PRIMARY KEY,
     provider_key TEXT NOT NULL,
@@ -90,7 +92,7 @@ function asAsset(row: AssetRow): GameTipsAsset {
 export function listGameTipAssets(db: DatabaseSync, provider?: string): GameTipsAsset[] {
   ensureGameTipsAssets(db);
   const filtered = provider !== undefined;
-  const rows = db.prepare(`SELECT ${assetFields} FROM telegram_game_tips_assets WHERE enabled = 1
+  const rows = db.prepare(`SELECT ${assetFields} FROM telegram_game_tips_assets WHERE enabled = 1 AND deleted_at = 0
     ${filtered ? "AND provider_key = ?" : ""} ORDER BY provider_key, game_key, id`)
     .all(...(filtered ? [gameTipsProviderKey(provider)] : [])) as AssetRow[];
   return rows.map(asAsset);
@@ -100,7 +102,7 @@ export function gameTipsProviders(db: DatabaseSync): GameTipsProvider[] {
   ensureGameTipsAssets(db);
   const rows = db.prepare(`WITH game_providers AS (
       SELECT provider_key, MIN(provider) AS name, COUNT(*) AS count FROM telegram_game_tips_assets
-      WHERE enabled = 1 GROUP BY provider_key
+      WHERE enabled = 1 AND deleted_at = 0 GROUP BY provider_key
     ), current_logos AS (
       SELECT provider_key, id, name FROM telegram_game_tips_logos WHERE active = 1
     ), current_backgrounds AS (
@@ -221,7 +223,8 @@ export async function uploadGameTipsAsset(db: DatabaseSync, request: Request, cl
   db.exec("BEGIN IMMEDIATE");
   try {
     if (!uploadMatches(db, id, hash)) {
-      const { count } = db.prepare("SELECT COUNT(*) AS count FROM telegram_game_tips_assets WHERE deleted_at = 0").get() as { count: number };
+      releaseDeletedGameTipsAssets(db);
+      const { count } = db.prepare("SELECT COUNT(*) AS count FROM telegram_game_tips_assets WHERE length(image) > 0").get() as { count: number };
       if (count >= maxAssets) throw new GameTipsError(`图库最多可保存 ${maxAssets} 张图片。`, 409);
       ensureDistinctGame(db, names, id);
       const now = clock();
@@ -262,25 +265,39 @@ export function deleteGameTipsAsset(db: DatabaseSync, input: Pick<GameTipsAsset,
   if (!uploadIdPattern.test(input.id)) throw new GameTipsError("图片编号不正确。");
   db.exec("BEGIN IMMEDIATE");
   try {
-    const row = currentAsset(db, input.id, input.updatedAt);
-    if (row.enabled) throw new GameTipsError("请先停用图片，再从图库移除。", 409);
-    const hasSlots = db.prepare("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'telegram_game_tip_slots'").get();
-    const inQueue = hasSlots && db.prepare(`SELECT 1 FROM telegram_game_tip_slots s
-      WHERE EXISTS (SELECT 1 FROM json_each(s.selection_json, '$.games') AS game WHERE json_extract(game.value, '$.id') = ?)
-        AND EXISTS (SELECT 1 FROM telegram_scheduled_message_deliveries d
-          WHERE d.plan_id = s.plan_id AND d.plan_revision = s.plan_revision AND d.run_at = s.run_at AND d.status IN ('pending','sending'))
-      LIMIT 1`).get(input.id);
-    if (inQueue) throw new GameTipsError("已有待发 Game Tips 使用这张图片，请等发送结束后再移除。", 409);
-    // Remember the ID so a delayed replay cannot restore the removed media.
-    db.prepare("UPDATE telegram_game_tips_assets SET image = X'', deleted_at = ? WHERE id = ?")
-      .run(Math.max(clock(), row.updatedAt + 1), input.id);
+    const row = db.prepare("SELECT updated_at, deleted_at FROM telegram_game_tips_assets WHERE id = ?").get(input.id) as
+      { updated_at: number; deleted_at: number } | undefined;
+    if (!row) throw new GameTipsError("找不到这张图片。", 404);
+    if (row.updated_at !== input.updatedAt) throw new GameTipsError("图片资料已更新，请刷新图库后再操作。", 409);
+    if (row.deleted_at === 0) {
+      // Keep the edit revision on the tombstone so an accepted delete can be replayed safely.
+      db.prepare("UPDATE telegram_game_tips_assets SET enabled = 0, deleted_at = ? WHERE id = ?")
+        .run(Math.max(clock(), row.updated_at + 1), input.id);
+    }
+    releaseDeletedGameTipsAssets(db);
     db.exec("COMMIT");
   } catch (error) { db.exec("ROLLBACK"); throw error; }
   return gameTipsLibrary(db);
 }
 
-function imageBytes(db: DatabaseSync, id: string): Uint8Array {
-  const row = db.prepare("SELECT image FROM telegram_game_tips_assets WHERE id = ? AND deleted_at = 0").get(id) as { image: Uint8Array } | undefined;
+export function releaseDeletedGameTipsAssets(db: DatabaseSync): void {
+  if (!initialized.has(db) && !db.prepare("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'telegram_game_tips_assets'").get()) return;
+  if (!db.prepare("SELECT 1 FROM telegram_game_tips_assets WHERE deleted_at <> 0 AND length(image) > 0 LIMIT 1").get()) return;
+  const hasSlots = db.prepare("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'telegram_game_tip_slots'").get();
+  db.exec(`UPDATE telegram_game_tips_assets AS asset SET image = X''
+    WHERE deleted_at <> 0 AND length(image) > 0 ${hasSlots ? `AND NOT EXISTS (
+      SELECT 1 FROM telegram_game_tip_slots s
+      JOIN telegram_scheduled_message_deliveries d
+        ON d.plan_id = s.plan_id AND d.plan_revision = s.plan_revision AND d.run_at = s.run_at
+      JOIN json_each(CASE WHEN json_valid(s.selection_json) THEN s.selection_json ELSE '{}' END, '$.games') game
+      WHERE d.status IN ('pending', 'sending')
+        AND CASE WHEN game.type = 'object' THEN game.value ->> '$.id' END = asset.id
+    )` : ""}`);
+}
+
+function imageBytes(db: DatabaseSync, id: string, visibleOnly = false): Uint8Array {
+  const row = db.prepare(`SELECT image FROM telegram_game_tips_assets
+    WHERE id = ? AND length(image) > 0 ${visibleOnly ? "AND deleted_at = 0" : ""}`).get(id) as { image: Uint8Array } | undefined;
   if (!row) throw new GameTipsError("找不到这张图片。", 404);
   return row.image;
 }
@@ -294,7 +311,7 @@ function privatePreview(image: Uint8Array, type = "image/jpeg"): Response {
 export function gameTipsImagePreview(db: DatabaseSync, id: string): Response {
   ensureGameTipsAssets(db);
   if (!uploadIdPattern.test(id)) throw new GameTipsError("图片编号不正确。");
-  return privatePreview(imageBytes(db, id));
+  return privatePreview(imageBytes(db, id, true));
 }
 
 async function normalizeLogo(bytes: Buffer, declared: string): Promise<Buffer> {

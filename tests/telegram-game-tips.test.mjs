@@ -22,7 +22,8 @@ for (const source of ["telegram-game-tips-types", "telegram-game-tips"]) {
 const require = createRequire(import.meta.url);
 const { deleteGameTipsAsset, gameTipsBackgroundPreview, gameTipsImagePreview, gameTipsLibrary, gameTipsLogoPreview,
   gameTipsPosterPreview, gameTipsProviderBackgroundId, gameTipsProviderLogo, gameTipsProviders, listGameTipAssets, renderGameTips,
-  updateGameTipsAsset, updateGameTipsBackgroundSlots, uploadGameTipsAsset, uploadGameTipsBackground, uploadGameTipsLogo } =
+  releaseDeletedGameTipsAssets, updateGameTipsAsset, updateGameTipsBackgroundSlots, uploadGameTipsAsset,
+  uploadGameTipsBackground, uploadGameTipsLogo } =
   require(path.join(fixture, "telegram-game-tips.js"));
 const { GAME_TIPS_DEFAULT_SLOTS, validGameTipsBackgroundSlots } = require(path.join(fixture, "telegram-game-tips-types.js"));
 
@@ -154,21 +155,66 @@ test("first initialization within a discarded transaction can be safely repeated
   } finally { db.close(); }
 });
 
-test("enabled and queued images cannot be deleted and a retired ID cannot be resurrected", async t => {
+test("enabled images delete immediately while queued snapshots stay intact until every delivery finishes", async t => {
   const db = database(t), id = randomUUID(), image = await png();
-  const created = await uploadGameTipsAsset(db, uploadRequest(image, { id }));
-  assert.throws(() => deleteGameTipsAsset(db, created.assets[0]), { status: 409 });
+  await uploadGameTipsAsset(db, uploadRequest(image, { id }));
+  await uploadGameTipsAsset(db, uploadRequest(await png("#0000ff"), { game: "Great Blue" }));
+  await uploadGameTipsAsset(db, uploadRequest(await png("#00ff00"), { game: "Iceland" }));
+  const games = listGameTipAssets(db);
+  const asset = games.find(game => game.id === id);
+  const selection = { provider: "MEGA888", games };
+  const poster = await renderGameTips(db, selection);
+  db.exec(`CREATE TABLE telegram_game_tip_slots(plan_id TEXT, plan_revision TEXT, run_at INTEGER, selection_json TEXT);
+    CREATE TABLE telegram_scheduled_message_deliveries(plan_id TEXT, plan_revision TEXT, run_at INTEGER, status TEXT);
+    INSERT INTO telegram_scheduled_message_deliveries VALUES ('a', 'b', 123, 'pending'), ('a', 'b', 123, 'sending');`);
+  db.prepare("INSERT INTO telegram_game_tip_slots VALUES ('a', 'b', 123, ?)").run(JSON.stringify(selection));
+  assert.throws(() => deleteGameTipsAsset(db, { ...asset, updatedAt: asset.updatedAt - 1 }), { status: 409 });
+  const deleted = deleteGameTipsAsset(db, asset);
+  assert.deepEqual(deleted, { assets: games.filter(game => game.id !== id), providers: [{ name: "MEGA888", count: 2 }] });
+  assert.deepEqual(deleteGameTipsAsset(db, asset), deleted);
+  assert.ok(!listGameTipAssets(db).some(game => game.id === id));
+  assert.throws(() => gameTipsImagePreview(db, id), { status: 404 });
+  assert.throws(() => updateGameTipsAsset(db, { ...asset, enabled: true }), { status: 404 });
+  await assert.rejects(uploadGameTipsAsset(db, uploadRequest(image, { id })), { status: 409 });
+  await uploadGameTipsAsset(db, uploadRequest(await png("#f0f0ff")));
+
+  db.exec("UPDATE telegram_scheduled_message_deliveries SET status = 'sent' WHERE status = 'sending'");
+  releaseDeletedGameTipsAssets(db);
+  assert.deepEqual(await renderGameTips(db, selection), poster);
+  db.exec("UPDATE telegram_scheduled_message_deliveries SET status = 'sent'");
+  releaseDeletedGameTipsAssets(db);
+  assert.equal(db.prepare("SELECT length(image) AS bytes FROM telegram_game_tips_assets WHERE id = ?").get(id).bytes, 0);
+  await assert.rejects(renderGameTips(db, selection), { status: 404 });
+});
+
+test("an unqueued disabled asset can still be deleted and cleanup is a no-op on an unopened library", async t => {
+  const db = database(t);
+  releaseDeletedGameTipsAssets(db);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM sqlite_schema").get().count, 0);
+  const created = await uploadGameTipsAsset(db, uploadRequest(await png()));
   const disabled = updateGameTipsAsset(db, { ...created.assets[0], enabled: false });
+  releaseDeletedGameTipsAssets(db);
+  assert.deepEqual(deleteGameTipsAsset(db, disabled.assets[0]), { assets: [], providers: [] });
+  assert.equal(db.prepare("SELECT length(image) AS bytes FROM telegram_game_tips_assets").get().bytes, 0);
+});
+
+test("retained deleted bytes count toward the asset cap until a terminal delivery permits reclamation", async t => {
+  const db = database(t), id = randomUUID();
+  const created = await uploadGameTipsAsset(db, uploadRequest(await png(), { id }));
   db.exec(`CREATE TABLE telegram_game_tip_slots(plan_id TEXT, plan_revision TEXT, run_at INTEGER, selection_json TEXT);
     CREATE TABLE telegram_scheduled_message_deliveries(plan_id TEXT, plan_revision TEXT, run_at INTEGER, status TEXT);
     INSERT INTO telegram_scheduled_message_deliveries VALUES ('a', 'b', 123, 'pending');`);
   db.prepare("INSERT INTO telegram_game_tip_slots VALUES ('a', 'b', 123, ?)")
     .run(JSON.stringify({ provider: "MEGA888", games: [{ id, game: "Dolphin Reef" }] }));
-  assert.throws(() => deleteGameTipsAsset(db, disabled.assets[0]), { status: 409 });
+  deleteGameTipsAsset(db, created.assets[0]);
+  const insert = db.prepare(`INSERT INTO telegram_game_tips_assets(id,provider,provider_key,game,game_key,enabled,image,upload_hash,created_at,updated_at)
+    VALUES (?, 'MEGA888', 'mega888', ?, ?, 1, X'01', '', 0, 0)`);
+  for (let i = 0; i < 249; i++) insert.run(randomUUID(), `Test ${i}`, `test ${i}`);
+  await assert.rejects(uploadGameTipsAsset(db, uploadRequest(await png())), { status: 409 });
   db.exec("UPDATE telegram_scheduled_message_deliveries SET status = 'sent'");
-  assert.deepEqual(deleteGameTipsAsset(db, disabled.assets[0]), { assets: [], providers: [] });
-  assert.throws(() => gameTipsImagePreview(db, id), { status: 404 });
-  await assert.rejects(uploadGameTipsAsset(db, uploadRequest(image, { id })), { status: 409 });
+  await uploadGameTipsAsset(db, uploadRequest(await png()));
+  assert.equal(db.prepare("SELECT length(image) AS bytes FROM telegram_game_tips_assets WHERE id = ?").get(id).bytes, 0);
+  assert.equal(listGameTipAssets(db).length, 250);
 });
 
 test("logo-first providers show with no games, preserve canonical naming and expose only the current transparent WebP", async t => {

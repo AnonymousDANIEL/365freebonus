@@ -268,6 +268,31 @@ test('Game Tips reuses the same photo and caption for a definitive 429 retry and
  assert.ok(sendsMedia().slice(-2).every(call=>!call.p.caption.includes('Renamed Game')));
 });
 
+test('deleting an enabled Game Tips image preserves its queued retry and excludes it from the next post', async () => {
+ const removed = await addGame('Dolphin Reef');
+ await addGame('Iceland');
+ await addGame('Great Blue');
+ await create(gamePlan({times:['09:00','09:05']}));
+ now = onlyPlan().nextRunAt;
+ telegram.results[telegram.ids.official] = [{ok:false,code:429,retryAfter:30}];
+ await tick();
+ const firstAttempt = sendsMedia()[0];
+ const library = gameTips.deleteGameTipsAsset(db(), removed, clock);
+ assert.ok(!library.assets.some(asset => asset.id === removed.id));
+ assert.equal(library.providers[0].count,2);
+ assert.throws(() => gameTips.gameTipsImagePreview(db(), removed.id), {status:404});
+ await addGame('New Game');
+ now += 30_000; await tick();
+ const retry = sendsMedia()[1];
+ assert.deepEqual(retry.upload.bytes, firstAttempt.upload.bytes);
+ assert.equal(retry.p.caption, firstAttempt.p.caption);
+ assert.equal(jobs()[0].status,'sent');
+ assert.equal(db().prepare('SELECT length(image) AS bytes FROM telegram_game_tips_assets WHERE id=?').get(removed.id).bytes,0);
+ now = onlyPlan().nextRunAt; await tick();
+ assert.equal(sendsMedia().length,3);
+ assert.deepEqual(new Set(gameSlot(now).games.map(game=>game.game)),new Set(['Iceland','Great Blue','New Game']));
+});
+
 test('a legacy queued retry preserves its saved caption and does not acquire a rotation ID', async () => {
  for (const name of ['Dolphin Reef','Iceland','Great Blue']) await addGame(name);
  await create(gamePlan());

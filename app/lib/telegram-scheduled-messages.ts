@@ -3,7 +3,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { getSqlite } from "./sqlite";
 import { telegramRequest } from "./telegram-bot";
 import { readScheduledMessageMedia, sendScheduledMessageMedia } from "./telegram-scheduled-media";
-import { ensureGameTipsAssets, gameTipsProviderBackgroundId, gameTipsProviderKey, gameTipsProviderLogo, gameTipsProviders, listGameTipAssets, renderGameTips } from "./telegram-game-tips";
+import { ensureGameTipsAssets, gameTipsProviderBackgroundId, gameTipsProviderKey, gameTipsProviderLogo, gameTipsProviders, listGameTipAssets, releaseDeletedGameTipsAssets, renderGameTips } from "./telegram-game-tips";
 import { DEFAULT_GAME_TIPS_CAPTION_PRESET_ID, GAME_TIPS_CAPTION_BODIES, gameTipsCaption, isGameTipsCaptionPresetId } from "./telegram-game-tips-captions";
 import { GAME_TIPS_PROVIDER_LIMIT, type GameTipsProvider, type GameTipsSelection } from "./telegram-game-tips-types";
 import type { ScheduledMessageStatus, ScheduledMessagePlan, ScheduledMessagePlanInput, ScheduledMessageTargetInput, ScheduledMessageTargetKey } from "./telegram-scheduled-messages-types";
@@ -672,6 +672,7 @@ export async function deliverScheduledMessagesOnce(decrypt: Decrypt, clock = Dat
       }
     }
     releaseTerminalPayloads(db);
+    releaseDeletedGameTipsAssets(db);
     db.prepare("UPDATE telegram_scheduled_message_runtime SET last_completed_at=?,heartbeat_at=?,last_error=? WHERE id='primary' AND lease_id=?")
       .run(clock(), clock(), active && hasBlockedPlan(db) ? runtime(db).last_error || CHANGED_ERROR : "", lease);
   } catch (error) {
