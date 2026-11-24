@@ -49,7 +49,8 @@ exports.sendScheduledMessageMedia=(db,token,chatId,caption,id)=>{
 const require = createRequire(import.meta.url), scheduler = require(path.join(fixture, 'telegram-scheduled-messages.js'));
 const telegram = require(path.join(fixture, 'telegram-bot.js')), { getSqlite } = require(path.join(fixture, 'sqlite.js'));
 const gameTips = require(path.join(fixture, 'telegram-game-tips.js'));
-const { DEFAULT_GAME_TIPS_CAPTION_PRESET_ID, gameTipsCaption } = require(path.join(fixture, 'telegram-game-tips-captions.js'));
+const { DEFAULT_GAME_TIPS_CAPTION_PRESET_ID, GAME_TIPS_CAPTION_BODIES, gameTipsCaption } =
+ require(path.join(fixture, 'telegram-game-tips-captions.js'));
 const oldData = process.env.DATA_DIR, start = Date.parse('2026-11-15T00:59:00Z'), MINUTE = 60_000, DAY = 86_400_000;
 const cipher = 'fixture-saved-ciphertext', token = '12345678:fixture-saved-token';
 let now = start;
@@ -119,10 +120,16 @@ test('Game Tips sends one generated photo with the selected caption and buttons 
  assert.equal(onlyPlan().gameTipsCaptionPresetId,'featured-selection');
  const first = onlyPlan().nextRunAt;
  now=first; await tick();
- const selection=gameSlot(first), caption=gameTipsCaption(selection.provider,'featured-selection');
+ const selection=gameSlot(first);
+ const body=GAME_TIPS_CAPTION_BODIES.find(item=>item.id===selection.captionBodyId);
+ assert.ok(body);
+ const caption=gameTipsCaption(selection.provider,'featured-selection',body);
  assert.equal(selection.provider,'MEGA888');
- assert.equal(selection.captionPresetId,'featured-selection'); assert.equal(selection.caption,caption);
+ assert.equal(selection.captionPresetId,'featured-selection');
+ assert.equal(selection.caption,caption);
  assert.match(caption,/^Featured Game Picks🔥\n\n365FreeBonus X MEGA888\n\n/);
+ assert.ok(caption.includes(body.copy));
+ assert.ok(caption.endsWith('🔥Free Credit Trusted Wallet🔥\nFind Free Bonus Offers\n🌐 EXPLORE BONUS OFFERS:\nhttps://365freebonus.com'));
  assert.ok(selection.games.every(({game})=>!caption.includes(game)));
  assert.equal(sends().length,0);
  assert.equal(sendsMedia().length,2);
@@ -145,6 +152,39 @@ test('Game Tips sends one generated photo with the selected caption and buttons 
  assert.equal(status().gameTipsSummary.nextRunAt,first+DAY);
  assert.equal(status().messageSummary.counts.sent,0);
  assert.equal(status().messageSummary.nextRunAt,null);
+});
+
+test('Game Tips rotates all ten caption bodies per platform across plans, days and a database reopen', async () => {
+ const names=['Dolphin Reef','Iceland','Great Blue'];
+ for (const name of names) {
+   await addGame(name);
+   await addGame(name,'918KISS');
+ }
+ await create(gamePlan({name:'Primary Mega',times:['09:00']}));
+ await create(gamePlan({name:'Other platform',times:['09:01'],gameTipsProvider:'918KISS'}));
+ await create(gamePlan({name:'Second Mega',times:['09:02'],gameTipsProvider:'mega888'}));
+ const catalog=GAME_TIPS_CAPTION_BODIES.map(body=>body.id);
+ assert.equal(new Set(catalog).size,10);
+ const mega=[], kiss=[];
+ for (let day=0;day<6;day++) {
+   if (day===2) close();
+   for (let minute=0;minute<3;minute++) {
+     now=start+day*DAY+(minute+1)*MINUTE;
+     await tick();
+     const slot=gameSlot(now);
+     const history=minute===1 ? kiss : mega;
+     history.push(slot.captionBodyId);
+     assert.equal(slot.caption,sendsMedia().at(-1).p.caption);
+     assert.match(slot.caption,/^News Update Game Tips🔥\n\n365FreeBonus X (MEGA888|918KISS)\n\n/);
+     assert.ok(names.every(name=>!slot.caption.includes(name)));
+     assert.equal(slot.captionCycle.length,((history.length-1)%catalog.length)+1);
+   }
+ }
+ assert.equal(sendsMedia().length,18);
+ assert.deepEqual(new Set(mega.slice(0,10)),new Set(catalog));
+ assert.notEqual(mega[9],mega[10]);
+ assert.equal(new Set(mega.slice(10)).size,2);
+ assert.equal(new Set(kiss).size,6);
 });
 
 test('Game Tips reports a depleted pool and skips the old day at MYT rollover', async () => {
@@ -205,6 +245,7 @@ test('Game Tips reuses the same photo and caption for a definitive 429 retry and
  const firstAttempt=sendsMedia().find(call=>call.p.chat_id===telegram.ids.official);
  assert.equal(gameSlot(first).logoId,logo);
  assert.equal(gameSlot(first).backgroundId,background);
+ const originalSnapshot=gameSlot(first);
  const id=gameSlot(first).games[0].id;
  const asset=gameTips.listGameTipAssets(db()).find(entry=>entry.id===id);
  gameTips.updateGameTipsAsset(db(), {...asset,game:'Renamed Game'}, clock);
@@ -214,6 +255,7 @@ test('Game Tips reuses the same photo and caption for a definitive 429 retry and
  const official=sendsMedia().filter(call=>call.p.chat_id===telegram.ids.official);
  assert.equal(official.length,2);
  assert.equal(official[1].p.caption,firstAttempt.p.caption);
+ assert.deepEqual(gameSlot(first),originalSnapshot);
  assert.deepEqual(official[1].upload.bytes,firstAttempt.upload.bytes);
  assert.equal(sendsMedia().filter(call=>call.p.chat_id===telegram.ids.group).length,1);
  assert.equal(jobs().find(job=>job.target_key==='group').status,'unknown');
@@ -226,6 +268,26 @@ test('Game Tips reuses the same photo and caption for a definitive 429 retry and
  assert.ok(sendsMedia().slice(-2).every(call=>!call.p.caption.includes('Renamed Game')));
 });
 
+test('a legacy queued retry preserves its saved caption and does not acquire a rotation ID', async () => {
+ for (const name of ['Dolphin Reef','Iceland','Great Blue']) await addGame(name);
+ await create(gamePlan());
+ const first=onlyPlan().nextRunAt;
+ telegram.results[telegram.ids.official]=[{ok:false,code:429,retryAfter:30}];
+ now=first; await tick();
+ const legacyCopy=gameTipsCaption('MEGA888','bonus-roundup');
+ db().prepare(`
+   UPDATE telegram_game_tip_slots SET selection_json=json_set(
+     json_remove(selection_json,'$.captionBodyId','$.captionCycle'),
+     '$.captionPresetId','bonus-roundup','$.caption',?)
+ `).run(legacyCopy);
+ close();
+ now+=30_000; await tick();
+ assert.equal(sendsMedia().length,2);
+ assert.equal(sendsMedia().at(-1).p.caption,legacyCopy);
+ assert.equal(gameSlot(first).caption,legacyCopy);
+ assert.equal(gameSlot(first).captionBodyId,undefined);
+});
+
 test('legacy Game Tips plans and queued retries use the default caption, and migration preserves workspace history across plan edits and deletion', async () => {
  for (const name of ['Dolphin Reef','Iceland','Great Blue']) await addGame(name);
  await create(gamePlan({gameTipsCaptionPresetId:'bonus-roundup'}));
@@ -233,7 +295,7 @@ test('legacy Game Tips plans and queued retries use the default caption, and mig
  await create({times:['09:02'],targetKeys:['group']});
  telegram.results[telegram.ids.official]=[{ok:false,code:429,retryAfter:30}];
  now=first; await tick();
- db().prepare(`UPDATE telegram_game_tip_slots SET selection_json=json_remove(selection_json,'$.caption','$.captionPresetId')`).run();
+ db().prepare(`UPDATE telegram_game_tip_slots SET selection_json=json_remove(selection_json,'$.caption','$.captionPresetId','$.captionBodyId','$.captionCycle')`).run();
  db().exec(`DROP INDEX telegram_scheduled_message_game_tips_history;
    DROP INDEX telegram_scheduled_message_regular_history;
    ALTER TABLE telegram_scheduled_message_plans DROP COLUMN game_tips_caption_preset_id;

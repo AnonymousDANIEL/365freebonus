@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { CalendarClock, Check, Clock3, Gamepad2, History, Images, LoaderCircle, MessageSquareText, Paperclip, Pause, Pencil, Play, Plus, Radio, RefreshCw, Trash2, Upload, X } from "lucide-react";
-import { DEFAULT_GAME_TIPS_CAPTION_PRESET_ID, GAME_TIPS_CAPTION_PRESETS, gameTipsCaption } from "../lib/telegram-game-tips-captions";
+import { DEFAULT_GAME_TIPS_CAPTION_PRESET_ID, GAME_TIPS_CAPTION_BODIES, GAME_TIPS_CAPTION_PRESETS, gameTipsCaption } from "../lib/telegram-game-tips-captions";
 import { gameTipsProviderKey, type GameTipsProvider } from "../lib/telegram-game-tips-types";
 import type { ScheduledMessagePlan, ScheduledMessagePlanInput, ScheduledMessageStatus, ScheduledMessageTarget, ScheduledMessageTargetKey } from "../lib/telegram-scheduled-messages-types";
 import TelegramGameTipsLibrary from "./TelegramGameTipsLibrary";
@@ -108,6 +108,7 @@ export default function TelegramScheduledMessages({ request, signInPath, workspa
   const [status, setStatus] = useState<ScheduledMessageStatus | null>(null);
   const [tab, setTab] = useState<Tab>(gameTips ? "library" : "plans");
   const [draft, setDraft] = useState<PlanDraft | null>(null);
+  const [captionExample, setCaptionExample] = useState(0);
   const [channelDraft, setChannelDraft] = useState<ChannelDraft | null>(null);
   const [showPast, setShowPast] = useState(false);
   const [notice, setNotice] = useState<Notice | null>(null);
@@ -178,6 +179,7 @@ export default function TelegramScheduledMessages({ request, signInPath, workspa
   function open(plan?: ScheduledMessagePlan) {
     if (draft && !window.confirm("放弃当前未保存的草稿？")) return;
     setDraft(plan ? draftOf(plan, today, defaultTargetKeys) : freshDraft(today, defaultTargetKeys));
+    setCaptionExample(0);
     setTab("plans"); setNotice(null);
   }
   function openGameTips(provider?: string) {
@@ -187,6 +189,7 @@ export default function TelegramScheduledMessages({ request, signInPath, workspa
       ...freshDraft(today, []), name: provider && provider.length <= 88 ? `Game Tips · ${provider}` : "Game Tips", repeatDaily: true,
       gameTipsProvider: chosen, gameTipsCaptionPresetId: DEFAULT_GAME_TIPS_CAPTION_PRESET_ID,
     });
+    setCaptionExample(0);
     setTab("plans"); setNotice(null);
   }
   async function remove(plan: ScheduledMessagePlan) {
@@ -273,6 +276,7 @@ export default function TelegramScheduledMessages({ request, signInPath, workspa
   const providerReady = (draftProvider?.count ?? 0) >= 3;
   const gameTipsProviderName = draftProvider?.name ?? draft?.gameTipsProvider ?? "";
   const captionPresetId = draft?.gameTipsCaptionPresetId || DEFAULT_GAME_TIPS_CAPTION_PRESET_ID;
+  const captionBody = GAME_TIPS_CAPTION_BODIES[captionExample];
   const gameTipsTimeCount = new Set(draft?.times.filter(time => hourMinute.test(time))).size;
   const pastCount = plans.filter(plan => plan.calendarDate && plan.calendarDate < today).length;
   const visiblePlans = plans.filter(plan => showPast || !plan.calendarDate || plan.calendarDate >= today);
@@ -337,7 +341,7 @@ export default function TelegramScheduledMessages({ request, signInPath, workspa
               </div>
               {isGameTipsDraft ? <div className="cms-scheduled-media cms-game-tips-plan">
                 <div className="cms-scheduled-heading">
-                  <div><h3>随机选图与发送文案</h3><p>每次从同一平台抽 3 款不同游戏，合成一张图并附上所选文案。</p></div>
+                  <div><h3>随机选图与发送文案</h3><p>每次从同一平台抽 3 款不同游戏，合成一张图并附上文案。</p></div>
                   <button type="button" className="cms-secondary" onClick={() => setTab("library")}><Images size={14} />管理图库</button>
                 </div>
                 <label>游戏平台<select value={gameTipsProviderName} required onChange={event => setDraft({ ...draft, gameTipsProvider: event.target.value })}>
@@ -348,11 +352,15 @@ export default function TelegramScheduledMessages({ request, signInPath, workspa
                 {!providerReady && <small className="cms-scheduled-error">请在图库为此平台准备至少 3 款不同且已启用的游戏。</small>}
                 <label>发送文案<select value={captionPresetId} onChange={event => setDraft({ ...draft, gameTipsCaptionPresetId: event.target.value })}>
                   {GAME_TIPS_CAPTION_PRESETS.map(preset => <option value={preset.id} key={preset.id}>{preset.label}</option>)}
-                </select></label>
+                </select><small>这里选择文案标题。每次排期发送时，系统会从 {GAME_TIPS_CAPTION_BODIES.length} 条中段文案中随机选一条。</small></label>
                 <details className="cms-game-tips-copy" open>
                   <summary>预览 Telegram 文案</summary>
-                  <p>{gameTipsCaption(gameTipsProviderName || "游戏平台", captionPresetId)}</p>
+                  <p aria-live="polite">{gameTipsCaption(gameTipsProviderName || "游戏平台", captionPresetId, captionBody)}</p>
                   <small className="cms-scheduled-muted">Telegram 按钮 · Visit website · NEED HELP?</small>
+                  <div className="cms-scheduled-actions">
+                    <button type="button" className="cms-secondary" onClick={() => setCaptionExample(index => (index + 1) % GAME_TIPS_CAPTION_BODIES.length)}><RefreshCw size={14} />下一条示例</button>
+                    <span className="cms-scheduled-muted">示例 {captionExample + 1} / {GAME_TIPS_CAPTION_BODIES.length}</span>
+                  </div>
                 </details>
                 {providerReady && <a className="cms-secondary cms-scheduled-save-channel" href={`/api/admin/telegram/game-tips?preview=${encodeURIComponent(gameTipsProviderName)}`} target="_blank" rel="noopener noreferrer"><Images size={14} />预览合成图样式 ↗</a>}
               </div> : <>

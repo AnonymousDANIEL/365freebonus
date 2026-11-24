@@ -4,7 +4,7 @@ import { getSqlite } from "./sqlite";
 import { telegramRequest } from "./telegram-bot";
 import { readScheduledMessageMedia, sendScheduledMessageMedia } from "./telegram-scheduled-media";
 import { ensureGameTipsAssets, gameTipsProviderBackgroundId, gameTipsProviderKey, gameTipsProviderLogo, gameTipsProviders, listGameTipAssets, renderGameTips } from "./telegram-game-tips";
-import { DEFAULT_GAME_TIPS_CAPTION_PRESET_ID, gameTipsCaption, isGameTipsCaptionPresetId } from "./telegram-game-tips-captions";
+import { DEFAULT_GAME_TIPS_CAPTION_PRESET_ID, GAME_TIPS_CAPTION_BODIES, gameTipsCaption, isGameTipsCaptionPresetId } from "./telegram-game-tips-captions";
 import { GAME_TIPS_PROVIDER_LIMIT, type GameTipsProvider, type GameTipsSelection } from "./telegram-game-tips-types";
 import type { ScheduledMessageStatus, ScheduledMessagePlan, ScheduledMessagePlanInput, ScheduledMessageTargetInput, ScheduledMessageTargetKey } from "./telegram-scheduled-messages-types";
 
@@ -375,7 +375,9 @@ export function deleteScheduledMessagePlan(db: DatabaseSync, input: { id: string
   return scheduledMessageStatus(db, clock);
 }
 
-type GameTipsSnapshot = GameTipsSelection & { captionPresetId?: string; caption?: string };
+type GameTipsSnapshot = GameTipsSelection & {
+  captionPresetId?: string; caption?: string; captionBodyId?: string; captionCycle?: string[];
+};
 function parseGameTipsSelection(value: string): GameTipsSnapshot | null {
   try {
     const selection = JSON.parse(value) as GameTipsSnapshot;
@@ -388,6 +390,24 @@ function parseGameTipsSelection(value: string): GameTipsSnapshot | null {
     return selection;
   } catch { return null; }
 }
+
+// Keep the rotation in the occurrence snapshot so it advances with the queue
+// transaction, including when multiple plans for a platform become due together.
+function pickGameTipsCaptionBody(db: DatabaseSync, providerKey: string) {
+  const previous = db.prepare(`SELECT selection_json FROM telegram_game_tip_slots
+    WHERE provider_key=? AND CASE WHEN json_valid(selection_json)
+      THEN json_type(selection_json, '$.captionCycle')='array' ELSE 0 END
+    ORDER BY rowid DESC LIMIT 1`).get(providerKey) as { selection_json: string } | undefined;
+  const used = previous ? parseGameTipsSelection(previous.selection_json)?.captionCycle : undefined;
+  const pool = GAME_TIPS_CAPTION_BODIES;
+  const cycle = Array.isArray(used)
+    ? [...new Set(used.filter(id => pool.some(body => body.id === id)))] : [];
+  const remaining = pool.filter(body => !cycle.includes(body.id));
+  const choices = remaining.length ? remaining : pool.filter(body => body.id !== cycle.at(-1));
+  const body = choices[randomInt(choices.length)];
+  return { body, cycle: [...(remaining.length ? cycle : []), body.id] };
+}
+
 function pickGameTips(db: DatabaseSync, row: Plan, at: number): GameTipsSnapshot | null {
   const key = gameTipsProviderKey(row.game_tips_provider), today = dayStart(at);
   const candidates = [...new Map(listGameTipAssets(db, row.game_tips_provider)
@@ -424,13 +444,16 @@ function pickGameTips(db: DatabaseSync, row: Plan, at: number): GameTipsSnapshot
   const backgroundId = gameTipsProviderBackgroundId(db, row.game_tips_provider);
   const provider = logo?.name ?? candidates[0].provider;
   const captionPresetId = captionPresetOrDefault(row.game_tips_caption_preset_id);
+  const { body, cycle } = pickGameTipsCaptionBody(db, key);
   const selection: GameTipsSnapshot = {
     provider,
     ...(logo ? { logoId: logo.logoId } : {}),
     ...(backgroundId ? { backgroundId } : {}),
     games: candidates.slice(0, 3).map(({ id, game }) => ({ id, game })),
     captionPresetId,
-    caption: gameTipsCaption(provider, captionPresetId),
+    captionBodyId: body.id,
+    captionCycle: cycle,
+    caption: gameTipsCaption(provider, captionPresetId, body),
   };
   db.prepare("INSERT INTO telegram_game_tip_slots(plan_id,plan_revision,run_at,provider_key,selection_json) VALUES(?,?,?,?,?)")
     .run(row.id, row.revision, at, key, JSON.stringify(selection));

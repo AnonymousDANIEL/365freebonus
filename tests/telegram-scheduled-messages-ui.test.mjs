@@ -115,9 +115,19 @@ test('Game Tips creates a disabled Malaysia daily plan with a caption preset and
     assert.ok(h.nodes().some(node => node.type === 'a' && node.props.href === '/api/admin/telegram/game-tips?preview=MEGA888'));
     assert.ok(!h.nodes().some(node => node.type === 'textarea'));
     assert.equal(h.field('发送文案', 'select').props.value, gameTipsCaptions.DEFAULT_GAME_TIPS_CAPTION_PRESET_ID);
-    assert.match(h.text(), /News Update Game Tips🔥/);
     h.field('发送文案', 'select').props.onChange({ target: { value: 'bonus-roundup' } }); h.render();
-    assert.match(h.text(), /Game Tips & Bonus Roundup🔥/);
+    const bodies = gameTipsCaptions.GAME_TIPS_CAPTION_BODIES;
+    assert.equal(bodies.length, 10);
+    const preview = () => h.nodes().find(node => node.type === 'p' && node.props['aria-live'] === 'polite').props.children;
+    for (const [index, body] of bodies.entries()) {
+      assert.match(h.text(), new RegExp(`示例 ${index + 1} / 10`));
+      assert.equal(preview(), gameTipsCaptions.gameTipsCaption('MEGA888', 'bonus-roundup', body));
+      h.button('下一条示例').props.onClick(); h.render();
+    }
+    assert.match(h.text(), /示例 1 \/ 10/);
+    h.button('下一条示例').props.onClick(); h.render();
+    await h.tick(10000);
+    assert.equal(preview(), gameTipsCaptions.gameTipsCaption('MEGA888', 'bonus-roundup', bodies[1]));
     assert.equal(h.field('official').props.checked, false);
     h.field('official').props.onChange(); h.render();
     h.field('时间 1').props.onChange({ target: { value: '20:00' } }); h.render();
@@ -128,6 +138,7 @@ test('Game Tips creates a disabled Malaysia daily plan with a caption preset and
     const call = h.calls.find(entry => entry.method === 'POST');
     assert.equal(call.body.gameTipsProvider, 'MEGA888');
     assert.equal(call.body.gameTipsCaptionPresetId, 'bonus-roundup');
+    assert.ok(!Object.keys(call.body).some(key => /example|body|copy|variant/i.test(key)));
     assert.equal(call.body.enabled, false);
     assert.equal(call.body.calendarDate, '');
     assert.equal(call.body.text, '');
