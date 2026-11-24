@@ -1,10 +1,11 @@
 "use client";
 
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { CalendarClock, Check, Gamepad2, Image, Images, LoaderCircle, Pencil, Plus, RefreshCw, Trash2, Upload, X } from "lucide-react";
+import { CalendarClock, Check, Eye, Gamepad2, Image, Images, LoaderCircle, Pencil, Plus, RefreshCw, Trash2, Upload, X } from "lucide-react";
 import {
-  GAME_TIPS_NAME_LIMIT, GAME_TIPS_PROVIDER_LIMIT, GAME_TIPS_UPLOAD_LIMIT, gameTipsProviderKey,
-  type GameTipsAsset, type GameTipsLibrary, type GameTipsProvider,
+  GAME_TIPS_DEFAULT_SLOTS, GAME_TIPS_NAME_LIMIT, GAME_TIPS_PROVIDER_LIMIT, GAME_TIPS_UPLOAD_LIMIT,
+  gameTipsProviderKey, validGameTipsBackgroundSlots,
+  type GameTipsAsset, type GameTipsBackgroundSlot, type GameTipsLibrary, type GameTipsProvider,
 } from "../lib/telegram-game-tips-types";
 import type { ScheduledMessagePlan } from "../lib/telegram-scheduled-messages-types";
 
@@ -21,11 +22,31 @@ type Props = {
 };
 type UploadDraft = { id: string; file: File; game: string };
 type LogoDraft = { id: string; provider: string; file: File | null; providerKey?: string; previousId?: string };
+type SlotFields = Record<keyof GameTipsBackgroundSlot, string>;
+type BackgroundDraft = { id: string; provider: string; file: File | null; previousId?: string; slots: SlotFields[] };
 type Feedback = { message: string; error?: boolean; expired?: boolean };
 
 const endpoint = "/api/admin/telegram/game-tips";
 const logoEndpoint = `${endpoint}/logo`;
+const backgroundEndpoint = `${endpoint}/background`;
 const imageTypes = "image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp";
+const slotFields = [
+  { field: "x", label: "距左边" }, { field: "y", label: "距上边" },
+  { field: "width", label: "宽度" }, { field: "height", label: "高度" },
+] as const;
+
+function editableSlots(slots: readonly GameTipsBackgroundSlot[]): SlotFields[] {
+  return slots.map(({ x, y, width, height }) => ({
+    x: String(x), y: String(y), width: String(width), height: String(height),
+  }));
+}
+
+function numericSlots(slots: SlotFields[]): GameTipsBackgroundSlot[] {
+  const parse = (value: string) => value.trim() ? Number(value) : NaN;
+  return slots.map(({ x, y, width, height }) => ({
+    x: parse(x), y: parse(y), width: parse(width), height: parse(height),
+  }));
+}
 
 function errorNotice(error: unknown, prefix = ""): Feedback {
   const status = error instanceof Error && "status" in error ? error.status : undefined;
@@ -41,6 +62,30 @@ function FilePreview({ file }: { file: File }) {
     return () => URL.revokeObjectURL(next);
   }, [file]);
   return url && <img src={url} alt={`待上传图片 ${file.name}`} loading="lazy" />;
+}
+
+function BackgroundLayout({ file, currentId, slots }: {
+  file: File | null; currentId?: string; slots: GameTipsBackgroundSlot[];
+}) {
+  const [fileUrl, setFileUrl] = useState("");
+  useEffect(() => {
+    if (!file) {
+      setFileUrl("");
+      return;
+    }
+    const url = URL.createObjectURL(file);
+    setFileUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [file]);
+  const src = file ? fileUrl : currentId ? `${backgroundEndpoint}?id=${currentId}` : "";
+  if (!src) return null;
+  return <div className="cms-game-tips-background-layout">
+    <img src={src} alt="背景模板上的 3 个游戏图位置" />
+    {slots.map(({ x, y, width, height }, index) =>
+      [x, y, width, height].every(value => Number.isFinite(value) && value >= 0 && value <= 100)
+      && x + width <= 100 && y + height <= 100
+      && <span key={index} aria-hidden="true" style={{ left: `${x}%`, top: `${y}%`, width: `${width}%`, height: `${height}%` }}>{index + 1}</span>)}
+  </div>;
 }
 
 function isValidImage(file: File): boolean {
@@ -64,6 +109,7 @@ export default function TelegramGameTipsLibrary({
   const [data, setData] = useState<GameTipsLibrary | null>(null);
   const [selectedProvider, setSelectedProvider] = useState("");
   const [logoDraft, setLogoDraft] = useState<LogoDraft | null>(null);
+  const [backgroundDraft, setBackgroundDraft] = useState<BackgroundDraft | null>(null);
   const [pending, setPending] = useState<UploadDraft[]>([]);
   const [edit, setEdit] = useState<GameTipsAsset | null>(null);
   const [notice, setNotice] = useState<Feedback | null>(null);
@@ -94,7 +140,7 @@ export default function TelegramGameTipsLibrary({
   }
   const providers = [...providerMap.values()].sort((a, b) => a.name.localeCompare(b.name));
   const current = providerMap.get(selectedProvider)
-    ?? (!selectedProvider || !pending.length && !edit && !logoDraft ? providers[0] : undefined);
+    ?? (!selectedProvider || !pending.length && !edit && !logoDraft && !backgroundDraft ? providers[0] : undefined);
   const currentKey = current ? gameTipsProviderKey(current.name) : "";
   const assets = current ? allAssets.filter(image => gameTipsProviderKey(image.provider) === currentKey) : [];
   const platformPlans = current ? plans.filter(plan => plan.gameTipsProvider
@@ -103,15 +149,20 @@ export default function TelegramGameTipsLibrary({
   const editCurrent = edit && data?.assets.find(asset => asset.id === edit.id);
   const logoConflict = Boolean(logoDraft?.providerKey
     && logoDraft.previousId !== providerMap.get(logoDraft.providerKey)?.logoId);
+  const backgroundSlots = backgroundDraft ? numericSlots(backgroundDraft.slots) : [];
+  const slotsValid = validGameTipsBackgroundSlots(backgroundSlots);
+  const backgroundConflict = Boolean(backgroundDraft
+    && backgroundDraft.previousId !== providerMap.get(gameTipsProviderKey(backgroundDraft.provider))?.backgroundId);
 
   function switchProvider(name: string) {
     const key = gameTipsProviderKey(name);
     if (key === currentKey) return;
-    if ((pending.length > 0 || edit || logoDraft) && !window.confirm("切换平台会放弃当前未保存的内容，继续？")) return;
+    if ((pending.length > 0 || edit || logoDraft || backgroundDraft) && !window.confirm("切换平台会放弃当前未保存的内容，继续？")) return;
     setSelectedProvider(key);
     setPending([]);
     setEdit(null);
     setLogoDraft(null);
+    setBackgroundDraft(null);
     setNotice(null);
   }
 
@@ -144,7 +195,7 @@ export default function TelegramGameTipsLibrary({
       setNotice({ message: "此平台已存在。请在平台列表选中它，再上传或更换 Logo。", error: true });
       return;
     }
-    if (key !== currentKey && (pending.length || edit) && !window.confirm("添加新平台会放弃当前平台未保存的游戏图片，继续？")) return;
+    if (key !== currentKey && (pending.length || edit || backgroundDraft) && !window.confirm("添加新平台会放弃当前平台未保存的内容，继续？")) return;
     const params = new URLSearchParams({ id, provider: name });
     if (previousId) params.set("previousId", previousId);
     busyRef.current = true;
@@ -159,8 +210,58 @@ export default function TelegramGameTipsLibrary({
       if (key !== currentKey) {
         setPending([]);
         setEdit(null);
+        setBackgroundDraft(null);
       }
       setNotice({ message: `${name} 的 Logo 已保存。` });
+    } catch (error) {
+      setNotice(errorNotice(error));
+      if (error instanceof Error && "status" in error && error.status === 409) setReload(value => value + 1);
+    } finally {
+      busyRef.current = false;
+      setBusy("");
+    }
+  }
+
+  function startBackground(provider: GameTipsProvider) {
+    setSelectedProvider(gameTipsProviderKey(provider.name));
+    setBackgroundDraft({
+      id: crypto.randomUUID(), provider: provider.name, file: null, previousId: provider.backgroundId,
+      slots: editableSlots(provider.backgroundSlots ?? GAME_TIPS_DEFAULT_SLOTS),
+    });
+    setNotice(null);
+  }
+
+  function chooseBackground(file?: File) {
+    if (!backgroundDraft || !file) return;
+    if (!isValidImage(file)) {
+      setNotice({ message: "请选择不超过 4 MB 的 JPG、PNG 或 WebP 背景模板。", error: true });
+      return;
+    }
+    setBackgroundDraft({ ...backgroundDraft, id: crypto.randomUUID(), file });
+    setNotice(null);
+  }
+
+  function updateBackgroundSlots(slots: SlotFields[]) {
+    setBackgroundDraft(draft => draft && { ...draft, id: crypto.randomUUID(), slots });
+  }
+
+  async function saveBackground(event: FormEvent) {
+    event.preventDefault();
+    if (!backgroundDraft || !slotsValid || backgroundConflict || busyRef.current) return;
+    const { id, provider, file, previousId } = backgroundDraft;
+    if (!file && !previousId) return;
+    busyRef.current = true;
+    setBusy("background");
+    setNotice(null);
+    try {
+      const params = new URLSearchParams({ id, provider, previousId: previousId ?? "", slots: JSON.stringify(backgroundSlots) });
+      const result = file
+        ? await uploadBlob(request, `${backgroundEndpoint}?${params}`, file)
+        : await request<GameTipsLibrary>(backgroundEndpoint, "PUT", { id, provider, previousId, slots: backgroundSlots });
+      setData(result);
+      onProvidersChanged(result.providers);
+      setBackgroundDraft(null);
+      setNotice({ message: `${provider} 的背景模板已保存。` });
     } catch (error) {
       setNotice(errorNotice(error));
       if (error instanceof Error && "status" in error && error.status === 409) setReload(value => value + 1);
@@ -250,7 +351,7 @@ export default function TelegramGameTipsLibrary({
 
   return <div className="cms-scheduled-panel cms-game-tips-library">
     <div className="cms-scheduled-heading">
-      <div><h3>Game Tips 平台图库</h3><p>按平台管理 Logo、游戏图片和独立发送排期。</p></div>
+      <div><h3>Game Tips 平台图库</h3><p>按平台管理 Logo、三格背景模板、游戏图片和发送排期。</p></div>
       <div className="cms-scheduled-actions">
         <button type="button" className="cms-secondary" disabled={Boolean(busy)} onClick={() => { setNotice(null); setReload(value => value + 1); }}>
           <RefreshCw size={14} className={busy === "read" ? "cms-spin" : ""} />刷新图库
@@ -314,6 +415,66 @@ export default function TelegramGameTipsLibrary({
         <button type="button" className="cms-secondary" disabled={Boolean(busy)} onClick={() => startLogo(current)}><Upload size={14} />{current.logoId ? "更换平台 Logo" : "上传平台 Logo"}</button>
       </div>
     </div>
+    <div className="cms-scheduled-card cms-game-tips-platform-background">
+      <div className="cms-scheduled-heading">
+        <div>
+          <h3>海报背景模板</h3>
+          <p>{current.backgroundId ? "已保存。发送时会从当前平台抽取 3 张游戏图，自动放进模板。" : "当前使用带平台 Logo 的系统默认模板。也可上传自己的三格背景图。"}</p>
+        </div>
+        <button type="button" className="cms-secondary" disabled={Boolean(busy) || Boolean(backgroundDraft)}
+          onClick={() => startBackground(current)}><Upload size={14} />{current.backgroundId ? "更换模板或调整位置" : "上传模板"}</button>
+      </div>
+      {active && current.backgroundId && !backgroundDraft && <div className="cms-game-tips-background-summary">
+        <img src={`${backgroundEndpoint}?id=${current.backgroundId}`} alt={`${current.name} 当前海报背景模板`} loading="lazy" />
+        <div className="cms-scheduled-actions">
+          {current.count >= 3 && <a className="cms-secondary" target="_blank" rel="noopener"
+            href={`${endpoint}?preview=${encodeURIComponent(current.name)}`}><Eye size={14} />预览合成海报 ↗</a>}
+          {current.count < 3 && <small className="cms-scheduled-muted">图库至少有 3 张可用游戏图后可预览合成海报。</small>}
+        </div>
+      </div>}
+    </div>
+    {backgroundDraft && currentKey === gameTipsProviderKey(backgroundDraft.provider) &&
+      <form className="cms-scheduled-card cms-scheduled-editor cms-game-tips-background-editor" onSubmit={saveBackground}>
+        <fieldset disabled={Boolean(busy)}>
+          <div className="cms-scheduled-heading">
+            <div><h3>{current.name} 海报背景</h3><p>上传时请使用已带有所需 Logo 和 3 个空格的背景图。支持 JPG、PNG 或 WebP，每张最多 4 MB。</p></div>
+            <button type="button" className="cms-icon-button" aria-label="关闭模板编辑" onClick={() => {
+              if (window.confirm("放弃当前模板的未保存修改？")) setBackgroundDraft(null);
+            }}><X size={15} /></button>
+          </div>
+          {backgroundConflict && <div className="cms-scheduled-conflict" role="alert">背景模板已更新。请关闭后重新打开编辑。</div>}
+          <label className="cms-secondary cms-scheduled-file-button cms-scheduled-save-channel"><Upload size={14} />
+            <span aria-hidden="true">{backgroundDraft.file || backgroundDraft.previousId ? "更换背景图片" : "选择背景图片"}</span>
+            <input type="file" accept={imageTypes} aria-label="选择背景模板图片" onChange={event => {
+              chooseBackground(event.target.files?.[0]); event.target.value = "";
+            }} />
+          </label>
+          {active && <BackgroundLayout file={backgroundDraft.file} currentId={backgroundConflict ? undefined : backgroundDraft.previousId} slots={backgroundSlots} />}
+          <details className="cms-game-tips-slot-editor">
+            <summary>调整 3 个游戏图位置</summary>
+            <p>各项均以整张背景的百分比计算。每个位置宽、高需至少 5%，且必须在图片内，三个位置不得重叠。</p>
+            <div className="cms-game-tips-slot-grid">
+              {backgroundDraft.slots.map((slot, index) => <div role="group" aria-labelledby={`game-tips-slot-${index}`} className="cms-game-tips-slot-fields" key={index}>
+                <strong id={`game-tips-slot-${index}`}>位置 {index + 1}</strong>
+                {slotFields.map(({ field, label }) => <label key={field}>{label}（%）
+                  <input type="number" inputMode="decimal" min={field === "width" || field === "height" ? 5 : 0}
+                    max={100} step="any" required value={slot[field]} aria-label={`位置 ${index + 1} ${label}（%）`}
+                    onChange={event => {
+                      const value = event.target.value;
+                      updateBackgroundSlots(backgroundDraft.slots.map((entry, i) => i === index ? { ...entry, [field]: value } : entry));
+                    }} />
+                </label>)}
+              </div>)}
+            </div>
+            <button type="button" className="cms-secondary" onClick={() => updateBackgroundSlots(editableSlots(GAME_TIPS_DEFAULT_SLOTS))}>恢复默认位置</button>
+          </details>
+          {!slotsValid && <p className="cms-scheduled-error" role="status">请填妥所有位置，确保尺寸有效且没有重叠。</p>}
+          <button type="submit" className="cms-primary cms-scheduled-save-channel"
+            disabled={!slotsValid || backgroundConflict || (!backgroundDraft.file && !backgroundDraft.previousId)}>
+            {busy === "background" ? <LoaderCircle size={14} className="cms-spin" /> : <Check size={14} />}保存背景模板
+          </button>
+        </fieldset>
+      </form>}
     <div className="cms-scheduled-card cms-game-tips-platform-schedule">
       <div className="cms-scheduled-heading">
         <div><h3><CalendarClock size={15} />{current.name} 发送排期</h3><p>为此平台设置每日或指定日期的发送次数、时间和频道（MYT）。</p></div>
@@ -336,7 +497,7 @@ export default function TelegramGameTipsLibrary({
         </div>
         <datalist id="game-tips-platforms">{providers.map(item => <option key={item.name} value={item.name} />)}</datalist>
         {pending.length > 0 && <div className="cms-game-tips-upload-list">
-          <small className="cms-scheduled-muted">游戏名称会出现在合成图和文案里。请把文件名建议改成图片上的实际名称。</small>
+          <small className="cms-scheduled-muted">游戏名称用于图库识别。请把文件名建议改成图片上的实际名称。</small>
           {pending.map(row => <div className="cms-game-tips-upload-row" key={row.id}>
             <FilePreview file={row.file} />
             <label>游戏名称<input required maxLength={GAME_TIPS_NAME_LIMIT} autoComplete="off" value={row.game}

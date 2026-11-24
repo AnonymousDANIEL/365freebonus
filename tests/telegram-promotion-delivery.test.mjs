@@ -14,7 +14,7 @@ import ts from 'typescript';
 const fixture = mkdtempSync(path.join(tmpdir(), 'telegram-promotion-delivery-'));
 writeFileSync(path.join(fixture, 'package.json'), '{"type":"commonjs"}');
 symlinkSync(fileURLToPath(new URL('../node_modules', import.meta.url)), path.join(fixture, 'node_modules'), 'dir');
-for (const name of ['auth-core', 'brand-links', 'directory', 'image-url', 'sqlite', 'telegram-brand-card', 'telegram-followups', 'telegram-private-updates', 'telegram-relay-content', 'telegram-caption-watch-cycle', 'telegram-caption-watch-status', 'telegram-relay', 'telegram-join-gate', 'telegram-hot-video-limits', 'telegram-hot-videos', 'telegram-game-tips-types', 'telegram-game-tips', 'telegram-scheduled-messages-types', 'telegram-scheduled-messages', 'telegram-promotions']) {
+for (const name of ['auth-core', 'brand-links', 'directory', 'image-url', 'sqlite', 'telegram-brand-card', 'telegram-followups', 'telegram-private-updates', 'telegram-relay-content', 'telegram-caption-watch-cycle', 'telegram-caption-watch-status', 'telegram-relay', 'telegram-join-gate', 'telegram-hot-video-limits', 'telegram-hot-videos', 'telegram-game-tips-types', 'telegram-game-tips-captions', 'telegram-game-tips', 'telegram-scheduled-messages-types', 'telegram-scheduled-messages', 'telegram-promotions']) {
   writeFileSync(path.join(fixture, `${name}.js`), ts.transpileModule(
     readFileSync(new URL(`../app/lib/${name}.ts`, import.meta.url), 'utf8'),
     { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, esModuleInterop: true } },

@@ -3,17 +3,18 @@ import type { DatabaseSync } from "node:sqlite";
 import { getSqlite } from "./sqlite";
 import { telegramRequest } from "./telegram-bot";
 import { readScheduledMessageMedia, sendScheduledMessageMedia } from "./telegram-scheduled-media";
-import { ensureGameTipsAssets, gameTipsCaption, gameTipsProviderKey, gameTipsProviderLogo, gameTipsProviders, listGameTipAssets, renderGameTips } from "./telegram-game-tips";
+import { ensureGameTipsAssets, gameTipsProviderBackgroundId, gameTipsProviderKey, gameTipsProviderLogo, gameTipsProviders, listGameTipAssets, renderGameTips } from "./telegram-game-tips";
+import { DEFAULT_GAME_TIPS_CAPTION_PRESET_ID, gameTipsCaption, isGameTipsCaptionPresetId } from "./telegram-game-tips-captions";
 import { GAME_TIPS_PROVIDER_LIMIT, type GameTipsProvider, type GameTipsSelection } from "./telegram-game-tips-types";
 import type { ScheduledMessageStatus, ScheduledMessagePlan, ScheduledMessagePlanInput, ScheduledMessageTargetInput, ScheduledMessageTargetKey } from "./telegram-scheduled-messages-types";
 
 type Decrypt = (ciphertext: string) => string;
-type Plan = { id: string; revision: string; name: string; text: string; times_json: string; calendar_date: string; target_keys_json: string; media_id: string; game_tips_provider: string; enabled: number; next_run_at: number; last_run_at: number; created_at: number; updated_at: number; deleted_at: number };
+type Plan = { id: string; revision: string; name: string; text: string; times_json: string; calendar_date: string; target_keys_json: string; media_id: string; game_tips_provider: string; game_tips_caption_preset_id: string; enabled: number; next_run_at: number; last_run_at: number; created_at: number; updated_at: number; deleted_at: number };
 type Target = { target_key: ScheduledMessageTargetKey; chat_id: number; title: string; ready: number; last_error: string; verified_at: number };
 type Channel = { target_key: ScheduledMessageTargetKey; title: string; address: string; revision: string; deleted_at: number };
 type ChannelDefinition = { key: ScheduledMessageTargetKey; title: string; address: string; revision: string; editable: boolean };
 type Runtime = { token_hash: string; bot_id: number; hot_chat_id: number; next_verify_at: number; owner_id: string; lease_id: string; lease_until: number; heartbeat_at: number; last_tick_at: number; last_completed_at: number; last_error: string };
-type Delivery = { id: string; plan_id: string; plan_revision: string; plan_name: string; text: string; media_id: string; run_at: number; target_key: ScheduledMessageTargetKey; target_chat_id: number; target_title: string; token_hash: string; bot_id: number; status: string; attempts: number; next_attempt_at: number; lease_id: string; lease_until: number; dispatch_started_at: number; last_error: string; sent_at: number; message_id: number };
+type Delivery = { id: string; plan_id: string; plan_revision: string; plan_name: string; text: string; media_id: string; game_tips_provider: string; run_at: number; target_key: ScheduledMessageTargetKey; target_chat_id: number; target_title: string; token_hash: string; bot_id: number; status: string; attempts: number; next_attempt_at: number; lease_id: string; lease_until: number; dispatch_started_at: number; last_error: string; sent_at: number; message_id: number };
 const DAY = 86_400_000, OFFSET = 8 * 3_600_000, TICK_MS = 5_000, LEASE_MS = 90_000, GRACE_MS = 15 * 60_000, MAX_ATTEMPTS = 5;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const TIME = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
@@ -84,10 +85,13 @@ function providerCount(providers: GameTipsProvider[], provider: string) {
   const key = gameTipsProviderKey(provider);
   return providers.find(entry => gameTipsProviderKey(entry.name) === key)?.count ?? 0;
 }
+function captionPresetOrDefault(value: string | undefined) {
+  return isGameTipsCaptionPresetId(value) ? value : DEFAULT_GAME_TIPS_CAPTION_PRESET_ID;
+}
 function viewPlan(db: DatabaseSync, row: Plan, providers: GameTipsProvider[]): ScheduledMessagePlan {
   return { id: row.id, revision: row.revision, name: row.name, text: row.text, times: parseTimes(row.times_json), enabled: row.enabled === 1,
     calendarDate: row.calendar_date, targetKeys: parseTargetKeys(row.target_keys_json), media: row.media_id ? readScheduledMessageMedia(db, row.media_id) : null,
-    ...(row.game_tips_provider ? { gameTipsProvider: row.game_tips_provider,
+    ...(row.game_tips_provider ? { gameTipsProvider: row.game_tips_provider, gameTipsCaptionPresetId: captionPresetOrDefault(row.game_tips_caption_preset_id),
       ...(providerCount(providers, row.game_tips_provider) < 3 ? { gameTipsIssue: GAME_TIPS_EMPTY } : {}) } : {}),
     nextRunAt: row.next_run_at || null, lastRunAt: row.last_run_at || null, createdAt: row.created_at, updatedAt: row.updated_at };
 }
@@ -111,12 +115,36 @@ export function scheduledMessageStatus(db: DatabaseSync, clock = Date.now): Sche
   const now = clock(), state = runtime(db), stored = cipher(db), rows = targets(db), current = identityCurrent(db);
   const providers = gameTipsProviders(db);
   const plans = (db.prepare("SELECT * FROM telegram_scheduled_message_plans WHERE deleted_at=0 ORDER BY created_at,id").all() as Plan[]).map(row => viewPlan(db, row, providers));
-  const deliveries = (db.prepare("SELECT * FROM telegram_scheduled_message_deliveries ORDER BY run_at DESC,target_key,id LIMIT 150").all() as Delivery[]).map(row => ({ id: row.id, planId: row.plan_id, planName: row.plan_name, runAt: row.run_at, targetKey: row.target_key, targetTitle: row.target_title, status: row.status, attempts: row.attempts, lastError: row.last_error, sentAt: row.sent_at || null, messageId: row.message_id || null }));
+  const deliveries = (db.prepare(`
+    SELECT * FROM (SELECT * FROM telegram_scheduled_message_deliveries WHERE game_tips_provider=''
+      ORDER BY run_at DESC,target_key,id LIMIT 150)
+    UNION ALL
+    SELECT * FROM (SELECT * FROM telegram_scheduled_message_deliveries WHERE game_tips_provider<>''
+      ORDER BY run_at DESC,target_key,id LIMIT 150)
+    ORDER BY run_at DESC,target_key,id
+  `).all() as Delivery[]).map(row => ({
+    id: row.id, planId: row.plan_id, planName: row.plan_name, runAt: row.run_at, targetKey: row.target_key, targetTitle: row.target_title,
+    status: row.status, attempts: row.attempts, lastError: row.last_error, sentAt: row.sent_at || null, messageId: row.message_id || null,
+    ...(row.game_tips_provider ? { gameTipsProvider: row.game_tips_provider } : {}),
+  }));
   const counts: Record<string, number> = { pending: 0, sending: 0, sent: 0, failed: 0, unknown: 0, cancelled: 0, skipped: 0 };
-  for (const row of db.prepare("SELECT status,COUNT(*) AS count FROM telegram_scheduled_message_deliveries GROUP BY status").all() as { status: string; count: number }[]) counts[row.status] = row.count;
-  const next = plans.flatMap(p => p.enabled && p.nextRunAt ? [p.nextRunAt] : []);
+  const messageCounts = { ...counts }, gameTipsCounts = { ...counts };
+  for (const row of db.prepare(`SELECT status,game_tips_provider<>'' AS game_tips,COUNT(*) AS count
+    FROM telegram_scheduled_message_deliveries GROUP BY status,game_tips`).all() as { status: string; game_tips: number; count: number }[]) {
+    counts[row.status] = (counts[row.status] ?? 0) + row.count;
+    (row.game_tips ? gameTipsCounts : messageCounts)[row.status] = row.count;
+  }
+  function summary(gameTips: boolean, counts: Record<string, number>) {
+    const active = plans.filter(p => Boolean(p.gameTipsProvider) === gameTips && p.enabled && p.nextRunAt);
+    const blocked = active.some(p => !current || !targetsReady(rows, p.targetKeys));
+    const sharedError = state.last_error === CHANGED_ERROR ? "" : state.last_error;
+    return { counts, nextRunAt: active.length ? Math.min(...active.map(p => p.nextRunAt!)) : null,
+      lastError: sharedError || (blocked ? CHANGED_ERROR : active.find(p => p.gameTipsIssue)?.gameTipsIssue || "") };
+  }
+  const messageSummary = summary(false, messageCounts), gameTipsSummary = summary(true, gameTipsCounts);
+  const next = [messageSummary.nextRunAt, gameTipsSummary.nextRunAt].filter((value): value is number => value !== null);
   const gameTipsIssue = plans.find(p => p.enabled && p.nextRunAt && p.gameTipsIssue)?.gameTipsIssue;
-  return { now, timezone: "Asia/Kuala_Lumpur", hasToken: Boolean(stored), plans, deliveries, counts, gameTipsProviders: providers,
+  return { now, timezone: "Asia/Kuala_Lumpur", hasToken: Boolean(stored), plans, deliveries, counts, gameTipsProviders: providers, gameTipsSummary, messageSummary,
     targets: channelDefinitions(db, hotChatId(db)).map(target => {
       const row = rows.find(r => r.target_key === target.key);
       return { ...target, chatId: row?.chat_id ? String(row.chat_id) : /^-\d+$/.test(target.address) ? target.address : "",
@@ -261,6 +289,9 @@ function validateInput(input: ScheduledMessagePlanInput) {
     || Array.from(input.gameTipsProvider.trim()).length > GAME_TIPS_PROVIDER_LIMIT || /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(input.gameTipsProvider))) {
     throw new ScheduledMessageError("请选择有效的 Game Tips 游戏平台。");
   }
+  if (input.gameTipsCaptionPresetId != null && !isGameTipsCaptionPresetId(input.gameTipsCaptionPresetId)) {
+    throw new ScheduledMessageError("请选择有效的 Game Tips 文案。");
+  }
 }
 export async function saveScheduledMessagePlan(db: DatabaseSync, input: ScheduledMessagePlanInput, decrypt: Decrypt, clock = Date.now): Promise<ScheduledMessageStatus> {
   validateInput(input);
@@ -271,16 +302,20 @@ export async function saveScheduledMessagePlan(db: DatabaseSync, input: Schedule
   const calendarDate = input.calendarDate === undefined ? before?.calendar_date || "" : input.calendarDate || "";
   const mediaId = input.mediaId === undefined ? before?.media_id || "" : input.mediaId || "";
   const provider = input.gameTipsProvider === undefined ? before?.game_tips_provider || "" : input.gameTipsProvider?.trim() || "";
+  const presetId = provider ? captionPresetOrDefault(input.gameTipsCaptionPresetId === undefined
+    ? before?.game_tips_caption_preset_id : input.gameTipsCaptionPresetId ?? undefined) : "";
   const text = provider ? "" : input.text;
   const keys = [...(input.targetKeys ?? parseTargetKeys(before?.target_keys_json || ""))].sort();
   const keysJson = keys.length === DEFAULT_TARGET_KEYS.length && DEFAULT_TARGET_KEYS.every(key => keys.includes(key)) ? "" : JSON.stringify(keys);
   if (!provider && !text.trim()) throw new ScheduledMessageError("请输入发送文案。");
+  if (!provider && input.gameTipsCaptionPresetId != null) throw new ScheduledMessageError("只有 Game Tips 计划可选择 Game Tips 文案。");
   if (provider && input.text.trim()) throw new ScheduledMessageError("Game Tips 会自动生成文案，请清除手动文案。");
   if (provider && mediaId) throw new ScheduledMessageError("Game Tips 自动生成图片，请移除额外附件。");
   if (mediaId && text.length > 1024) throw new ScheduledMessageError("附照片、视频或 GIF 的文案最多 1,024 个字符。");
   const samePayload = (row: Plan) => !row.deleted_at && row.name === name && row.text === text
     && row.times_json === timesJson && row.calendar_date === calendarDate && row.target_keys_json === keysJson
-    && row.media_id === mediaId && row.game_tips_provider === provider && row.enabled === enabled;
+    && row.media_id === mediaId && row.game_tips_provider === provider && row.enabled === enabled
+    && (!provider || captionPresetOrDefault(row.game_tips_caption_preset_id) === presetId);
   const existing = existingRequest();
   if (existing) {
     if (!samePayload(existing)) throw new ScheduledMessageError("此新增请求已处理或内容已改变，请刷新后重试。", 409);
@@ -317,12 +352,12 @@ export async function saveScheduledMessagePlan(db: DatabaseSync, input: Schedule
       if (count.count >= 100) throw new ScheduledMessageError("最多安排 100 个重复、今天和未来的文案计划。");
     }
     const id = current?.id || input.requestId!, revision = randomUUID();
-    db.prepare(`INSERT INTO telegram_scheduled_message_plans(id,revision,name,text,times_json,calendar_date,target_keys_json,media_id,game_tips_provider,enabled,next_run_at,created_at,updated_at)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,name=excluded.name,text=excluded.text,
+    db.prepare(`INSERT INTO telegram_scheduled_message_plans(id,revision,name,text,times_json,calendar_date,target_keys_json,media_id,game_tips_provider,game_tips_caption_preset_id,enabled,next_run_at,created_at,updated_at)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,name=excluded.name,text=excluded.text,
       times_json=excluded.times_json,calendar_date=excluded.calendar_date,target_keys_json=excluded.target_keys_json,media_id=excluded.media_id,
-      game_tips_provider=excluded.game_tips_provider,
+      game_tips_provider=excluded.game_tips_provider,game_tips_caption_preset_id=excluded.game_tips_caption_preset_id,
       enabled=excluded.enabled,next_run_at=excluded.next_run_at,updated_at=excluded.updated_at`)
-      .run(id, revision, name, text, timesJson, calendarDate, keysJson, mediaId, provider, enabled, next, now, now);
+      .run(id, revision, name, text, timesJson, calendarDate, keysJson, mediaId, provider, presetId, enabled, next, now, now);
     db.prepare(`UPDATE telegram_scheduled_message_deliveries SET text='',media_id='',status='cancelled',last_error='计划已修改或停用。',lease_id='',lease_until=0
       WHERE plan_id=? AND status IN ('pending','sending') AND dispatch_started_at=0`).run(id);
   });
@@ -340,16 +375,20 @@ export function deleteScheduledMessagePlan(db: DatabaseSync, input: { id: string
   return scheduledMessageStatus(db, clock);
 }
 
-function parseGameTipsSelection(value: string): GameTipsSelection | null {
+type GameTipsSnapshot = GameTipsSelection & { captionPresetId?: string; caption?: string };
+function parseGameTipsSelection(value: string): GameTipsSnapshot | null {
   try {
-    const selection = JSON.parse(value) as GameTipsSelection;
+    const selection = JSON.parse(value) as GameTipsSnapshot;
     if (typeof selection.provider !== "string" || !selection.provider || !Array.isArray(selection.games) || selection.games.length !== 3
       || selection.logoId !== undefined && (typeof selection.logoId !== "string" || !UUID.test(selection.logoId))
+      || selection.backgroundId !== undefined && (typeof selection.backgroundId !== "string" || !UUID.test(selection.backgroundId))
+      || selection.caption !== undefined && (typeof selection.caption !== "string" || !selection.caption || selection.caption.length > 1024)
+      || selection.captionPresetId !== undefined && (typeof selection.captionPresetId !== "string" || !/^[a-z0-9-]{1,64}$/.test(selection.captionPresetId))
       || selection.games.some(game => !game || typeof game.id !== "string" || !UUID.test(game.id) || typeof game.game !== "string" || !game.game)) return null;
     return selection;
   } catch { return null; }
 }
-function pickGameTips(db: DatabaseSync, row: Plan, at: number): GameTipsSelection | null {
+function pickGameTips(db: DatabaseSync, row: Plan, at: number): GameTipsSnapshot | null {
   const key = gameTipsProviderKey(row.game_tips_provider), today = dayStart(at);
   const candidates = [...new Map(listGameTipAssets(db, row.game_tips_provider)
     .map(asset => [gameTipsProviderKey(asset.game), asset])).values()];
@@ -382,10 +421,16 @@ function pickGameTips(db: DatabaseSync, row: Plan, at: number): GameTipsSelectio
     return compare(left, right, usedToday) || compare(left, right, usedYesterday);
   });
   const logo = gameTipsProviderLogo(db, row.game_tips_provider);
-  const selection: GameTipsSelection = {
-    provider: logo?.name ?? candidates[0].provider,
+  const backgroundId = gameTipsProviderBackgroundId(db, row.game_tips_provider);
+  const provider = logo?.name ?? candidates[0].provider;
+  const captionPresetId = captionPresetOrDefault(row.game_tips_caption_preset_id);
+  const selection: GameTipsSnapshot = {
+    provider,
     ...(logo ? { logoId: logo.logoId } : {}),
+    ...(backgroundId ? { backgroundId } : {}),
     games: candidates.slice(0, 3).map(({ id, game }) => ({ id, game })),
+    captionPresetId,
+    caption: gameTipsCaption(provider, captionPresetId),
   };
   db.prepare("INSERT INTO telegram_game_tip_slots(plan_id,plan_revision,run_at,provider_key,selection_json) VALUES(?,?,?,?,?)")
     .run(row.id, row.revision, at, key, JSON.stringify(selection));
@@ -395,14 +440,15 @@ function pickGameTips(db: DatabaseSync, row: Plan, at: number): GameTipsSelectio
 function materialize(db: DatabaseSync, now: number) {
   const state = runtime(db), channelRows = targets(db), currentIdentity = identityCurrent(db), today = dayStart(now);
   const definitions = channelDefinitions(db, hotChatId(db));
-  const insert = (row: Plan, keys: ScheduledMessageTargetKey[], at: number, status: "pending" | "skipped", error = "") => {
+  const insert = (row: Plan, keys: ScheduledMessageTargetKey[], at: number, status: "pending" | "skipped",
+    error = "", provider = row.game_tips_provider) => {
     for (const key of keys) {
       const channel = channelRows.find(target => target.target_key === key);
       db.prepare(`INSERT OR IGNORE INTO telegram_scheduled_message_deliveries
-        (id,plan_id,plan_revision,plan_name,text,media_id,run_at,target_key,target_chat_id,target_title,token_hash,bot_id,status,next_attempt_at,last_error)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+        (id,plan_id,plan_revision,plan_name,text,media_id,game_tips_provider,run_at,target_key,target_chat_id,target_title,token_hash,bot_id,status,next_attempt_at,last_error)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
           randomUUID(), row.id, row.revision, row.name, status === "pending" ? row.text : "", status === "pending" ? row.media_id : "",
-          at, key, channel?.chat_id || 0, definitions.find(target => target.key === key)?.title || key, state.token_hash, state.bot_id, status, at, error);
+          provider, at, key, channel?.chat_id || 0, definitions.find(target => target.key === key)?.title || key, state.token_hash, state.bot_id, status, at, error);
     }
   };
   for (const row of db.prepare("SELECT * FROM telegram_scheduled_message_plans WHERE enabled=1 AND deleted_at=0 AND next_run_at>0 AND next_run_at<=?").all(now) as Plan[]) {
@@ -423,11 +469,12 @@ function materialize(db: DatabaseSync, now: number) {
       if (expired || date !== null && at < now - GRACE_MS) {
         insert(row, keys, at, "skipped", expired ? "该发送日期已结束，未补发旧消息。" : "错过发送时段超过 15 分钟，已跳过旧消息。");
       } else if (at >= now - GRACE_MS) {
-        if (row.game_tips_provider && !pickGameTips(db, row, at)) {
+        const selection = row.game_tips_provider ? pickGameTips(db, row, at) : null;
+        if (row.game_tips_provider && !selection) {
           insert(row, keys, at, "skipped", GAME_TIPS_EMPTY);
           continue;
         }
-        insert(row, keys, at, "pending");
+        insert(row, keys, at, "pending", "", selection?.provider);
         latest = Math.max(latest, at);
       }
     }
@@ -495,13 +542,20 @@ async function prepareGameTipsPhoto(db: DatabaseSync, job: Delivery): Promise<Ga
     .get(job.plan_id, job.plan_revision, job.run_at) as { selection_json: string } | undefined;
   if (!slot) {
     const current = plan(db, job.plan_id);
-    return current?.revision === job.plan_revision && current.game_tips_provider ? { kind: "error" } : { kind: "standard" };
+    return job.game_tips_provider || current?.revision === job.plan_revision && current.game_tips_provider
+      ? { kind: "error" } : { kind: "standard" };
   }
   const selection = parseGameTipsSelection(slot.selection_json);
   if (!selection) return { kind: "error" };
   try {
+    const captionPresetId = captionPresetOrDefault(selection.captionPresetId);
+    const caption = selection.caption ?? gameTipsCaption(selection.provider, captionPresetId);
+    if (!selection.caption) {
+      db.prepare(`UPDATE telegram_game_tip_slots SET selection_json=?
+        WHERE plan_id=? AND plan_revision=? AND run_at=? AND selection_json=?`).run(
+        JSON.stringify({ ...selection, captionPresetId, caption }), job.plan_id, job.plan_revision, job.run_at, slot.selection_json);
+    }
     const bytes = await renderGameTips(db, selection);
-    const caption = gameTipsCaption(selection);
     if (bytes.length > 0 && bytes.length <= 10 * 1024 * 1024 && caption.length > 0 && caption.length <= 1024) {
       return { kind: "photo", bytes, caption };
     }

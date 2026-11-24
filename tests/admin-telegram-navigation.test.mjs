@@ -13,6 +13,7 @@ const features=[
   ['个人账号来源频道','telegramSources','TelegramGroupSettings','sources'],
   ['图片自动转发','telegramRelay','TelegramGroupSettings','relay'],
   ['文案定时','scheduledMessages','TelegramScheduledMessages'],
+  ['Game Tips','gameTips','TelegramScheduledMessages'],
   ['Hot 视频定时','hotVideos','TelegramHotVideos'],
   ['聊天机器人','telegramChatbot','TelegramGroupSettings','chatbot'],
   ['关键词回复','telegramKeywords','TelegramGroupSettings','keywords'],
@@ -28,7 +29,7 @@ const panelNames=['TelegramGroupSettings','TelegramScheduledMessages','TelegramH
 function harness(){
   const hooks=[],effects=[],calls=[];
   let cursor=0,tree,timer=0;
-  const jsx=(type,props)=>({type,props:props||{}});
+  const jsx=(type,props,key)=>({type,props:props||{},key});
   const react={
     useState(initial){const slot=cursor++;if(!hooks[slot])hooks[slot]={value:typeof initial==='function'?initial():initial};return[hooks[slot].value,value=>{hooks[slot].value=typeof value==='function'?value(hooks[slot].value):value;}];},
     useRef(initial){const slot=cursor++;if(!hooks[slot])hooks[slot]={current:initial};return hooks[slot];},
@@ -95,6 +96,10 @@ test('each Telegram child selects only its own panel and synchronizes active sta
       const panels=h.panels();assert.equal(panels.length,1,label);assert.equal(panels[0].type,`test:${panel}`,label);
       assert.equal(panels[0].props.signInPath,'/fixture-sign-in');assert.equal(typeof panels[0].props.request,'function');
       if(view)assert.equal(panels[0].props.view,view,label);
+      if(panel==='TelegramScheduledMessages'){
+        assert.equal(panels[0].props.workspace,key==='gameTips'?'gameTips':'messages');
+        assert.equal(panels[0].key,key);
+      }
       const selected=h.nodes(h.nav()).filter(node=>node.type==='button'&&node.props['aria-current']==='page');
       assert.equal(selected.length,1);assert.equal(selected[0].props['data-telegram-section'],key);
       assert.match(selected[0].props.className,/active/);

@@ -20,9 +20,11 @@ for (const source of ["telegram-game-tips-types", "telegram-game-tips"]) {
   writeFileSync(path.join(fixture, `${source}.js`), outputText);
 }
 const require = createRequire(import.meta.url);
-const { deleteGameTipsAsset, gameTipsCaption, gameTipsImagePreview, gameTipsLibrary, gameTipsLogoPreview, gameTipsPosterPreview,
-  gameTipsProviderLogo, gameTipsProviders, listGameTipAssets,
-  renderGameTips, updateGameTipsAsset, uploadGameTipsAsset, uploadGameTipsLogo } = require(path.join(fixture, "telegram-game-tips.js"));
+const { deleteGameTipsAsset, gameTipsBackgroundPreview, gameTipsImagePreview, gameTipsLibrary, gameTipsLogoPreview,
+  gameTipsPosterPreview, gameTipsProviderBackgroundId, gameTipsProviderLogo, gameTipsProviders, listGameTipAssets, renderGameTips,
+  updateGameTipsAsset, updateGameTipsBackgroundSlots, uploadGameTipsAsset, uploadGameTipsBackground, uploadGameTipsLogo } =
+  require(path.join(fixture, "telegram-game-tips.js"));
+const { GAME_TIPS_DEFAULT_SLOTS, validGameTipsBackgroundSlots } = require(path.join(fixture, "telegram-game-tips-types.js"));
 
 test.after(() => rmSync(fixture, { recursive: true, force: true }));
 
@@ -48,6 +50,13 @@ function uploadRequest(image, { id = randomUUID(), provider = "MEGA888", game = 
 function logoRequest(image, { id = randomUUID(), provider = "MEGA888", previousId = "", contentType = "image/png" } = {}) {
   const query = new URLSearchParams({ id, provider, previousId });
   return new Request(`https://directory.example/api/admin/telegram/game-tips/logo?${query}`, {
+    method: "POST", headers: { "content-type": contentType }, body: image,
+  });
+}
+
+function backgroundRequest(image, { id = randomUUID(), provider = "MEGA888", previousId = "", slots, contentType = "image/png" } = {}) {
+  const query = new URLSearchParams({ id, provider, previousId, ...(slots && { slots: JSON.stringify(slots) }) });
+  return new Request(`https://directory.example/api/admin/telegram/game-tips/background?${query}`, {
     method: "POST", headers: { "content-type": contentType }, body: image,
   });
 }
@@ -102,7 +111,7 @@ test("invalid type, oversized body, fake image bytes and unsafe labels do not cr
   assert.deepEqual(gameTipsLibrary(db), { assets: [], providers: [] });
 });
 
-test("poster uses the exact frozen ordered trio and caption even after editing or disabling a library entry", async t => {
+test("poster uses the exact frozen ordered trio even after editing or disabling a library entry", async t => {
   const db = database(t);
   const input = [
     { game: "Dolphin Reef & Co <3", color: "#fb1919" },
@@ -119,11 +128,6 @@ test("poster uses the exact frozen ordered trio and caption even after editing o
   updateGameTipsAsset(db, { ...asset, game: "renamed later", provider: "Another Provider", enabled: false });
   assert.deepEqual(await renderGameTips(db, selection), before);
 
-  const caption = gameTipsCaption(selection);
-  assert.match(caption, /^Game Tips🔥\n\n365FreeBonus X MEGA888\n\n/);
-  assert.ok(caption.includes(input.map(({ game }) => game).join("\n")));
-  assert.ok(caption.endsWith("https://365freebonus.com"));
-  assert.ok(caption.length < 1024);
   const { data, info } = await sharp(before).raw().toBuffer({ resolveWithObject: true });
   assert.equal(info.width, 1500);
   assert.equal(info.height, 900);
@@ -215,9 +219,76 @@ test("replacing a logo keeps queued poster output identical and reclaims prior b
   const position = (1180 + 87 * info.width) * info.channels;
   assert.ok(firstPoster[position] > 200 && firstPoster[position + 1] < 60);
   assert.ok(secondPoster[position + 1] > 200 && secondPoster[position] < 60);
-  assert.equal(gameTipsCaption(selection), gameTipsCaption({ ...selection, logoId: second }));
 
   db.exec("UPDATE telegram_scheduled_message_deliveries SET status = 'sent'");
   await uploadGameTipsLogo(db, logoRequest(await png("#19fb19"), { provider: "Other" }));
   assert.equal(db.prepare("SELECT length(image) AS bytes FROM telegram_game_tips_logos WHERE id = ?").get(id).bytes, 0);
+});
+
+test("backgrounds require a known platform, validate 3 nonoverlapping positions and update geometry without decoding again", async t => {
+  const db = database(t), id = randomUUID(), second = randomUUID(), image = await png("#241965");
+  await assert.rejects(uploadGameTipsBackground(db, backgroundRequest(image, { id })), { status: 404 });
+  await uploadGameTipsLogo(db, logoRequest(await png()));
+  const slots = GAME_TIPS_DEFAULT_SLOTS.map(box => ({ ...box, y: 58 }));
+  for (const position of [
+    GAME_TIPS_DEFAULT_SLOTS.slice(0, 2),
+    slots.map((slot, index) => index === 0 ? { ...slot, width: 4.99 } : slot),
+    slots.map((slot, index) => index === 0 ? { ...slot, x: 100 } : slot),
+    slots.map((slot, index) => index === 1 ? { ...slot, x: 20 } : slot),
+    slots.map((slot, index) => index === 1 ? { ...slot, y: "59" } : slot),
+  ]) {
+    assert.equal(validGameTipsBackgroundSlots(position), false);
+    await assert.rejects(uploadGameTipsBackground(db, backgroundRequest(image, { id, slots: position })), { status: 400 });
+  }
+  assert.equal(validGameTipsBackgroundSlots(slots), true);
+  const first = await uploadGameTipsBackground(db, backgroundRequest(image, { id }));
+  assert.deepEqual(await uploadGameTipsBackground(db, backgroundRequest(image, { id })), first);
+  assert.deepEqual(first.providers[0].backgroundSlots, GAME_TIPS_DEFAULT_SLOTS);
+  assert.equal(gameTipsProviderBackgroundId(db, "ｍｅｇａ888"), id);
+  const before = gameTipsBackgroundPreview(db, id);
+  assert.equal(before.headers.get("content-type"), "image/webp");
+  assert.equal(before.headers.get("cache-control"), "private, no-store");
+  const geometry = { id: second, provider: "mega888", previousId: id, slots };
+  const update = updateGameTipsBackgroundSlots(db, geometry);
+  assert.deepEqual(updateGameTipsBackgroundSlots(db, geometry), update);
+  assert.throws(() => updateGameTipsBackgroundSlots(db, { ...geometry, id: randomUUID() }), { status: 409 });
+  assert.deepEqual(update.providers[0].backgroundSlots, slots);
+  assert.throws(() => gameTipsBackgroundPreview(db, id), { status: 404 });
+  assert.deepEqual(await gameTipsBackgroundPreview(db, second).arrayBuffer(), await before.arrayBuffer());
+});
+
+test("template poster keeps background art and uses exact slot images with no added name text while preserving queued artwork", async t => {
+  const db = database(t), id = randomUUID(), second = randomUUID();
+  for (const [name, color] of [["R", "#fb1919"], ["G", "#19fb19"], ["B", "#1919fb"]]) {
+    await uploadGameTipsAsset(db, uploadRequest(await png(color), { game: name }));
+  }
+  const background = await sharp({ create: { width: 1586, height: 992, channels: 3, background: "#281457" } }).png().toBuffer();
+  await uploadGameTipsBackground(db, backgroundRequest(background, { id }));
+  const assets = listGameTipAssets(db), games = ["R", "G", "B"].map(game => assets.find(asset => asset.game === game));
+  const selection = { provider: "MEGA888", games, backgroundId: id };
+  db.exec(`CREATE TABLE telegram_game_tip_slots(plan_id TEXT, plan_revision TEXT, run_at INTEGER, provider_key TEXT, selection_json TEXT);
+    CREATE TABLE telegram_scheduled_message_deliveries(plan_id TEXT, plan_revision TEXT, run_at INTEGER, status TEXT);
+    INSERT INTO telegram_scheduled_message_deliveries VALUES ('a', 'b', 123, 'sending');`);
+  db.prepare("INSERT INTO telegram_game_tip_slots VALUES ('a', 'b', 123, 'mega888', ?)").run(JSON.stringify(selection));
+  const before = await renderGameTips(db, selection);
+  assert.deepEqual(await renderGameTips(db, { ...selection, games: games.map(game => ({ ...game, game: "No text overlay" })) }), before);
+  const { data, info } = await sharp(before).raw().toBuffer({ resolveWithObject: true });
+  assert.equal(info.width, 1586);
+  assert.equal(info.height, 992);
+  const getPixel = (x, y) => [...data.subarray((x + y * info.width) * info.channels, (x + y * info.width) * info.channels + 3)];
+  assert.ok(getPixel(793, 170).every((value, index) => Math.abs(value - [40, 20, 87][index]) < 12));
+  for (const [index, slot] of GAME_TIPS_DEFAULT_SLOTS.entries()) {
+    const x = Math.round(info.width * (slot.x + slot.width / 2) / 100);
+    const y = Math.round(info.height * (slot.y + slot.height / 2) / 100);
+    const pixel = getPixel(x, y);
+    assert.ok(pixel[index] > 200 && pixel.filter(value => value < 60).length === 2, String(pixel));
+  }
+  const preview = await gameTipsPosterPreview(db, "MEGA888");
+  assert.equal((await sharp(Buffer.from(await preview.arrayBuffer())).metadata()).width, 1586);
+  await uploadGameTipsBackground(db, backgroundRequest(await png("#bc7632"), { id: second, previousId: id }));
+  assert.throws(() => gameTipsBackgroundPreview(db, id), { status: 404 });
+  assert.deepEqual(await renderGameTips(db, selection), before);
+  db.exec("UPDATE telegram_scheduled_message_deliveries SET status = 'sent'");
+  updateGameTipsBackgroundSlots(db, { id: randomUUID(), provider: "MEGA888", previousId: second, slots: GAME_TIPS_DEFAULT_SLOTS });
+  assert.equal(db.prepare("SELECT length(image) AS bytes FROM telegram_game_tips_backgrounds WHERE id = ?").get(id).bytes, 0);
 });

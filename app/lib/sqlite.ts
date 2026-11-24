@@ -711,12 +711,18 @@ function migrate(db: DatabaseSync) {
   }
   // The Game Tips schedule extends the queue without changing the legacy
   // migration level. Older binaries can still read ordinary scheduled plans.
-  if (!db.prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='telegram_game_tip_slots'").get()) {
+  const hasColumn = (table: string, field: string) => (db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[])
+    .some(column => column.name === field);
+  const plansTable = "telegram_scheduled_message_plans", deliveriesTable = "telegram_scheduled_message_deliveries";
+  if (!db.prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='telegram_game_tip_slots'").get()
+    || !hasColumn(plansTable, "game_tips_caption_preset_id") || !hasColumn(deliveriesTable, "game_tips_provider")) {
     db.exec("BEGIN IMMEDIATE");
     try {
-      const columns = db.prepare("PRAGMA table_info(telegram_scheduled_message_plans)").all() as { name: string }[];
-      if (!columns.some(column => column.name === "game_tips_provider")) {
+      if (!hasColumn(plansTable, "game_tips_provider")) {
         db.exec("ALTER TABLE telegram_scheduled_message_plans ADD COLUMN game_tips_provider TEXT NOT NULL DEFAULT ''");
+      }
+      if (!hasColumn(plansTable, "game_tips_caption_preset_id")) {
+        db.exec("ALTER TABLE telegram_scheduled_message_plans ADD COLUMN game_tips_caption_preset_id TEXT NOT NULL DEFAULT ''");
       }
       db.exec(`
         CREATE TABLE IF NOT EXISTS telegram_game_tip_slots (
@@ -725,6 +731,22 @@ function migrate(db: DatabaseSync) {
           PRIMARY KEY(plan_id,run_at,plan_revision)
         );
         CREATE INDEX IF NOT EXISTS telegram_game_tip_slots_provider ON telegram_game_tip_slots(provider_key,run_at);
+      `);
+      if (!hasColumn(deliveriesTable, "game_tips_provider")) db.exec(`
+        ALTER TABLE telegram_scheduled_message_deliveries ADD COLUMN game_tips_provider TEXT NOT NULL DEFAULT '';
+        UPDATE telegram_scheduled_message_deliveries AS delivery
+        SET game_tips_provider=COALESCE(
+          (SELECT CASE WHEN json_valid(slot.selection_json) THEN json_extract(slot.selection_json,'$.provider') END
+            FROM telegram_game_tip_slots slot WHERE slot.plan_id=delivery.plan_id
+              AND slot.plan_revision=delivery.plan_revision AND slot.run_at=delivery.run_at),
+          (SELECT plan.game_tips_provider FROM telegram_scheduled_message_plans plan
+            WHERE plan.id=delivery.plan_id AND plan.revision=delivery.plan_revision),
+          ''
+        );
+        CREATE INDEX IF NOT EXISTS telegram_scheduled_message_game_tips_history
+          ON telegram_scheduled_message_deliveries(run_at DESC,target_key,id) WHERE game_tips_provider<>'';
+        CREATE INDEX IF NOT EXISTS telegram_scheduled_message_regular_history
+          ON telegram_scheduled_message_deliveries(run_at DESC,target_key,id) WHERE game_tips_provider='';
       `);
       db.exec("COMMIT");
     } catch (error) { db.exec("ROLLBACK"); throw error; }

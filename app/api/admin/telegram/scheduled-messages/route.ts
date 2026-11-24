@@ -4,6 +4,7 @@ import { telegramScheduledMessageStatus, saveTelegramScheduledMessagePlan,
   saveTelegramScheduledMessageTarget, deleteTelegramScheduledMessageTarget } from "../../../../lib/telegram-promotions";
 import { ScheduledMessageError } from "../../../../lib/telegram-scheduled-messages";
 import type { ScheduledMessageTargetKey } from "../../../../lib/telegram-scheduled-messages-types";
+import { isGameTipsCaptionPresetId } from "../../../../lib/telegram-game-tips-captions";
 import { GAME_TIPS_PROVIDER_LIMIT } from "../../../../lib/telegram-game-tips-types";
 import { ApiError, apiError, authorizeAdmin, jsonBody } from "../../_security";
 
@@ -27,6 +28,7 @@ const fields = {
   mediaId: id.nullable().optional(),
   gameTipsProvider: z.string().trim().refine(value =>
     Boolean(value) && Array.from(value).length <= GAME_TIPS_PROVIDER_LIMIT && !/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(value)).nullable().optional(),
+  gameTipsCaptionPresetId: z.string().refine(isGameTipsCaptionPresetId).nullable().optional(),
 };
 // A stable key from the draft prevents lost HTTP responses creating duplicates.
 const create = z.object({ requestId: id, ...fields }).strict();
@@ -42,11 +44,12 @@ const upsertTarget = z.union([
 const removeTarget = z.object({ targetKey: customTargetKey, revision: id }).strict();
 const respond = (body: ReturnType<typeof telegramScheduledMessageStatus>) =>
   Response.json(body, { headers: { "Cache-Control": "no-store" } });
-function planPayload<T extends { text: string; mediaId?: string | null; gameTipsProvider?: string | null }>(input: T): T {
+function planPayload<T extends { text: string; id?: string; mediaId?: string | null; gameTipsProvider?: string | null; gameTipsCaptionPresetId?: string | null }>(input: T): T {
   if (input.gameTipsProvider) {
     if (input.text.trim() || input.mediaId) throw new ApiError(400, "Game Tips 的图片和文案会自动生成，请清除手动文案与附件。");
-  } else if (!input.text.trim()) {
-    throw new ApiError(400, "请输入发送文案。");
+  } else if (!input.id || input.gameTipsProvider === null) {
+    if (!input.text.trim()) throw new ApiError(400, "请输入发送文案。");
+    if (input.gameTipsCaptionPresetId != null) throw new ApiError(400, "只有 Game Tips 计划可选择 Game Tips 文案。");
   }
   if (input.mediaId && input.text.length > 1024) throw new ApiError(400, "附上媒体时，文案最多可填写 1,024 字。");
   return input;

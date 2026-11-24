@@ -25,6 +25,7 @@ const sections = {
   telegramSources: { title: "个人账号来源频道", description: "连接个人账号，选择需要读取的 Telegram 来源频道。" },
   telegramRelay: { title: "图片自动转发", description: "管理图片、视频和 GIF 转发，查看文案核对与发送状态。" },
   scheduledMessages: { title: "文案定时", description: "安排每日文案，查看下次发送时间、队列和记录。" },
+  gameTips: { title: "Game Tips", description: "按平台管理图库、文案预设和 Telegram 自动发送。" },
   hotVideos: { title: "Hot 视频定时", description: "管理 Hot 视频来源、定时发送与视频队列。" },
   telegramChatbot: { title: "聊天机器人", description: "配置聊天机器人、入群欢迎及群内回复。" },
   telegramKeywords: { title: "关键词回复", description: "分别管理按键关键词和文字关键词回复规则。" },
@@ -46,6 +47,7 @@ const telegramNavigation = [
   { section: "telegramSources", icon: Users },
   { section: "telegramRelay", icon: ImageIcon },
   { section: "scheduledMessages", icon: CalendarClock },
+  { section: "gameTips", icon: Gamepad2 },
   { section: "hotVideos", icon: Video },
   { section: "telegramChatbot", icon: Send },
   { section: "telegramKeywords", icon: Search },
@@ -398,7 +400,9 @@ export default function AdminClient({ displayName, signInPath }: { displayName: 
         {error && !editing && !deleting && <div className="cms-alert cms-error" role="alert"><span>{error}</span>{sessionExpired && <Reauthenticate signInPath={signInPath} />}<button onClick={() => setError("")} aria-label="关闭错误"><X size={17} /></button></div>}
         {success && <div className="cms-alert cms-success" role="status"><Check size={18} /><span>{success}</span></div>}
         {telegramView ? <TelegramGroupSettings request={request} signInPath={signInPath} view={telegramView} /> :
-        section === "scheduledMessages" ? <TelegramScheduledMessages request={request} signInPath={signInPath} /> :
+        section === "scheduledMessages" || section === "gameTips"
+          ? <TelegramScheduledMessages key={section} request={request} signInPath={signInPath}
+            workspace={section === "gameTips" ? "gameTips" : "messages"} /> :
         section === "hotVideos" ? <TelegramHotVideos request={request} signInPath={signInPath} /> :
         section === "notes" ? <SecureNotes request={request} signInPath={signInPath} /> :
         section === "password" ? <PasswordSettings request={request} signInPath={signInPath} /> :

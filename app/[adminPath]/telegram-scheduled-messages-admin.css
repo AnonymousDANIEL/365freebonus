@@ -23,6 +23,7 @@
 .cms-scheduled-overview .cms-scheduled-next { background: var(--cms-accent-bg); }
 .cms-scheduled-next > span { color: var(--cms-green); font-size: .8rem; }
 .cms-scheduled-tabs { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: .3rem; padding: .3rem; border: 1px solid var(--cms-line); border-radius: .65rem; background: var(--cms-inset); }
+.cms-scheduled-tabs-messages { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .cms-scheduled-tabs > button { display: flex; align-items: center; justify-content: center; gap: .4rem; min-height: 41px; padding: .5rem .3rem; border: 1px solid transparent; border-radius: .4rem; background: transparent; color: var(--cms-muted); font-size: .79rem; cursor: pointer; }
 .cms-scheduled-tabs > button[aria-selected=true] { border-color: var(--cms-line); color: var(--cms-text); background: var(--cms-input); box-shadow: 0 1px 3px #00000008; }
 .cms-scheduled-tabs small { padding: 0 .3rem; background: var(--cms-neutral-bg); border-radius: .25rem; font-size: .65rem; }
@@ -190,6 +191,63 @@
   border-radius: .45rem;
   background: var(--cms-input);
 }
+.cms-game-tips-background-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: .7rem;
+}
+.cms-game-tips-background-summary img {
+  display: block;
+  max-width: min(100%, 250px);
+  max-height: 150px;
+  object-fit: contain;
+  border: 1px solid var(--cms-line);
+  border-radius: .4rem;
+}
+.cms-game-tips-background-layout {
+  position: relative;
+  width: min(100%, 760px);
+  overflow: hidden;
+  border-radius: .5rem;
+  background: var(--cms-input);
+}
+.cms-game-tips-background-layout img { display: block; width: 100%; height: auto; }
+.cms-game-tips-background-layout > span {
+  position: absolute;
+  display: grid;
+  place-items: center;
+  box-sizing: border-box;
+  overflow: hidden;
+  border: 2px dashed #fff;
+  background: #313f8870;
+  color: #fff;
+  font-size: clamp(.7rem, 2vw, 1.4rem);
+  font-weight: 700;
+  text-shadow: 0 1px 3px #000;
+  pointer-events: none;
+}
+.cms-game-tips-slot-editor { border: 1px solid var(--cms-line); border-radius: .5rem; padding: .75rem; }
+.cms-game-tips-slot-editor summary { color: var(--cms-text); cursor: pointer; font-size: .77rem; }
+.cms-scheduled-messages .cms-game-tips-slot-editor p { margin: .65rem 0; color: var(--cms-muted); font-size: .72rem; line-height: 1.7; max-width: none; }
+.cms-game-tips-slot-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 11rem), 1fr));
+  gap: .6rem;
+  margin: .65rem 0;
+}
+.cms-game-tips-slot-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: .55rem;
+  min-width: 0;
+  padding: .6rem;
+  border: 1px solid var(--cms-line);
+  border-radius: .4rem;
+  background: var(--cms-input);
+}
+.cms-game-tips-slot-fields strong { grid-column: 1 / -1; font-size: .75rem; }
+.cms-game-tips-slot-fields label { font-size: .7rem; }
 .cms-game-tips-platform-schedule h3 { display: flex; align-items: center; gap: .45rem; }
 .cms-game-tips-platform-schedule ul { display: grid; gap: .5rem; margin: 0; padding: 0; list-style: none; }
 .cms-game-tips-platform-schedule li {

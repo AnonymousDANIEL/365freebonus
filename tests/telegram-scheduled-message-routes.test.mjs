@@ -18,7 +18,7 @@ function write(relative, content) {
 }
 write('package.json', '{"type":"commonjs"}');
 symlinkSync(fileURLToPath(new URL('../node_modules', import.meta.url)), path.join(fixture, 'node_modules'), 'dir');
-for (const source of ['app/api/admin/telegram/scheduled-messages/route', 'app/api/admin/_security', 'app/lib/auth-core', 'app/lib/telegram-game-tips-types']) {
+for (const source of ['app/api/admin/telegram/scheduled-messages/route', 'app/api/admin/_security', 'app/lib/auth-core', 'app/lib/telegram-game-tips-types', 'app/lib/telegram-game-tips-captions']) {
   write(`${source}.js`, ts.transpileModule(readFileSync(new URL(`../${source}.ts`, import.meta.url), 'utf8'), {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, esModuleInterop: true },
   }).outputText);
@@ -164,14 +164,20 @@ test('dated plans accept a validated channel selection and private media ID', as
   assert.deepEqual(facade.calls, []);
 });
 
-test('Game Tips plans pass only a provider and let the scheduler generate the photo and caption', async () => {
-  const body = { ...plan(), gameTipsProvider: '  MEGA888  ', text: '', mediaId: null, times: ['09:00', '18:00'] };
+test('Game Tips plans pass the provider and selected caption preset without accepting manual captions or attachments', async () => {
+  const body = { ...plan(), gameTipsProvider: '  MEGA888  ', gameTipsCaptionPresetId: 'featured-selection', text: '', mediaId: null, times: ['09:00', '18:00'] };
   uncached(await route.POST(request('POST', body)), 200);
   assert.deepEqual(facade.calls.splice(0), [['save', { ...body, gameTipsProvider: 'MEGA888' }]]);
   for (const invalid of [
     { gameTipsProvider: ' ' }, { gameTipsProvider: 'x'.repeat(49) }, { gameTipsProvider: 'MEGA\n888' }, { gameTipsProvider: 123 },
     { gameTipsProvider: null }, { text: 'Manual caption' }, { mediaId: randomUUID() },
+    { gameTipsCaptionPresetId: 'made-up' }, { gameTipsCaptionPresetId: '' },
   ]) uncached(await route.POST(request('POST', { ...body, ...invalid })), 400);
+  assert.deepEqual(facade.calls, []);
+  const update = { ...edit(), text: '', gameTipsCaptionPresetId: 'bonus-roundup' };
+  uncached(await route.PUT(request('PUT', update)), 200);
+  assert.deepEqual(facade.calls.splice(0), [['save', update]]);
+  uncached(await route.POST(request('POST', { ...plan(), gameTipsCaptionPresetId: 'bonus-roundup' })), 400);
   assert.deepEqual(facade.calls, []);
 });
 

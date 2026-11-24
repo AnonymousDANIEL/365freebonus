@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import ts from 'typescript';
+import * as gameTipsCaptions from '../app/lib/telegram-game-tips-captions.ts';
 import * as gameTipsTypes from '../app/lib/telegram-game-tips-types.ts';
 
 const source = readFileSync(new URL('../app/[adminPath]/TelegramScheduledMessages.tsx', import.meta.url), 'utf8');
@@ -14,7 +15,10 @@ const serverTime = Date.parse('2026-11-15T04:00:00Z');
 function snapshot(overrides = {}) {
   return { now: serverTime, timezone: 'Asia/Kuala_Lumpur', hasToken: true,
     targets: ['official', 'group', 'hot'].map(key => ({ key, title: key, chatId: '-1001', ready: true, lastError: '' })),
-    plans: [], deliveries: [], counts: {}, scheduler: { workerHealthy: true, heartbeatAt: serverTime, lastTickAt: serverTime, lastCompletedAt: serverTime, nextRunAt: serverTime + 3600000, lastError: '' }, ...overrides };
+    plans: [], deliveries: [], counts: {},
+    messageSummary: { nextRunAt: serverTime + 3600000, counts: {}, lastError: '' },
+    gameTipsSummary: { nextRunAt: null, counts: {}, lastError: '' },
+    scheduler: { workerHealthy: true, heartbeatAt: serverTime, lastTickAt: serverTime, lastCompletedAt: serverTime, nextRunAt: serverTime + 3600000, lastError: '' }, ...overrides };
 }
 const plan = (overrides = {}) => ({ id: 'plan-one', revision: 'revision-one', name: 'Daily', text: 'Saved copy', times: ['13:00'], enabled: true, nextRunAt: serverTime + 3600000, lastRunAt: null, createdAt: serverTime, updatedAt: serverTime, ...overrides });
 
@@ -40,7 +44,7 @@ function harness(initial = snapshot(), { library, props = {}, confirm = () => tr
     return getValue;
   };
   class FakeDate extends Date { constructor(...args) { super(...(args.length ? args : [time])); } static now() { return time; } }
-  vm.runInNewContext(library ? libraryCode : code, { module: moduleObject, exports: moduleObject.exports, require(name) { if (name === 'react') return react; if (name === 'react/jsx-runtime') return { jsx, jsxs: jsx }; if (name === 'lucide-react') return new Proxy({}, { get: (_, key) => String(key) }); if (name === './TelegramGameTipsLibrary') return { default: 'GameTipsLibrary' }; if (name === '../lib/telegram-game-tips-types') return gameTipsTypes; if (name.endsWith('.css')) return {}; throw Error(`Unexpected import ${name}`); },
+  vm.runInNewContext(library ? libraryCode : code, { module: moduleObject, exports: moduleObject.exports, require(name) { if (name === 'react') return react; if (name === 'react/jsx-runtime') return { jsx, jsxs: jsx }; if (name === 'lucide-react') return new Proxy({}, { get: (_, key) => String(key) }); if (name === './TelegramGameTipsLibrary') return { default: 'GameTipsLibrary' }; if (name === '../lib/telegram-game-tips-types') return gameTipsTypes; if (name === '../lib/telegram-game-tips-captions') return gameTipsCaptions; if (name.endsWith('.css')) return {}; throw Error(`Unexpected import ${name}`); },
     Date: FakeDate, Error, Intl, URLSearchParams, crypto: { randomUUID: () => '1a111111-1111-4111-8111-111111111111' }, document, window: { confirm },
     setInterval(fn, ms) { const id = ++serial; intervals.set(id, { fn, ms }); return id; }, clearInterval(id) { intervals.delete(id); },
   });
@@ -48,10 +52,11 @@ function harness(initial = snapshot(), { library, props = {}, confirm = () => tr
   function nodes(node, found = []) { if (arguments.length === 0) node = tree; if (!node || typeof node !== 'object') return found; if (Array.isArray(node)) { node.forEach(item => nodes(item, found)); return found; } found.push(node); nodes(node.props?.children, found); return found; }
   function text(node) { if (node == null || typeof node === 'boolean') return ''; if (typeof node !== 'object') return String(node); if (Array.isArray(node)) return node.map(text).join(''); return text(node.props?.children); }
   function button(label) { const node = nodes().find(n => n.type === 'button' && (text(n) === label || n.props['aria-label'] === label)); assert.ok(node, `button ${label}`); return node; }
+  function tab(id) { return nodes().find(node => node.props.id === `scheduled-tab-${id}`); }
   function field(label, type = 'input') { const node = nodes().find(n => n.type === 'label' && text(n).startsWith(label)); assert.ok(node, `label ${label}`); const input = nodes(node).find(n => n.type === type); assert.ok(input); return input; }
   function form() { return nodes().find(n => n.type === 'form'); }
   render();
-  return { calls, document, render, nodes, text: () => text(tree), button, field, form,
+  return { calls, document, render, nodes, text: () => text(tree), button, field, form, tab,
     async ready() { await flush(); render(); },
     setGet(value) { getValue = value; }, deferGet(fn) { nextGet = fn; }, mutation(fn) { nextMutation = fn; }, upload(fn) { upload = fn; },
     async tick(ms) { time += ms; for (const timer of intervals.values()) if (timer.ms === ms) timer.fn(); await flush(); render(); },
@@ -97,16 +102,22 @@ test('saving sends unchanged text and an explicit Malaysia date rather than a br
   } finally { h.close(); }
 });
 
-test('Game Tips creates a disabled Malaysia daily plan with selected channels and no manually authored text or media', async () => {
-  const h = harness(snapshot({ gameTipsProviders: [{ name: 'MEGA888', count: 4 }] }));
+test('Game Tips creates a disabled Malaysia daily plan with a caption preset and selected channels', async () => {
+  const h = harness(snapshot({ gameTipsProviders: [{ name: 'MEGA888', count: 4 }] }), { props: { workspace: 'gameTips' } });
   try {
     await h.ready();
+    assert.equal(h.tab('library').props['aria-selected'], true);
+    h.tab('plans').props.onClick(); h.render();
     h.button('添加 Game Tips').props.onClick(); h.render();
     assert.equal(h.field('游戏平台', 'select').props.value, 'MEGA888');
     assert.equal(h.field('每天重复').props.checked, true);
     assert.equal(h.field('保存后启用').props.checked, false);
     assert.ok(h.nodes().some(node => node.type === 'a' && node.props.href === '/api/admin/telegram/game-tips?preview=MEGA888'));
     assert.ok(!h.nodes().some(node => node.type === 'textarea'));
+    assert.equal(h.field('发送文案', 'select').props.value, gameTipsCaptions.DEFAULT_GAME_TIPS_CAPTION_PRESET_ID);
+    assert.match(h.text(), /News Update Game Tips🔥/);
+    h.field('发送文案', 'select').props.onChange({ target: { value: 'bonus-roundup' } }); h.render();
+    assert.match(h.text(), /Game Tips & Bonus Roundup🔥/);
     assert.equal(h.field('official').props.checked, false);
     h.field('official').props.onChange(); h.render();
     h.field('时间 1').props.onChange({ target: { value: '20:00' } }); h.render();
@@ -116,6 +127,7 @@ test('Game Tips creates a disabled Malaysia daily plan with selected channels an
     await h.form().props.onSubmit({ preventDefault() {} }); h.render();
     const call = h.calls.find(entry => entry.method === 'POST');
     assert.equal(call.body.gameTipsProvider, 'MEGA888');
+    assert.equal(call.body.gameTipsCaptionPresetId, 'bonus-roundup');
     assert.equal(call.body.enabled, false);
     assert.equal(call.body.calendarDate, '');
     assert.equal(call.body.text, '');
@@ -126,7 +138,7 @@ test('Game Tips creates a disabled Malaysia daily plan with selected channels an
 });
 
 test('a platform opens its own Game Tips draft even when another platform is also ready', async () => {
-  const h = harness(snapshot({ gameTipsProviders: [{ name: 'MEGA888', count: 4 }, { name: '918KISS', count: 3 }] }));
+  const h = harness(snapshot({ gameTipsProviders: [{ name: 'MEGA888', count: 4 }, { name: '918KISS', count: 3 }] }), { props: { workspace: 'gameTips' } });
   try {
     await h.ready();
     h.nodes().find(node => node.type === 'GameTipsLibrary').props.onSchedule('918KISS');
@@ -134,6 +146,38 @@ test('a platform opens its own Game Tips draft even when another platform is als
     assert.equal(h.field('游戏平台', 'select').props.value, '918KISS');
     assert.equal(h.field('后台名称').props.value, 'Game Tips · 918KISS');
   } finally { h.close(); }
+});
+
+test('ordinary and Game Tips workspaces separate schedules, history, next times and counts while sharing channels', async () => {
+  const normalPlan = plan({ name: 'Daily notice' });
+  const gamePlan = plan({ id: 'game-plan', name: 'Pussy poster', text: '', times: ['14:00'], gameTipsProvider: 'PUSSY88' });
+  const shared = snapshot({ plans: [normalPlan, gamePlan], deliveries: [
+    { id: 'delivery-message', planName: 'Sent notice', targetTitle: 'Shared channel', status: 'sent' },
+    { id: 'delivery-game', planName: 'Deleted Game plan delivery', gameTipsProvider: 'PUSSY88', targetTitle: 'Shared channel', status: 'sent' },
+  ], messageSummary: { nextRunAt: serverTime + 3_600_000, counts: { sent: 9 }, lastError: '' },
+  gameTipsSummary: { nextRunAt: serverTime + 7_200_000, counts: { sent: 2 }, lastError: 'Game Tips pool needs work' } });
+  const messages = harness(shared), games = harness(shared, { props: { workspace: 'gameTips' } });
+  try {
+    await messages.ready(); await games.ready();
+    assert.equal(messages.tab('library'), undefined);
+    assert.match(messages.text(), /Daily notice/);
+    assert.match(messages.text(), /01:00:00/);
+    assert.match(messages.text(), /已发送9/);
+    assert.match(messages.text(), /Sent notice/);
+    assert.doesNotMatch(messages.text(), /Pussy poster|Deleted Game plan delivery|pool needs work|添加 Game Tips/);
+
+    assert.match(games.text(), /Pussy poster/);
+    assert.match(games.text(), /02:00:00/);
+    assert.match(games.text(), /已发送2/);
+    assert.match(games.text(), /Deleted Game plan delivery/);
+    assert.match(games.text(), /pool needs work/);
+    assert.doesNotMatch(games.text(), /Daily notice|Sent notice|添加文案/);
+    for (const view of [messages, games]) {
+      view.tab('channels').props.onClick(); view.render();
+      assert.equal(view.tab('channels').props['aria-selected'], true);
+      assert.ok(view.button('添加频道'));
+    }
+  } finally { messages.close(); games.close(); }
 });
 
 test('platform cards show only their own games and schedule and keep pending files on a cancelled switch', async () => {
@@ -325,5 +369,42 @@ test('a video is uploaded in replayable chunks and its ID is associated only whe
     assert.equal(post.body.calendarDate, '2026-11-16');
     assert.equal(post.body.mediaId, uploaded[0].id);
     assert.equal(post.body.text, 'Video caption');
+  } finally { h.close(); }
+});
+test('Game Tips saves a background with three slot positions and edits the current template without replacing its image', async () => {
+  const provider = { name: 'MEGA888', count: 3 };
+  const current = { assets: [], providers: [{ ...provider, backgroundId: 'background-one', backgroundSlots: gameTipsTypes.GAME_TIPS_DEFAULT_SLOTS }] };
+  const h = harness({ assets: [], providers: [provider] }, {
+    library: true, props: { active: true, plans: [], today: '2026-11-15', onProvidersChanged() {} },
+  });
+  try {
+    await h.ready();
+    h.button('上传模板').props.onClick(); h.render();
+    assert.equal(h.button('保存背景模板').props.disabled, true);
+    const file = { name: 'background.png', type: 'image/png', size: 9000 };
+    h.nodes().find(node => node.props['aria-label'] === '选择背景模板图片').props.onChange({ target: { files: [file] } });
+    h.render();
+    const submit = () => h.nodes().find(node => node.type === 'form' && node.props.className.includes('cms-game-tips-background-editor')).props.onSubmit({ preventDefault() {} });
+    h.mutation(() => current);
+    await submit(); h.render();
+    const upload = h.calls.find(call => call.method === 'POST');
+    assert.equal(upload.body, file);
+    const query = new URL(upload.path, 'https://example.com').searchParams;
+    assert.equal(query.get('provider'), 'MEGA888');
+    assert.deepEqual(JSON.parse(query.get('slots')), gameTipsTypes.GAME_TIPS_DEFAULT_SLOTS);
+    assert.ok(h.nodes().some(node => node.type === 'img' && node.props.src.endsWith('id=background-one')));
+    assert.ok(h.nodes().some(node => node.type === 'a' && node.props.href.endsWith('preview=MEGA888')));
+
+    h.button('更换模板或调整位置').props.onClick(); h.render();
+    const changeX = value => h.nodes().find(node => node.props['aria-label'] === '位置 1 距左边（%）').props.onChange({ target: { value } });
+    changeX('100'); h.render();
+    assert.equal(h.button('保存背景模板').props.disabled, true);
+    changeX('5'); h.render();
+    h.mutation(() => current);
+    await submit(); h.render();
+    const edit = h.calls.find(call => call.method === 'PUT');
+    assert.equal(edit.path, '/api/admin/telegram/game-tips/background');
+    assert.equal(edit.body.previousId, 'background-one');
+    assert.equal(edit.body.slots[0].x, 5);
   } finally { h.close(); }
 });

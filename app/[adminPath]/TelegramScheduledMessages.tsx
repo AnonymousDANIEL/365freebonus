@@ -2,13 +2,14 @@
 
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { CalendarClock, Check, Clock3, Gamepad2, History, Images, LoaderCircle, MessageSquareText, Paperclip, Pause, Pencil, Play, Plus, Radio, RefreshCw, Trash2, Upload, X } from "lucide-react";
-import { gameTipsCaption, gameTipsProviderKey, type GameTipsProvider } from "../lib/telegram-game-tips-types";
+import { DEFAULT_GAME_TIPS_CAPTION_PRESET_ID, GAME_TIPS_CAPTION_PRESETS, gameTipsCaption } from "../lib/telegram-game-tips-captions";
+import { gameTipsProviderKey, type GameTipsProvider } from "../lib/telegram-game-tips-types";
 import type { ScheduledMessagePlan, ScheduledMessagePlanInput, ScheduledMessageStatus, ScheduledMessageTarget, ScheduledMessageTargetKey } from "../lib/telegram-scheduled-messages-types";
 import TelegramGameTipsLibrary from "./TelegramGameTipsLibrary";
 import "./telegram-scheduled-messages-admin.css";
 
 type Request = <T>(path: string, method?: string, body?: unknown) => Promise<T>;
-type Props = { request: Request; signInPath: string };
+type Props = { request: Request; signInPath: string; workspace?: "messages" | "gameTips" };
 type Notice = { message: string; error?: boolean; expired?: boolean };
 type Tab = "plans" | "library" | "channels" | "time" | "history";
 type Attachment = NonNullable<ScheduledMessagePlan["media"]>;
@@ -26,12 +27,16 @@ const hourMinute = /^([01]\d|2[0-3]):[0-5]\d$/;
 const timeFormat = new Intl.DateTimeFormat("zh-CN", { timeZone: timezone, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" });
 const dateFormat = new Intl.DateTimeFormat("en-CA", { timeZone: timezone, year: "numeric", month: "2-digit", day: "2-digit" });
 const statusLabels: Record<string, string> = { pending: "待发送", sending: "发送中", sent: "已发送", failed: "发送失败", unknown: "待确认", cancelled: "已取消", skipped: "已跳过" };
-const tabs = [
-  { id: "plans", label: "文案管理", icon: MessageSquareText },
-  { id: "library", label: "Game Tips 图库", icon: Images },
+const commonTabs = [
   { id: "channels", label: "频道管理", icon: Radio },
   { id: "time", label: "发送排期", icon: CalendarClock },
   { id: "history", label: "发送记录", icon: History },
+] as const;
+const messageTabs = [{ id: "plans", label: "文案管理", icon: MessageSquareText }, ...commonTabs] as const;
+const gameTipsTabs = [
+  { id: "library", label: "游戏平台图库", icon: Images },
+  { id: "plans", label: "排期管理", icon: Gamepad2 },
+  ...commonTabs,
 ] as const;
 const mediaLabels = { photo: "照片", video: "视频", animation: "GIF" };
 const mediaLimits: Record<string, number> = { "image/jpeg": 10, "image/png": 10, "image/gif": 20, "video/mp4": 50 };
@@ -45,7 +50,8 @@ function draftOf(plan: ScheduledMessagePlan, today: string, defaults: ScheduledM
     id: plan.id, revision: plan.revision, name: plan.name, text: plan.text, times: [...plan.times], enabled: plan.enabled,
     calendarDate: plan.calendarDate || today, repeatDaily: !plan.calendarDate,
     targetKeys: [...(plan.targetKeys ?? defaults)], media: plan.media ?? null,
-    ...(plan.gameTipsProvider ? { gameTipsProvider: plan.gameTipsProvider } : {}),
+    ...(plan.gameTipsProvider ? { gameTipsProvider: plan.gameTipsProvider,
+      gameTipsCaptionPresetId: plan.gameTipsCaptionPresetId || DEFAULT_GAME_TIPS_CAPTION_PRESET_ID } : {}),
   };
 }
 function payloadOf({ media, repeatDaily, ...draft }: PlanDraft): ScheduledMessagePlanInput {
@@ -97,9 +103,10 @@ function upcoming(plans: ScheduledMessagePlan[], now: number) {
   return rows.sort((a, b) => a.at - b.at || a.plan.name.localeCompare(b.plan.name)).slice(0, 24);
 }
 
-export default function TelegramScheduledMessages({ request, signInPath }: Props) {
+export default function TelegramScheduledMessages({ request, signInPath, workspace = "messages" }: Props) {
+  const gameTips = workspace === "gameTips";
   const [status, setStatus] = useState<ScheduledMessageStatus | null>(null);
-  const [tab, setTab] = useState<Tab>("plans");
+  const [tab, setTab] = useState<Tab>(gameTips ? "library" : "plans");
   const [draft, setDraft] = useState<PlanDraft | null>(null);
   const [channelDraft, setChannelDraft] = useState<ChannelDraft | null>(null);
   const [showPast, setShowPast] = useState(false);
@@ -177,8 +184,8 @@ export default function TelegramScheduledMessages({ request, signInPath }: Props
     if (draft && !window.confirm("放弃当前未保存的草稿？")) return;
     const chosen = provider || (readyProviders.length === 1 ? readyProviders[0].name : "");
     setDraft({
-      ...freshDraft(today, []), name: provider ? `Game Tips · ${provider}` : "Game Tips", repeatDaily: true,
-      gameTipsProvider: chosen,
+      ...freshDraft(today, []), name: provider && provider.length <= 88 ? `Game Tips · ${provider}` : "Game Tips", repeatDaily: true,
+      gameTipsProvider: chosen, gameTipsCaptionPresetId: DEFAULT_GAME_TIPS_CAPTION_PRESET_ID,
     });
     setTab("plans"); setNotice(null);
   }
@@ -240,7 +247,8 @@ export default function TelegramScheduledMessages({ request, signInPath }: Props
   }
   const now = anchor.current.now + Math.max(0, clientNow - anchor.current.receivedAt);
   const today = localDate(now);
-  const plans = status?.plans || [], current = draft?.id ? plans.find(p => p.id === draft.id) : null;
+  const plans = (status?.plans || []).filter(plan => Boolean(plan.gameTipsProvider) === gameTips);
+  const current = draft?.id ? plans.find(plan => plan.id === draft.id) : null;
   const conflict = Boolean(draft?.id && (!current || current.revision !== draft.revision));
   const targets = status?.targets || [], defaultTargetKeys = targets.filter(target => !target.editable).map(target => target.key);
   const targetsByKey = new Map(targets.map(target => [target.key, target]));
@@ -248,7 +256,11 @@ export default function TelegramScheduledMessages({ request, signInPath }: Props
   const targetTitles = (plan: ScheduledMessagePlan) => (plan.targetKeys ?? defaultTargetKeys).map(key => targetsByKey.get(key)?.title || key);
   const editedChannel = channelDraft?.key ? targetsByKey.get(channelDraft.key) : undefined;
   const channelConflict = Boolean(channelDraft?.key && editedChannel?.revision !== channelDraft.revision);
-  const enabledCount = plans.filter(p => p.enabled && (!p.calendarDate || p.calendarDate >= today)).length, next = status?.scheduler.nextRunAt || null;
+  const enabledPlans = plans.filter(plan => plan.enabled && (!plan.calendarDate || plan.calendarDate >= today));
+  const summary = gameTips ? status?.gameTipsSummary : status?.messageSummary;
+  const next = summary ? summary.nextRunAt
+    : enabledPlans.reduce<number | null>((first, plan) => plan.nextRunAt && (!first || plan.nextRunAt < first) ? plan.nextRunAt : first, null);
+  const schedulerError = summary?.lastError ?? status?.scheduler.lastError;
   const heartbeat = status?.scheduler.heartbeatAt || 0;
   const healthy = Boolean(status?.scheduler.workerHealthy && heartbeat && now - heartbeat < 60_000);
   const targetsReady = Boolean(status?.hasToken && selectedTargets.length && selectedTargets.every(key => targetsByKey.get(key)?.ready));
@@ -260,6 +272,7 @@ export default function TelegramScheduledMessages({ request, signInPath }: Props
   const draftProvider = gameTipsProviders.find(provider => gameTipsProviderKey(provider.name) === draftProviderKey);
   const providerReady = (draftProvider?.count ?? 0) >= 3;
   const gameTipsProviderName = draftProvider?.name ?? draft?.gameTipsProvider ?? "";
+  const captionPresetId = draft?.gameTipsCaptionPresetId || DEFAULT_GAME_TIPS_CAPTION_PRESET_ID;
   const gameTipsTimeCount = new Set(draft?.times.filter(time => hourMinute.test(time))).size;
   const pastCount = plans.filter(plan => plan.calendarDate && plan.calendarDate < today).length;
   const visiblePlans = plans.filter(plan => showPast || !plan.calendarDate || plan.calendarDate >= today);
@@ -270,7 +283,10 @@ export default function TelegramScheduledMessages({ request, signInPath }: Props
     return left < today ? right.localeCompare(left) : left.localeCompare(right);
   });
   const timeline = upcoming(plans, now);
-  const deliveries = (status?.deliveries || []).filter(item => historyFilter === "all" || item.status === historyFilter);
+  const workspaceDeliveries = (status?.deliveries || []).filter(item => Boolean(item.gameTipsProvider) === gameTips);
+  const deliveries = workspaceDeliveries.filter(item => historyFilter === "all" || item.status === historyFilter);
+  const counts = summary?.counts ?? Object.fromEntries(Object.keys(statusLabels)
+    .map(key => [key, workspaceDeliveries.filter(item => item.status === key).length]));
   function updateGameTipsProviders(providers: GameTipsProvider[]) {
     epoch.current++;
     setStatus(currentStatus => currentStatus ? { ...currentStatus, gameTipsProviders: providers } : currentStatus);
@@ -279,30 +295,32 @@ export default function TelegramScheduledMessages({ request, signInPath }: Props
   return <section className="cms-settings-form cms-scheduled-messages" aria-labelledby="scheduled-messages-title">
     <div className="cms-settings-panel">
       <div className="cms-scheduled-heading">
-        <div><h2 id="scheduled-messages-title">频道文案定时发布</h2><p>按马来西亚时间安排文案、媒体和 Game Tips，自动发布到所选频道。</p></div>
+        <div><h2 id="scheduled-messages-title">{gameTips ? "Game Tips 自动发布" : "频道文案定时发布"}</h2>
+          <p>{gameTips ? "从所选平台抽取游戏图片，合成并附上选定文案，按马来西亚时间发往 Telegram。" : "按马来西亚时间安排文案和媒体，自动发布到所选频道。"}</p></div>
         <div className="cms-scheduled-actions">
           <span className={`cms-scheduled-pill ${healthy ? "cms-scheduled-good" : ""}`}>{healthy ? "后台定时服务运行中" : loading ? "正在连接…" : "定时服务需要检查"}</span>
           <button type="button" className="cms-secondary" disabled={Boolean(busy)} onClick={() => void mutate("refresh", "GET")}><RefreshCw size={14} className={busy === "refresh" ? "cms-spin" : ""} />刷新状态</button>
         </div>
       </div>
       {notice && <div className={`cms-alert ${notice.error ? "cms-error" : "cms-success"}`} role={notice.error ? "alert" : "status"}>{notice.message}{notice.expired && <a href={signInPath} target="_top">重新登入 ↗</a>}</div>}
-      {loading && !status ? <p className="cms-scheduled-loading" role="status"><LoaderCircle size={16} className="cms-spin" />正在加载文案与每日计划…</p> : !status ?
+      {loading && !status ? <p className="cms-scheduled-loading" role="status"><LoaderCircle size={16} className="cms-spin" />正在加载每日计划…</p> : !status ?
         <div className="cms-scheduled-empty"><strong>暂时无法加载计划</strong><p>请刷新状态后重试。</p></div> : <>
         <div className="cms-scheduled-overview">
           <div><small><Clock3 size={13} />马来西亚时间（UTC+8）</small><strong>{displayTime(now)}</strong><span>后台检查：{displayTime(status.scheduler.lastCompletedAt || status.scheduler.lastTickAt)}</span></div>
           <div className="cms-scheduled-next"><small>下次自动发送</small><strong>{displayTime(next)}</strong><span>{countdown(next, now)}</span></div>
         </div>
-        {status.scheduler.lastError && <p className="cms-scheduled-error" role="alert">运行异常 · {status.scheduler.lastError}</p>}
-        <div className="cms-scheduled-tabs" role="tablist" aria-label="频道文案管理">
-          {tabs.map(({ id, label, icon: Icon }) => <button key={id} type="button" role="tab" id={`scheduled-tab-${id}`} aria-controls={`scheduled-panel-${id}`} aria-selected={tab === id} onClick={() => setTab(id)}><Icon size={15} />{label}{id === "plans" && <small>{plans.length}</small>}</button>)}
+        {schedulerError && <p className="cms-scheduled-error" role="alert">运行异常 · {schedulerError}</p>}
+        <div className={`cms-scheduled-tabs${gameTips ? "" : " cms-scheduled-tabs-messages"}`} role="tablist" aria-label={gameTips ? "Game Tips 管理" : "频道文案管理"}>
+          {(gameTips ? gameTipsTabs : messageTabs).map(({ id, label, icon: Icon }) => <button key={id} type="button" role="tab" id={`scheduled-tab-${id}`} aria-controls={`scheduled-panel-${id}`} aria-selected={tab === id} onClick={() => setTab(id)}><Icon size={15} />{label}{id === "plans" && <small>{plans.length}</small>}</button>)}
         </div>
         <div id="scheduled-panel-plans" role="tabpanel" aria-labelledby="scheduled-tab-plans" hidden={tab !== "plans"} className="cms-scheduled-panel">
           <div className="cms-scheduled-heading">
-            <div><h3>每日文案计划</h3><p>{plans.length} 条计划 · {enabledCount} 条已启用</p></div>
+            <div><h3>{gameTips ? "Game Tips 发送计划" : "每日文案计划"}</h3><p>{plans.length} 条计划 · {enabledPlans.length} 条已启用</p></div>
             <div className="cms-scheduled-actions">
               {pastCount > 0 && <button type="button" className="cms-secondary" aria-pressed={showPast} onClick={() => setShowPast(value => !value)}><History size={14} />{showPast ? "隐藏过往日期" : "显示过往日期"}</button>}
-              <button type="button" className="cms-primary" disabled={Boolean(busy)} onClick={() => open()}><Plus size={15} />添加文案</button>
-              <button type="button" className="cms-secondary" disabled={Boolean(busy)} onClick={() => openGameTips()}><Gamepad2 size={15} />添加 Game Tips</button>
+              {gameTips
+                ? <button type="button" className="cms-primary" disabled={Boolean(busy)} onClick={() => openGameTips()}><Plus size={15} />添加 Game Tips</button>
+                : <button type="button" className="cms-primary" disabled={Boolean(busy)} onClick={() => open()}><Plus size={15} />添加文案</button>}
             </div>
           </div>
           {draft && <form ref={editor} className="cms-scheduled-card cms-scheduled-editor" onSubmit={save}>
@@ -319,7 +337,7 @@ export default function TelegramScheduledMessages({ request, signInPath }: Props
               </div>
               {isGameTipsDraft ? <div className="cms-scheduled-media cms-game-tips-plan">
                 <div className="cms-scheduled-heading">
-                  <div><h3>随机选图与自动文案</h3><p>每次从同一平台抽 3 款不同游戏，合成一张图，再以相同顺序生成文案。</p></div>
+                  <div><h3>随机选图与发送文案</h3><p>每次从同一平台抽 3 款不同游戏，合成一张图并附上所选文案。</p></div>
                   <button type="button" className="cms-secondary" onClick={() => setTab("library")}><Images size={14} />管理图库</button>
                 </div>
                 <label>游戏平台<select value={gameTipsProviderName} required onChange={event => setDraft({ ...draft, gameTipsProvider: event.target.value })}>
@@ -328,12 +346,12 @@ export default function TelegramScheduledMessages({ request, signInPath }: Props
                   {gameTipsProviders.map(provider => <option key={provider.name} value={provider.name}>{provider.name} · {provider.count} 款可用</option>)}
                 </select></label>
                 {!providerReady && <small className="cms-scheduled-error">请在图库为此平台准备至少 3 款不同且已启用的游戏。</small>}
-                <details className="cms-game-tips-copy">
-                  <summary>查看文案格式</summary>
-                  <p>{gameTipsCaption({
-                    provider: gameTipsProviderName || "游戏平台",
-                    games: [{ game: "游戏名称 1" }, { game: "游戏名称 2" }, { game: "游戏名称 3" }],
-                  })}</p>
+                <label>发送文案<select value={captionPresetId} onChange={event => setDraft({ ...draft, gameTipsCaptionPresetId: event.target.value })}>
+                  {GAME_TIPS_CAPTION_PRESETS.map(preset => <option value={preset.id} key={preset.id}>{preset.label}</option>)}
+                </select></label>
+                <details className="cms-game-tips-copy" open>
+                  <summary>预览 Telegram 文案</summary>
+                  <p>{gameTipsCaption(gameTipsProviderName || "游戏平台", captionPresetId)}</p>
                   <small className="cms-scheduled-muted">Telegram 按钮 · Visit website · NEED HELP?</small>
                 </details>
                 {providerReady && <a className="cms-secondary cms-scheduled-save-channel" href={`/api/admin/telegram/game-tips?preview=${encodeURIComponent(gameTipsProviderName)}`} target="_blank" rel="noopener noreferrer"><Images size={14} />预览合成图样式 ↗</a>}
@@ -379,7 +397,10 @@ export default function TelegramScheduledMessages({ request, signInPath }: Props
               <div className="cms-scheduled-actions"><button className="cms-primary" type="submit" disabled={conflict || isGameTipsDraft && draft.enabled && !providerReady}>{busy === "save" ? <LoaderCircle size={15} className="cms-spin" /> : <Check size={15} />}{isGameTipsDraft ? "保存 Game Tips 排期" : "保存文案与时间"}</button><span className="cms-scheduled-muted">草稿需保存后才会生效</span></div>
             </fieldset>
           </form>}
-          {!visiblePlans.length && !draft && <div className="cms-scheduled-empty"><strong>目前没有待排文案</strong><p>添加一条文案，选择日期、时间和频道，再启用自动发布。</p></div>}
+          {!visiblePlans.length && !draft && <div className="cms-scheduled-empty">
+            <strong>{gameTips ? "目前没有 Game Tips 排期" : "目前没有待排文案"}</strong>
+            <p>{gameTips ? "选择游戏平台、文案、时间和频道，保存后即可启用。" : "添加一条文案，选择日期、时间和频道，再启用自动发布。"}</p>
+          </div>}
           {dates.map(date => <div key={date || "daily"} className="cms-scheduled-plan-list">
             <h4 className="cms-scheduled-day"><CalendarClock size={15} />{date ? <><time dateTime={date}>{date}</time>{date === today && <span className="cms-scheduled-pill cms-scheduled-good">今天</span>}</> : "每天重复"}</h4>
             {visiblePlans.filter(plan => (plan.calendarDate || "") === date).sort((left, right) => left.times[0].localeCompare(right.times[0])).map(plan => {
@@ -393,7 +414,7 @@ export default function TelegramScheduledMessages({ request, signInPath }: Props
                     <button type="button" className="cms-icon-button" aria-label={`删除计划 ${plan.name}`} disabled={Boolean(busy)} onClick={() => void remove(plan)}><Trash2 size={15} /></button>
                   </div>
                 </div>
-                {plan.gameTipsProvider ? <div className="cms-scheduled-attachment-label"><Gamepad2 size={15} />{plan.gameTipsProvider} · 随机 3 款游戏 · 3 图合成和自动文案</div> : <p className="cms-scheduled-copy">{plan.text}</p>}
+                {plan.gameTipsProvider ? <div className="cms-scheduled-attachment-label"><Gamepad2 size={15} />{plan.gameTipsProvider} · {GAME_TIPS_CAPTION_PRESETS.find(preset => preset.id === (plan.gameTipsCaptionPresetId || DEFAULT_GAME_TIPS_CAPTION_PRESET_ID))?.label} · 随机 3 款游戏</div> : <p className="cms-scheduled-copy">{plan.text}</p>}
                 {plan.gameTipsIssue && <p className="cms-scheduled-error">{plan.gameTipsIssue}</p>}
                 {plan.media && <div className="cms-scheduled-attachment-label"><Paperclip size={14} />{describeMedia(plan.media)}</div>}
                 <div className="cms-scheduled-plan-times">{plan.times.map(time => <span key={time}><Clock3 size={12} />{time}</span>)}</div>
@@ -402,10 +423,10 @@ export default function TelegramScheduledMessages({ request, signInPath }: Props
             })}
           </div>)}
         </div>
-        <div id="scheduled-panel-library" role="tabpanel" aria-labelledby="scheduled-tab-library" hidden={tab !== "library"} className="cms-scheduled-panel">
+        {gameTips && <div id="scheduled-panel-library" role="tabpanel" aria-labelledby="scheduled-tab-library" hidden={tab !== "library"} className="cms-scheduled-panel">
           <TelegramGameTipsLibrary request={request} signInPath={signInPath} active={tab === "library"}
             plans={plans} today={today} onProvidersChanged={updateGameTipsProviders} onSchedule={openGameTips} onEditSchedule={open} />
-        </div>
+        </div>}
         <div id="scheduled-panel-channels" role="tabpanel" aria-labelledby="scheduled-tab-channels" hidden={tab !== "channels"} className="cms-scheduled-panel">
           <div className="cms-scheduled-heading">
             <div><h3>发送频道</h3><p>将 @FreeBonus365ChatBot 设为频道管理员并开启发布权限，然后检查频道。</p></div>
@@ -444,12 +465,12 @@ export default function TelegramScheduledMessages({ request, signInPath }: Props
               <div><strong>{row.plan.name}</strong><small>{row.at <= now ? "已到时间，等待后台处理" : targetTitles(row.plan).join("、")}</small></div>
             </li>)}</ol> : <div className="cms-scheduled-empty">接下来 24 小时没有已启用的发送安排。</div>}
           </div>
-          <div className="cms-scheduled-note"><p>每日排期会在马来西亚时间 00:00 换日。Game Tips 到每个设定时间会重新从所选平台抽图。</p><p>关闭页面或刷新后，已保存的安排仍由后台发送。遇到 Telegram 回执不明时，可在发送记录核对「待确认」状态。</p></div>
+          <div className="cms-scheduled-note"><p>每日排期会在马来西亚时间 00:00 换日。{gameTips && "每次到达设定时间，系统会重新从所选平台抽图。"}</p><p>关闭页面或刷新后，已保存的安排仍由后台发送。遇到 Telegram 回执不明时，可在发送记录核对「待确认」状态。</p></div>
         </div>
         <div id="scheduled-panel-history" role="tabpanel" aria-labelledby="scheduled-tab-history" hidden={tab !== "history"} className="cms-scheduled-panel">
-          <dl className="cms-scheduled-counts">{Object.entries(statusLabels).map(([key, label]) => <div key={key}><dt>{label}</dt><dd>{status.counts[key] || 0}</dd></div>)}</dl>
+          <dl className="cms-scheduled-counts">{Object.entries(statusLabels).map(([key, label]) => <div key={key}><dt>{label}</dt><dd>{counts[key] || 0}</dd></div>)}</dl>
           <div className="cms-scheduled-heading"><div><h3>逐频道发送记录</h3><p>同一次计划的结果按频道显示。</p></div><label className="cms-scheduled-filter">状态<select value={historyFilter} onChange={event => setHistoryFilter(event.target.value)}><option value="all">全部状态</option>{Object.entries(statusLabels).map(([key, label]) => <option key={key} value={key}>{label}</option>)}</select></label></div>
-          {deliveries.length ? <div className="cms-scheduled-history">{deliveries.map(item => <article className="cms-scheduled-card" key={item.id}><div className="cms-scheduled-heading"><div><h3>{item.planName}</h3><p>{item.targetTitle}</p></div><span className={`cms-scheduled-pill ${item.status === "sent" ? "cms-scheduled-good" : item.status === "failed" || item.status === "unknown" ? "cms-scheduled-attention" : ""}`}>{statusLabels[item.status] || item.status}</span></div><small className="cms-scheduled-muted">计划：{displayTime(item.runAt)} · 发送：{displayTime(item.sentAt)}{item.messageId ? ` · 消息 #${item.messageId}` : ""}</small>{item.lastError && <p className="cms-scheduled-error">{item.lastError}</p>}</article>)}</div> : <div className="cms-scheduled-empty">暂无{historyFilter === "all" ? "" : statusLabels[historyFilter]}发送记录。</div>}
+          {deliveries.length ? <div className="cms-scheduled-history">{deliveries.map(item => <article className="cms-scheduled-card" key={item.id}><div className="cms-scheduled-heading"><div><h3>{item.planName}</h3><p>{item.gameTipsProvider ? `${item.gameTipsProvider} · ` : ""}{item.targetTitle}</p></div><span className={`cms-scheduled-pill ${item.status === "sent" ? "cms-scheduled-good" : item.status === "failed" || item.status === "unknown" ? "cms-scheduled-attention" : ""}`}>{statusLabels[item.status] || item.status}</span></div><small className="cms-scheduled-muted">计划：{displayTime(item.runAt)} · 发送：{displayTime(item.sentAt)}{item.messageId ? ` · 消息 #${item.messageId}` : ""}</small>{item.lastError && <p className="cms-scheduled-error">{item.lastError}</p>}</article>)}</div> : <div className="cms-scheduled-empty">暂无{historyFilter === "all" ? "" : statusLabels[historyFilter]}发送记录。</div>}
         </div>
       </>}
     </div>
