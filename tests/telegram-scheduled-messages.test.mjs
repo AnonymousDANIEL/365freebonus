@@ -252,8 +252,17 @@ test('Game Tips reuses the same photo and caption for a definitive 429 retry and
  const id=gameSlot(first).games[0].id;
  const asset=gameTips.listGameTipAssets(db()).find(entry=>entry.id===id);
  gameTips.updateGameTipsAsset(db(), {...asset,game:'Renamed Game'}, clock);
- const newLogo = await uploadLogo('MEGA888', '#42c754', logo);
- const newBackground = await uploadBackground('MEGA888', '#25787b', background);
+ const priorPlan=onlyPlan();
+ gameTips.updateGameTipsPlatform(db(), { provider:'MEGA888', name:'MEGA Updated', previousId:logo }, clock);
+ assert.equal(onlyPlan().revision,priorPlan.revision);
+ assert.equal(onlyPlan().nextRunAt,priorPlan.nextRunAt);
+ assert.equal(onlyPlan().gameTipsProvider,'MEGA Updated');
+ await assert.rejects(update({enabled:false,gameTipsProvider:'MEGA888'}),{status:409});
+ const newLogo = await uploadLogo('MEGA Updated', '#42c754', logo);
+ const newBackground = await uploadBackground('MEGA Updated', '#25787b', background);
+ assert.throws(() => gameTips.removeGameTipsPlatformPart(db(), {
+  provider:'MEGA Updated', previousId:newLogo, action:'deletePlatform',
+ }), {status:409});
  now+=30_000; await tick();
  const official=sendsMedia().filter(call=>call.p.chat_id===telegram.ids.official);
  assert.equal(official.length,2);
@@ -266,9 +275,20 @@ test('Game Tips reuses the same photo and caption for a definitive 429 retry and
  now = onlyPlan().nextRunAt; await tick();
  assert.equal(gameSlot(now).logoId,newLogo);
  assert.equal(gameSlot(now).backgroundId,newBackground);
+ assert.ok(gameSlot(now).caption.includes('365FreeBonus X MEGA Updated'));
+ assert.deepEqual(gameSlot(now).captionCycle.slice(0,-1),originalSnapshot.captionCycle);
  assert.notDeepEqual(sendsMedia().at(-1).upload.bytes,firstAttempt.upload.bytes);
  assert.ok(gameSlot(now).games.some(game=>game.game==='Renamed Game'));
  assert.ok(sendsMedia().slice(-2).every(call=>!call.p.caption.includes('Renamed Game')));
+ await update({enabled:false});
+ const history=status().deliveries;
+ const removed=gameTips.removeGameTipsPlatformPart(db(), {
+  provider:'MEGA Updated', previousId:newLogo, action:'deletePlatform',
+ }, clock);
+ assert.equal(removed.providers.length,0);
+ assert.deepEqual(status().deliveries,history);
+ assert.equal(onlyPlan().enabled,false);
+ await assert.rejects(update({enabled:true}),{status:400});
 });
 
 test('deleting an enabled Game Tips image preserves its queued retry and excludes it from the next post', async () => {

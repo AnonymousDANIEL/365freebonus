@@ -74,7 +74,12 @@ export function ensureGameTipsAssets(db: DatabaseSync) {
     upload_hash TEXT NOT NULL
   ) STRICT;
   CREATE UNIQUE INDEX IF NOT EXISTS telegram_game_tips_current_background
-  ON telegram_game_tips_backgrounds(provider_key) WHERE active = 1;`);
+  ON telegram_game_tips_backgrounds(provider_key) WHERE active = 1;
+  CREATE TABLE IF NOT EXISTS telegram_game_tips_platforms (
+    provider_key TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    active INTEGER NOT NULL CHECK (active IN (0, 1))
+  ) STRICT;`);
   if (!db.isTransaction) initialized.add(db);
 }
 
@@ -115,12 +120,14 @@ export function gameTipsProviders(db: DatabaseSync): GameTipsProvider[] {
     ), current_backgrounds AS (
       SELECT provider_key, id, name, slots_json FROM telegram_game_tips_backgrounds WHERE active = 1
     ), providers AS (
-      SELECT provider_key FROM game_providers UNION SELECT provider_key FROM current_logos UNION SELECT provider_key FROM current_backgrounds
+      SELECT provider_key FROM game_providers UNION SELECT provider_key FROM current_logos
+      UNION SELECT provider_key FROM current_backgrounds UNION SELECT provider_key FROM telegram_game_tips_platforms WHERE active = 1
     )
-    SELECT COALESCE(l.name, b.name, g.name) AS name, COALESCE(g.count, 0) AS count, l.id AS logoId,
+    SELECT COALESCE(platform.name, l.name, b.name, g.name) AS name, COALESCE(g.count, 0) AS count, l.id AS logoId,
       b.id AS backgroundId, b.slots_json AS slotsJson
     FROM providers p LEFT JOIN game_providers g USING(provider_key) LEFT JOIN current_logos l USING(provider_key)
-      LEFT JOIN current_backgrounds b USING(provider_key) ORDER BY p.provider_key`).all() as Array<{
+      LEFT JOIN current_backgrounds b USING(provider_key) LEFT JOIN telegram_game_tips_platforms platform USING(provider_key)
+    WHERE platform.active IS NULL OR platform.active = 1 ORDER BY p.provider_key`).all() as Array<{
     name: string; count: number; logoId: string | null; backgroundId: string | null; slotsJson: string | null;
   }>;
   return rows.map(({ name, count, logoId, backgroundId, slotsJson }) => ({
@@ -249,6 +256,7 @@ export async function uploadGameTipsAsset(db: DatabaseSync, request: Request, cl
   db.exec("BEGIN IMMEDIATE");
   try {
     if (!uploadMatches(db, id, hash)) {
+      requireAvailablePlatformKey(db, names.providerKey);
       ensureDistinctGame(db, names, id);
       releaseDeletedGameTipsAssets(db);
       ensureAssetUploadSpace(db, image.length);
@@ -273,6 +281,7 @@ export function updateGameTipsAsset(db: DatabaseSync, input: Pick<GameTipsAsset,
   db.exec("BEGIN IMMEDIATE");
   try {
     const row = currentAsset(db, input.id, input.updatedAt);
+    requireAvailablePlatformKey(db, names.providerKey);
     if (input.enabled) ensureDistinctGame(db, names, input.id);
     const updatedAt = Math.max(clock(), row.updatedAt + 1);
     db.prepare(`UPDATE telegram_game_tips_assets SET provider = ?, provider_key = ?, game = ?, game_key = ?, enabled = ?, updated_at = ?
@@ -363,6 +372,7 @@ function logoUploadMatches(db: DatabaseSync, id: string, hash: string) {
 }
 
 function releaseRetiredImages(db: DatabaseSync, table: "telegram_game_tips_logos" | "telegram_game_tips_backgrounds", slotField: "$.logoId" | "$.backgroundId") {
+  if (!db.prepare(`SELECT 1 FROM ${table} WHERE active = 0 AND length(image) > 0 LIMIT 1`).get()) return;
   const hasSlots = db.prepare("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'telegram_game_tip_slots'").get();
   // Retain the identity for upload replays and the bytes only while a queued send can need them.
   db.prepare(`UPDATE ${table} AS version SET image = X''
@@ -370,9 +380,131 @@ function releaseRetiredImages(db: DatabaseSync, table: "telegram_game_tips_logos
       SELECT 1 FROM telegram_game_tip_slots s
       JOIN telegram_scheduled_message_deliveries d
         ON d.plan_id = s.plan_id AND d.plan_revision = s.plan_revision AND d.run_at = s.run_at
-      WHERE s.provider_key = version.provider_key AND json_extract(s.selection_json, ?) = version.id
+      WHERE s.provider_key = version.provider_key AND CASE WHEN json_valid(s.selection_json) THEN json_extract(s.selection_json, ?) END = version.id
         AND d.status IN ('pending', 'sending')
     )` : ""}`).run(...(hasSlots ? [slotField] : []));
+}
+
+function retiredPlatformKey(db: DatabaseSync, key: string): boolean {
+  return Boolean(db.prepare("SELECT 1 FROM telegram_game_tips_platforms WHERE provider_key = ? AND active = 0").get(key));
+}
+
+export function gameTipsPlatformRetired(db: DatabaseSync, provider: string): boolean {
+  ensureGameTipsAssets(db);
+  return retiredPlatformKey(db, gameTipsProviderKey(provider));
+}
+
+function requireAvailablePlatformKey(db: DatabaseSync, key: string) {
+  if (retiredPlatformKey(db, key)) {
+    throw new GameTipsError("这个平台已改名或删除，请刷新图库后再操作。", 409);
+  }
+}
+
+export function releaseRetiredGameTipsArtwork(db: DatabaseSync) {
+  ensureGameTipsAssets(db);
+  releaseRetiredImages(db, "telegram_game_tips_logos", "$.logoId");
+  releaseRetiredImages(db, "telegram_game_tips_backgrounds", "$.backgroundId");
+}
+
+function findPlatform(db: DatabaseSync, key: string): GameTipsProvider | undefined {
+  const current = gameTipsProviders(db).find(provider => gameTipsProviderKey(provider.name) === key);
+  if (current) return current;
+  const game = db.prepare(`SELECT provider AS name FROM telegram_game_tips_assets WHERE provider_key = ? AND deleted_at = 0
+    ORDER BY game_key, created_at DESC LIMIT 1`)
+    .get(key) as { name: string } | undefined;
+  return game && { name: game.name, count: 0 };
+}
+
+function setPlatform(db: DatabaseSync, key: string, name: string, active: boolean) {
+  db.prepare(`INSERT INTO telegram_game_tips_platforms (provider_key, name, active) VALUES (?, ?, ?)
+    ON CONFLICT(provider_key) DO UPDATE SET name = excluded.name, active = excluded.active`).run(key, name, Number(active));
+}
+
+function requirePlatformVersion(db: DatabaseSync, provider: string, previousId: string) {
+  if (previousId && !uploadIdPattern.test(previousId)) throw new GameTipsError("平台 Logo 编号不正确。");
+  const platform = findPlatform(db, gameTipsProviderKey(provider));
+  if (!platform) throw new GameTipsError("找不到这个平台，请刷新图库。", 404);
+  if (platform.name !== provider || (platform.logoId ?? "") !== previousId) {
+    throw new GameTipsError("平台资料已更新，请刷新图库后再操作。", 409);
+  }
+  return platform;
+}
+
+function platformPlans(db: DatabaseSync, key: string) {
+  if (!db.prepare("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'telegram_scheduled_message_plans'").get()) return [];
+  return (db.prepare(`SELECT id, game_tips_provider, enabled, next_run_at FROM telegram_scheduled_message_plans
+    WHERE deleted_at = 0 AND game_tips_provider <> ''`).all() as
+    { id: string; game_tips_provider: string; enabled: number; next_run_at: number }[])
+    .filter(plan => gameTipsProviderKey(plan.game_tips_provider) === key);
+}
+
+function renamePlatform(db: DatabaseSync, current: GameTipsProvider, name: string, now: number) {
+  if (current.name === name) return;
+  const oldKey = gameTipsProviderKey(current.name), newKey = gameTipsProviderKey(name);
+  if (oldKey !== newKey && findPlatform(db, newKey)) throw new GameTipsError("已有同名平台，请使用不同的名称。", 409);
+  setPlatform(db, newKey, name, true);
+  const plans = platformPlans(db, oldKey);
+  const changePlan = plans.length ? db.prepare("UPDATE telegram_scheduled_message_plans SET game_tips_provider = ?, updated_at = MAX(updated_at + 1, ?) WHERE id = ?") : undefined;
+  for (const plan of plans) changePlan?.run(name, now, plan.id);
+  db.prepare(`UPDATE telegram_game_tips_assets SET provider_key = ?, provider = ?, updated_at = MAX(updated_at + 1, ?)
+    WHERE provider_key = ? AND deleted_at = 0`).run(newKey, name, now, oldKey);
+  for (const table of ["telegram_game_tips_logos", "telegram_game_tips_backgrounds"]) {
+    db.prepare(`UPDATE ${table} SET provider_key = ?, name = CASE WHEN active = 1 THEN ? ELSE name END WHERE provider_key = ?`).run(newKey, name, oldKey);
+  }
+  if (oldKey !== newKey) {
+    // Preserve frozen captions and art IDs for queued sends, and keep the rotation for future slots.
+    if (db.prepare("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'telegram_game_tip_slots'").get()) {
+      db.prepare("UPDATE telegram_game_tip_slots SET provider_key = ? WHERE provider_key = ?").run(newKey, oldKey);
+    }
+    setPlatform(db, oldKey, current.name, false);
+  }
+}
+
+function changePlatform(db: DatabaseSync, update: () => void): GameTipsLibrary {
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    update();
+    db.exec("COMMIT");
+  } catch (error) {
+    if (db.isTransaction) db.exec("ROLLBACK");
+    if ((error as { errcode?: number }).errcode === sqliteFull) throw gameTipsDiskFull();
+    throw error;
+  }
+  return gameTipsLibrary(db);
+}
+
+export function updateGameTipsPlatform(db: DatabaseSync, input: { provider: string; name: string; previousId: string }, clock = Date.now): GameTipsLibrary {
+  ensureGameTipsAssets(db);
+  const provider = nameLabel(input.provider, GAME_TIPS_PROVIDER_LIMIT, "平台名称");
+  const name = nameLabel(input.name, GAME_TIPS_PROVIDER_LIMIT, "平台名称");
+  return changePlatform(db, () => renamePlatform(db, requirePlatformVersion(db, provider, input.previousId), name, clock()));
+}
+
+export function removeGameTipsPlatformPart(db: DatabaseSync, input: {
+  provider: string; previousId: string; action: "removeLogo" | "deletePlatform";
+}, clock = Date.now): GameTipsLibrary {
+  ensureGameTipsAssets(db);
+  const provider = nameLabel(input.provider, GAME_TIPS_PROVIDER_LIMIT, "平台名称");
+  const key = gameTipsProviderKey(provider);
+  return changePlatform(db, () => {
+    const current = requirePlatformVersion(db, provider, input.previousId);
+    if (input.action === "deletePlatform") {
+      const plans = platformPlans(db, key);
+      const pending = plans.length ? db.prepare("SELECT 1 FROM telegram_scheduled_message_deliveries WHERE plan_id = ? AND status IN ('pending', 'sending') LIMIT 1") : undefined;
+      if (plans.some(plan => plan.enabled === 1 && plan.next_run_at > 0 || pending?.get(plan.id))) {
+        throw new GameTipsError("此平台仍有启用的排期或待发送消息，请暂停或更换相关排期的平台，等正在发送的消息结束后再删除。", 409);
+      }
+      setPlatform(db, key, current.name, false);
+      db.prepare("UPDATE telegram_game_tips_assets SET enabled = 0, deleted_at = MAX(updated_at + 1, ?) WHERE provider_key = ? AND deleted_at = 0").run(clock(), key);
+      db.prepare("UPDATE telegram_game_tips_backgrounds SET active = 0 WHERE provider_key = ? AND active = 1").run(key);
+      releaseDeletedGameTipsAssets(db);
+      releaseRetiredImages(db, "telegram_game_tips_backgrounds", "$.backgroundId");
+    } else {
+      setPlatform(db, key, current.name, true);
+    }
+    db.prepare("UPDATE telegram_game_tips_logos SET active = 0 WHERE provider_key = ? AND active = 1").run(key);
+    releaseRetiredImages(db, "telegram_game_tips_logos", "$.logoId");
+  });
 }
 
 export async function uploadGameTipsLogo(db: DatabaseSync, request: Request): Promise<GameTipsLibrary> {
@@ -384,30 +516,33 @@ export async function uploadGameTipsLogo(db: DatabaseSync, request: Request): Pr
   }
   const provider = nameLabel(params.get("provider") ?? "", GAME_TIPS_PROVIDER_LIMIT, "平台名称");
   const providerKey = gameTipsProviderKey(provider);
+  const previousProvider = params.has("previousProvider") ? nameLabel(params.get("previousProvider") ?? "", GAME_TIPS_PROVIDER_LIMIT, "原平台名称") : undefined;
   const declared = uploadContentType(request);
   const bytes = await readUpload(request);
-  const hash = createHash("sha256").update(JSON.stringify([providerKey, previousId])).update(bytes).digest("hex");
+  const hash = createHash("sha256").update(JSON.stringify(previousProvider === undefined
+    ? [providerKey, previousId] : [provider, previousId, previousProvider])).update(bytes).digest("hex");
   if (logoUploadMatches(db, id, hash)) return gameTipsLibrary(db);
   const image = await normalizeLogo(bytes, declared);
 
-  db.exec("BEGIN IMMEDIATE");
-  try {
+  return changePlatform(db, () => {
     if (!logoUploadMatches(db, id, hash)) {
-      const existing = gameTipsProviderLogo(db, provider);
-      if ((existing?.logoId ?? "") !== previousId) throw new GameTipsError("平台 Logo 已更新，请刷新图库后再上传。", 409);
+      const current = previousProvider === undefined ? findPlatform(db, providerKey) : requirePlatformVersion(db, previousProvider, previousId);
+      const existing = current?.logoId;
+      if ((existing ?? "") !== previousId) throw new GameTipsError("平台 Logo 已更新，请刷新图库后再上传。", 409);
+      const name = previousProvider === undefined ? current?.name ?? provider : provider;
+      if (current && previousProvider !== undefined) renamePlatform(db, current, name, Date.now());
+      setPlatform(db, providerKey, name, true);
       if (!existing) {
         const { count } = db.prepare("SELECT COUNT(*) AS count FROM telegram_game_tips_logos WHERE active = 1").get() as { count: number };
         if (count >= maxProviderLogos) throw new GameTipsError(`图库最多可保存 ${maxProviderLogos} 个平台 Logo。`, 409);
-      } else db.prepare("UPDATE telegram_game_tips_logos SET active = 0 WHERE id = ?").run(existing.logoId);
+      } else db.prepare("UPDATE telegram_game_tips_logos SET active = 0 WHERE id = ?").run(existing);
       releaseRetiredImages(db, "telegram_game_tips_logos", "$.logoId");
       const { count } = db.prepare("SELECT COUNT(*) AS count FROM telegram_game_tips_logos WHERE length(image) > 0").get() as { count: number };
       if (count >= maxLogoRevisions) throw new GameTipsError("待发队列暂时占用了较多 Logo 版本，请等发送结束后再试。", 409);
       db.prepare("INSERT INTO telegram_game_tips_logos(id, provider_key, name, active, image, upload_hash) VALUES (?, ?, ?, 1, ?, ?)")
-        .run(id, providerKey, existing?.name ?? provider, image, hash);
+        .run(id, providerKey, name, image, hash);
     }
-    db.exec("COMMIT");
-  } catch (error) { db.exec("ROLLBACK"); throw error; }
-  return gameTipsLibrary(db);
+  });
 }
 
 function logoBytes(db: DatabaseSync, id: string, activeOnly = false): Uint8Array {
@@ -487,12 +622,14 @@ function saveBackgroundVersion(db: DatabaseSync, version: ReturnType<typeof prep
   db.exec("BEGIN IMMEDIATE");
   try {
     if (!backgroundUploadMatches(db, version.id, hash)) {
+      requireAvailablePlatformKey(db, version.key);
       const previous = db.prepare("SELECT id, name FROM telegram_game_tips_backgrounds WHERE provider_key = ? AND active = 1")
         .get(version.key) as { id: string; name: string } | undefined;
       if ((previous?.id ?? "") !== version.previousId) throw new GameTipsError("平台背景已更新，请刷新图库后再保存。", 409);
       const game = db.prepare("SELECT provider AS name FROM telegram_game_tips_assets WHERE provider_key = ? AND deleted_at = 0 ORDER BY enabled DESC, provider LIMIT 1")
         .get(version.key) as { name: string } | undefined;
-      const name = gameTipsProviderLogo(db, version.name)?.name ?? previous?.name ?? game?.name;
+      const platform = db.prepare("SELECT name FROM telegram_game_tips_platforms WHERE provider_key = ? AND active = 1").get(version.key) as { name: string } | undefined;
+      const name = platform?.name ?? gameTipsProviderLogo(db, version.name)?.name ?? previous?.name ?? game?.name;
       if (!name) throw new GameTipsError("请先新增这个平台或为该平台上传游戏图片。", 404);
 
       const content = image ?? backgroundVersion(db, version.previousId, true).image;

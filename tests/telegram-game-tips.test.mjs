@@ -22,8 +22,8 @@ for (const source of ["telegram-game-tips-types", "telegram-game-tips"]) {
 const require = createRequire(import.meta.url);
 const { deleteGameTipsAsset, gameTipsBackgroundPreview, gameTipsImagePreview, gameTipsLibrary, gameTipsLogoPreview,
   gameTipsPosterPreview, gameTipsProviderBackgroundId, gameTipsProviderLogo, gameTipsProviders, listGameTipAssets, renderGameTips,
-  releaseDeletedGameTipsAssets, updateGameTipsAsset, updateGameTipsBackgroundSlots, uploadGameTipsAsset,
-  uploadGameTipsBackground, uploadGameTipsLogo } =
+  releaseDeletedGameTipsAssets, removeGameTipsPlatformPart, updateGameTipsAsset, updateGameTipsBackgroundSlots, updateGameTipsPlatform,
+  uploadGameTipsAsset, uploadGameTipsBackground, uploadGameTipsLogo } =
   require(path.join(fixture, "telegram-game-tips.js"));
 const { GAME_TIPS_DEFAULT_SLOTS, validGameTipsBackgroundSlots } = require(path.join(fixture, "telegram-game-tips-types.js"));
 
@@ -48,8 +48,9 @@ function uploadRequest(image, { id = randomUUID(), provider = "MEGA888", game = 
   });
 }
 
-function logoRequest(image, { id = randomUUID(), provider = "MEGA888", previousId = "", contentType = "image/png" } = {}) {
+function logoRequest(image, { id = randomUUID(), provider = "MEGA888", previousProvider, previousId = "", contentType = "image/png" } = {}) {
   const query = new URLSearchParams({ id, provider, previousId });
+  if (previousProvider !== undefined) query.set("previousProvider", previousProvider);
   return new Request(`https://directory.example/api/admin/telegram/game-tips/logo?${query}`, {
     method: "POST", headers: { "content-type": contentType }, body: image,
   });
@@ -274,6 +275,83 @@ test("logo-first providers show with no games, preserve canonical naming and exp
   assert.equal(db.prepare("SELECT length(image) AS bytes FROM telegram_game_tips_logos WHERE id = ?").get(id).bytes, 0);
 });
 
+test("name-only edits preserve the logo and move all existing games, with normalized collision and stale editor checks", async t => {
+  const db = database(t), logoId = randomUUID(), image = await png();
+  await uploadGameTipsLogo(db, logoRequest(image, { id: logoId }));
+  await uploadGameTipsLogo(db, logoRequest(image, { provider: "Other" }));
+  const active = (await uploadGameTipsAsset(db, uploadRequest(image), () => 30_000)).assets[0];
+  const disabled = (await uploadGameTipsAsset(db, uploadRequest(image, { game: "Iceland", provider: "mega888" }), () => 31_000))
+    .assets.find(asset => asset.game === "Iceland");
+  updateGameTipsAsset(db, { ...disabled, enabled: false }, () => 32_000);
+  const before = gameTipsLibrary(db);
+  assert.throws(() => updateGameTipsPlatform(db, { provider: "MEGA888", name: "ＯＴＨＥＲ", previousId: logoId }), { status: 409 });
+  assert.throws(() => updateGameTipsPlatform(db, { provider: "MEGA888", name: "Mega Game", previousId: randomUUID() }), { status: 409 });
+  assert.deepEqual(gameTipsLibrary(db), before);
+
+  const casing = updateGameTipsPlatform(db, { provider: "MEGA888", name: "Mega888", previousId: logoId }, () => 32_000);
+  assert.equal(casing.providers.find(value => value.logoId === logoId).name, "Mega888");
+  const result = updateGameTipsPlatform(db, { provider: "Mega888", name: "Mega Game", previousId: logoId }, () => 33_000);
+  assert.deepEqual(result.providers.map(({ name, count }) => ({ name, count })), [{ name: "Mega Game", count: 1 }, { name: "Other", count: 0 }]);
+  assert.deepEqual(gameTipsProviderLogo(db, "Mega Game"), { name: "Mega Game", logoId });
+  assert.deepEqual(result.assets.map(asset => [asset.provider, asset.enabled]), [["Mega Game", true], ["Mega Game", false]]);
+  assert.equal(gameTipsLogoPreview(db, logoId).status, 200);
+  assert.equal(gameTipsImagePreview(db, active.id).status, 200);
+  assert.throws(() => updateGameTipsAsset(db, { ...active, game: "stale editor" }), { status: 409 });
+});
+
+test("removing a logo leaves a logo-only platform visible and rejects a stale replacement", async t => {
+  const db = database(t), logoId = randomUUID(), image = await png();
+  await uploadGameTipsLogo(db, logoRequest(image, { id: logoId }));
+  const remove = { provider: "MEGA888", previousId: logoId, action: "removeLogo" };
+  assert.throws(() => removeGameTipsPlatformPart(db, { ...remove, previousId: randomUUID() }), { status: 409 });
+  const result = removeGameTipsPlatformPart(db, remove);
+  assert.deepEqual(result.assets, []);
+  assert.equal(result.providers.length, 1);
+  assert.equal(result.providers[0].name, "MEGA888");
+  assert.equal(result.providers[0].count, 0);
+  assert.equal(result.providers[0].logoId, undefined);
+  assert.throws(() => gameTipsLogoPreview(db, logoId), { status: 404 });
+  await assert.rejects(uploadGameTipsLogo(db, logoRequest(image, { previousProvider: "MEGA888", previousId: logoId })), { status: 409 });
+  await uploadGameTipsLogo(db, logoRequest(image, { previousProvider: "MEGA888" }));
+  assert.ok(gameTipsProviderLogo(db, "MEGA888"));
+});
+
+test("explicit platform deletion hides all current media and stale requests cannot recreate it", async t => {
+  const db = database(t), logoId = randomUUID(), backgroundId = randomUUID(), id = randomUUID(), image = await png();
+  await uploadGameTipsLogo(db, logoRequest(image, { id: logoId }));
+  await uploadGameTipsBackground(db, backgroundRequest(image, { id: backgroundId }));
+  await uploadGameTipsAsset(db, uploadRequest(image, { id }));
+  const deleted = removeGameTipsPlatformPart(db, { provider: "MEGA888", previousId: logoId, action: "deletePlatform" });
+  assert.deepEqual(deleted, { assets: [], providers: [] });
+  for (const [read, mediaId] of [[gameTipsImagePreview, id], [gameTipsLogoPreview, logoId], [gameTipsBackgroundPreview, backgroundId]]) {
+    assert.throws(() => read(db, mediaId), { status: 404 });
+  }
+  await assert.rejects(uploadGameTipsAsset(db, uploadRequest(image, { game: "Late upload" })), { status: 409 });
+  await assert.rejects(uploadGameTipsLogo(db, logoRequest(image, { previousProvider: "MEGA888", previousId: logoId })), { status: 404 });
+  await assert.rejects(uploadGameTipsBackground(db, backgroundRequest(image, { previousId: backgroundId })), error => [404, 409].includes(error.status));
+  assert.deepEqual(gameTipsLibrary(db), deleted);
+  const revived = await uploadGameTipsLogo(db, logoRequest(image));
+  assert.equal(revived.providers[0].name, "MEGA888");
+  assert.equal(revived.providers[0].count, 0);
+  assert.equal(revived.providers[0].backgroundId, undefined);
+  assert.deepEqual(revived.assets, []);
+});
+
+test("combined rename and logo replacement safely replay the same operation after the original name is retired", async t => {
+  const db = database(t), previousId = randomUUID(), id = randomUUID(), image = await png("#19fb19");
+  await uploadGameTipsLogo(db, logoRequest(await png(), { id: previousId }));
+  await uploadGameTipsAsset(db, uploadRequest(image));
+  const replacement = { id, provider: "Mega Picks", previousProvider: "MEGA888", previousId };
+  const saved = await uploadGameTipsLogo(db, logoRequest(image, replacement));
+  assert.equal(saved.providers.length, 1);
+  assert.deepEqual(gameTipsProviderLogo(db, "Mega Picks"), { name: "Mega Picks", logoId: id });
+  assert.equal(saved.assets[0].provider, "Mega Picks");
+  assert.deepEqual(await uploadGameTipsLogo(db, logoRequest(image, replacement)), saved);
+  await assert.rejects(uploadGameTipsLogo(db, logoRequest(image, { ...replacement, provider: "Other" })), { status: 409 });
+  assert.throws(() => gameTipsLogoPreview(db, previousId), { status: 404 });
+  assert.equal(gameTipsLogoPreview(db, id).status, 200);
+});
+
 test("replacing a logo keeps queued poster output identical and reclaims prior bytes once the queue is terminal", async t => {
   const db = database(t), id = randomUUID(), second = randomUUID();
   await uploadGameTipsLogo(db, logoRequest(await png("#fb1919"), { id }));
@@ -299,6 +377,33 @@ test("replacing a logo keeps queued poster output identical and reclaims prior b
   db.exec("UPDATE telegram_scheduled_message_deliveries SET status = 'sent'");
   await uploadGameTipsLogo(db, logoRequest(await png("#19fb19"), { provider: "Other" }));
   assert.equal(db.prepare("SELECT length(image) AS bytes FROM telegram_game_tips_logos WHERE id = ?").get(id).bytes, 0);
+});
+
+test("renaming a platform retains pinned logo and template versions across subsequent replacement", async t => {
+  const db = database(t), logoId = randomUUID(), backgroundId = randomUUID(), gameImage = await png("#1919fb");
+  await uploadGameTipsLogo(db, logoRequest(await png("#fb1919"), { id: logoId }));
+  await uploadGameTipsBackground(db, backgroundRequest(await png("#281457"), { id: backgroundId }));
+  for (const game of ["Dolphin Reef", "Iceland", "Great Blue"]) await uploadGameTipsAsset(db, uploadRequest(gameImage, { game }));
+  const games = listGameTipAssets(db), logoSlot = { provider: "MEGA888", games, logoId };
+  const backgroundSlot = { ...logoSlot, backgroundId };
+  db.exec(`CREATE TABLE telegram_game_tip_slots(plan_id TEXT, plan_revision TEXT, run_at INTEGER, provider_key TEXT, selection_json TEXT);
+    CREATE TABLE telegram_scheduled_message_deliveries(plan_id TEXT, plan_revision TEXT, run_at INTEGER, status TEXT);
+    INSERT INTO telegram_scheduled_message_deliveries VALUES ('a', 'b', 123, 'pending'), ('a', 'b', 456, 'sending');`);
+  const saveSlot = db.prepare("INSERT INTO telegram_game_tip_slots VALUES ('a', 'b', ?, 'mega888', ?)");
+  saveSlot.run(123, JSON.stringify(logoSlot));
+  saveSlot.run(456, JSON.stringify(backgroundSlot));
+  const oldLogo = await renderGameTips(db, logoSlot);
+  const oldBackground = await renderGameTips(db, backgroundSlot);
+  const newerLogo = randomUUID();
+  // Already retired but still pending at rename time.
+  await uploadGameTipsLogo(db, logoRequest(await png("#19fb19"), { id: newerLogo, previousId: logoId }));
+  updateGameTipsPlatform(db, { provider: "MEGA888", name: "Mega Game", previousId: newerLogo });
+  await uploadGameTipsLogo(db, logoRequest(await png("#1919fb"), { provider: "Mega Game", previousProvider: "Mega Game", previousId: newerLogo }));
+  await uploadGameTipsBackground(db, backgroundRequest(await png("#bc7632"), { provider: "Mega Game", previousId: backgroundId }));
+  assert.deepEqual(await renderGameTips(db, logoSlot), oldLogo);
+  assert.deepEqual(await renderGameTips(db, backgroundSlot), oldBackground);
+  assert.deepEqual(db.prepare("SELECT selection_json FROM telegram_game_tip_slots ORDER BY run_at").all().map(row => JSON.parse(row.selection_json)),
+    [logoSlot, backgroundSlot]);
 });
 
 test("backgrounds require a known platform, validate 3 nonoverlapping positions and update geometry without decoding again", async t => {

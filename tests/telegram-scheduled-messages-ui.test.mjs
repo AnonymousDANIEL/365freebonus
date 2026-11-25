@@ -252,8 +252,78 @@ test('creating a platform posts one logo and replacing it submits the displayed 
     h.mutation(() => ({ ...current, providers: [{ ...current.providers[0], logoId: 'logo-new' }] }));
     await h.form().props.onSubmit({ preventDefault() {} }); h.render();
     const replace = h.calls.filter(call => call.method === 'POST').at(-1);
-    assert.match(replace.path, /previousId=logo-old$/);
+    const query = new URL(replace.path, 'https://example.com').searchParams;
+    assert.equal(query.get('previousId'), 'logo-old');
+    assert.equal(query.get('previousProvider'), '918KISS');
     assert.ok(h.nodes().some(node => node.type === 'img' && node.props.src === '/api/admin/telegram/game-tips/logo?id=logo-new'));
+  } finally { h.close(); }
+});
+
+test('a platform name can be saved without uploading a logo and a later rename can include a new logo', async () => {
+  const first = { name: 'MEGA888', count: 0 };
+  const other = { name: 'PUSSY88', count: 0 };
+  const h = harness({ assets: [], providers: [first, other] }, {
+    library: true, props: { active: true, plans: [], today: '2026-11-15',
+      onProvidersChanged() {}, onSchedule() {}, onEditSchedule() {},
+    },
+  });
+  try {
+    await h.ready();
+    h.button('编辑平台名称').props.onClick(); h.render();
+    assert.equal(h.field('平台名称').props.readOnly, false);
+    assert.equal(h.button('保存平台资料').props.disabled, true);
+    h.field('平台名称').props.onChange({ target: { value: 'Zed Game' } }); h.render();
+    h.mutation(() => ({ assets: [], providers: [other, { ...first, name: 'Zed Game' }] }));
+    await h.form().props.onSubmit({ preventDefault() {} }); h.render();
+    const put = h.calls.find(call => call.method === 'PUT');
+    assert.equal(put.path, '/api/admin/telegram/game-tips/logo');
+    assert.deepEqual({ ...put.body }, { provider: 'MEGA888', name: 'Zed Game', previousId: '' });
+    assert.equal(h.button('Zed Game0 款游戏可用').props['aria-pressed'], true);
+    assert.equal(h.button('PUSSY880 款游戏可用').props['aria-pressed'], false);
+    assert.ok(h.button('上传平台 Logo'));
+
+    h.button('编辑平台名称').props.onClick(); h.render();
+    h.field('平台名称').props.onChange({ target: { value: 'Mega New' } }); h.render();
+    const file = { name: 'new.png', type: 'image/png', size: 512 };
+    h.nodes().find(node => node.props['aria-label'] === '选择平台 Logo').props.onChange({ target: { files: [file] } }); h.render();
+    h.mutation(() => ({ assets: [], providers: [other, { ...first, name: 'Mega New', logoId: 'new-logo' }] }));
+    await h.form().props.onSubmit({ preventDefault() {} }); h.render();
+    const post = h.calls.find(call => call.method === 'POST');
+    const query = new URL(post.path, 'https://example.com').searchParams;
+    assert.equal(post.body, file);
+    assert.equal(query.get('provider'), 'Mega New');
+    assert.equal(query.get('previousProvider'), 'Zed Game');
+    assert.equal(h.button('Mega New0 款游戏可用').props['aria-pressed'], true);
+  } finally { h.close(); }
+});
+
+test('Game Tips can remove only a logo or delete the selected platform with explicit confirmation', async () => {
+  const first = { name: 'MEGA888', count: 0, logoId: 'logo-one' };
+  const other = { name: 'PUSSY88', count: 0 };
+  const confirmations = [];
+  const h = harness({ assets: [], providers: [first, other] }, {
+    library: true, confirm: text => { confirmations.push(text); return confirmations.length > 1; },
+    props: { active: true, plans: [], today: '2026-11-15', onProvidersChanged() {}, onSchedule() {}, onEditSchedule() {} },
+  });
+  try {
+    await h.ready();
+    h.button('删除平台').props.onClick(); await h.ready();
+    assert.match(confirmations[0], /尚未执行的计划/);
+    assert.ok(!h.calls.some(call => call.method === 'DELETE'));
+    h.mutation(() => ({ assets: [], providers: [{ name: 'MEGA888', count: 0 }, other] }));
+    h.button('移除 Logo').props.onClick(); await h.ready();
+    assert.equal(h.button('MEGA8880 款游戏可用').props['aria-pressed'], true);
+    assert.ok(h.button('上传平台 Logo'));
+
+    h.mutation(() => ({ assets: [], providers: [other] }));
+    h.button('删除平台').props.onClick(); await h.ready();
+    const deletes = h.calls.filter(call => call.method === 'DELETE');
+    assert.deepEqual(deletes.map(({ path, body }) => ({ path, body: { ...body } })), [
+      { path: '/api/admin/telegram/game-tips/logo', body: { provider: 'MEGA888', previousId: 'logo-one', action: 'removeLogo' } },
+      { path: '/api/admin/telegram/game-tips/logo', body: { provider: 'MEGA888', previousId: '', action: 'deletePlatform' } },
+    ]);
+    assert.equal(h.button('PUSSY880 款游戏可用').props['aria-pressed'], true);
+    assert.equal(h.nodes().find(node => node.type === 'button' && node.props['aria-pressed'] === true).props.disabled, false);
   } finally { h.close(); }
 });
 

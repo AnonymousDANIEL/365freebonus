@@ -3,7 +3,8 @@ import type { DatabaseSync } from "node:sqlite";
 import { getSqlite } from "./sqlite";
 import { telegramRequest } from "./telegram-bot";
 import { readScheduledMessageMedia, sendScheduledMessageMedia } from "./telegram-scheduled-media";
-import { ensureGameTipsAssets, gameTipsProviderBackgroundId, gameTipsProviderKey, gameTipsProviderLogo, gameTipsProviders, listGameTipAssets, releaseDeletedGameTipsAssets, renderGameTips } from "./telegram-game-tips";
+import { ensureGameTipsAssets, gameTipsPlatformRetired, gameTipsProviderBackgroundId, gameTipsProviderKey, gameTipsProviderLogo,
+  gameTipsProviders, listGameTipAssets, releaseDeletedGameTipsAssets, releaseRetiredGameTipsArtwork, renderGameTips } from "./telegram-game-tips";
 import { DEFAULT_GAME_TIPS_CAPTION_PRESET_ID, GAME_TIPS_CAPTION_BODIES, gameTipsCaption, isGameTipsCaptionPresetId } from "./telegram-game-tips-captions";
 import { GAME_TIPS_PROVIDER_LIMIT, type GameTipsProvider, type GameTipsSelection } from "./telegram-game-tips-types";
 import { isGeneratedGameTipsCaption, RELAY_DEFAULT_TARGET } from "./telegram-relay-content";
@@ -356,7 +357,9 @@ export async function saveScheduledMessagePlan(db: DatabaseSync, input: Schedule
   const times = [...input.times].sort(), timesJson = JSON.stringify(times), name = input.name.trim(), enabled = Number(input.enabled);
   const calendarDate = input.calendarDate === undefined ? before?.calendar_date || "" : input.calendarDate || "";
   const mediaId = input.mediaId === undefined ? before?.media_id || "" : input.mediaId || "";
-  const provider = input.gameTipsProvider === undefined ? before?.game_tips_provider || "" : input.gameTipsProvider?.trim() || "";
+  const requestedProvider = input.gameTipsProvider === undefined ? before?.game_tips_provider || "" : input.gameTipsProvider?.trim() || "";
+  const sameProvider = Boolean(before && gameTipsProviderKey(before.game_tips_provider) === gameTipsProviderKey(requestedProvider));
+  const provider = before && sameProvider ? before.game_tips_provider : requestedProvider;
   const presetId = provider ? captionPresetOrDefault(input.gameTipsCaptionPresetId === undefined
     ? before?.game_tips_caption_preset_id : input.gameTipsCaptionPresetId ?? undefined) : "";
   const text = provider ? "" : input.text;
@@ -391,8 +394,13 @@ export async function saveScheduledMessagePlan(db: DatabaseSync, input: Schedule
       return;
     }
     const current = input.id ? plan(db, input.id) : undefined;
-    if (input.id && (!current || current.revision !== input.revision)) throw new ScheduledMessageError("计划已被修改，请刷新后再保存。", 409);
+    if (input.id && (!current || current.revision !== input.revision || current.game_tips_provider !== before?.game_tips_provider)) {
+      throw new ScheduledMessageError("计划已被修改，请刷新后再保存。", 409);
+    }
     if (current && samePayload(current)) return;
+    if (provider && (enabled || !sameProvider) && gameTipsPlatformRetired(db, provider)) {
+      throw new ScheduledMessageError("平台已改名或删除，请刷新后重新选择。", 409);
+    }
     const now = clock(), today = new Date(now + OFFSET).toISOString().slice(0, 10);
     const sameSchedule = current?.enabled === 1 && current.times_json === timesJson && current.calendar_date === calendarDate;
     const next = enabled ? sameSchedule ? current.next_run_at : nextScheduledMessageTime(times, now, true, calendarDate) : 0;
@@ -733,6 +741,7 @@ export async function deliverScheduledMessagesOnce(decrypt: Decrypt, clock = Dat
     }
     releaseTerminalPayloads(db);
     releaseDeletedGameTipsAssets(db);
+    releaseRetiredGameTipsArtwork(db);
     db.prepare("UPDATE telegram_scheduled_message_runtime SET last_completed_at=?,heartbeat_at=?,last_error=? WHERE id='primary' AND lease_id=?")
       .run(clock(), clock(), active && hasBlockedPlan(db) ? runtime(db).last_error || CHANGED_ERROR : "", lease);
   } catch (error) {

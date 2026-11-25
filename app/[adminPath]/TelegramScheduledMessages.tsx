@@ -302,9 +302,10 @@ export default function TelegramScheduledMessages({ request, signInPath, workspa
   const deliveries = workspaceDeliveries.filter(item => historyFilter === "all" || item.status === historyFilter);
   const counts = summary?.counts ?? Object.fromEntries(Object.keys(statusLabels)
     .map(key => [key, workspaceDeliveries.filter(item => item.status === key).length]));
-  function updateGameTipsProviders(providers: GameTipsProvider[]) {
+  function updateGameTipsProviders(providers: GameTipsProvider[], refreshSchedules = false) {
     epoch.current++;
     setStatus(currentStatus => currentStatus ? { ...currentStatus, gameTipsProviders: providers } : currentStatus);
+    if (refreshSchedules) void mutate("refresh", "GET");
   }
 
   return <section className="cms-settings-form cms-scheduled-messages" aria-labelledby="scheduled-messages-title">

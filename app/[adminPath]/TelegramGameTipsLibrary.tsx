@@ -16,12 +16,20 @@ type Props = {
   active: boolean;
   plans: ScheduledMessagePlan[];
   today: string;
-  onProvidersChanged: (providers: GameTipsProvider[]) => void;
+  onProvidersChanged: (providers: GameTipsProvider[], refreshSchedules?: boolean) => void;
   onSchedule: (provider: string) => void;
   onEditSchedule: (plan: ScheduledMessagePlan) => void;
 };
 type UploadDraft = { id: string; file: File; game: string };
-type LogoDraft = { id: string; provider: string; file: File | null; providerKey?: string; previousId?: string };
+type LogoDraft = {
+  mode: "create" | "rename" | "logo";
+  id: string;
+  provider: string;
+  file: File | null;
+  previousProvider?: string;
+  previousId?: string;
+};
+type PlatformRemoval = "removeLogo" | "deletePlatform";
 type SlotFields = Record<keyof GameTipsBackgroundSlot, string>;
 type BackgroundDraft = { id: string; provider: string; file: File | null; previousId?: string; slots: SlotFields[] };
 type Feedback = { message: string; error?: boolean; expired?: boolean };
@@ -154,8 +162,13 @@ export default function TelegramGameTipsLibrary({
     && gameTipsProviderKey(plan.gameTipsProvider) === currentKey
     && (!plan.calendarDate || plan.calendarDate >= today)) : [];
   const editCurrent = edit && data?.assets.find(asset => asset.id === edit.id);
-  const logoConflict = Boolean(logoDraft?.providerKey
-    && logoDraft.previousId !== providerMap.get(logoDraft.providerKey)?.logoId);
+  const editingProvider = logoDraft?.previousProvider !== undefined
+    ? providerMap.get(gameTipsProviderKey(logoDraft.previousProvider)) : undefined;
+  const logoConflict = Boolean(logoDraft?.previousProvider
+    && (editingProvider?.name !== logoDraft.previousProvider || editingProvider?.logoId !== logoDraft.previousId));
+  const logoNameChanged = Boolean(logoDraft?.previousProvider && logoDraft.provider.trim() !== logoDraft.previousProvider);
+  const canSaveLogo = Boolean(logoDraft?.provider.trim() && !logoConflict && (logoDraft.file
+    || logoDraft.mode === "rename" && logoNameChanged));
   const backgroundSlots = backgroundDraft ? numericSlots(backgroundDraft.slots) : [];
   const slotsValid = validGameTipsBackgroundSlots(backgroundSlots);
   const backgroundConflict = Boolean(backgroundDraft
@@ -174,11 +187,12 @@ export default function TelegramGameTipsLibrary({
     setNotice(null);
   }
 
-  function startLogo(provider?: GameTipsProvider) {
-    if (logoDraft && !window.confirm("放弃当前未保存的 Logo？")) return;
+  function startLogo(provider?: GameTipsProvider, mode: "rename" | "logo" = "logo") {
+    if (logoDraft && (logoDraft.file || logoNameChanged) && !window.confirm("放弃当前未保存的平台资料？")) return;
+    if (provider) setSelectedProvider(gameTipsProviderKey(provider.name));
     setLogoDraft({
       id: crypto.randomUUID(), file: null, provider: provider?.name || "",
-      providerKey: provider ? gameTipsProviderKey(provider.name) : undefined,
+      mode: provider ? mode : "create", previousProvider: provider?.name,
       previousId: provider?.logoId,
     });
     setNotice(null);
@@ -196,23 +210,27 @@ export default function TelegramGameTipsLibrary({
 
   async function saveLogo(event: FormEvent) {
     event.preventDefault();
-    if (!logoDraft?.file || !logoDraft.provider.trim() || busyRef.current || logoConflict) return;
-    const { provider, id, file, previousId } = logoDraft;
+    if (!logoDraft || !canSaveLogo || busyRef.current) return;
+    const { provider, id, file, previousId, previousProvider } = logoDraft;
     const name = provider.trim(), key = gameTipsProviderKey(name);
-    if (!logoDraft.providerKey && providerMap.has(key)) {
-      setNotice({ message: "此平台已存在。请在平台列表选中它，再上传或更换 Logo。", error: true });
+    if (providerMap.has(key) && (!previousProvider || key !== gameTipsProviderKey(previousProvider))) {
+      setNotice({ message: "已有同名平台，请使用不同的名称。", error: true });
       return;
     }
-    if (key !== currentKey && (pending.length || edit || backgroundDraft) && !window.confirm("添加新平台会放弃当前平台未保存的内容，继续？")) return;
-    const params = new URLSearchParams({ id, provider: name });
-    if (previousId) params.set("previousId", previousId);
+    if (!file && !previousProvider) return;
+    if (key !== currentKey && (pending.length || edit || backgroundDraft) && !window.confirm("保存后将打开该平台，并放弃当前图库的未保存内容，继续？")) return;
     busyRef.current = true;
     setBusy("logo");
     setNotice(null);
     try {
-      const result = await uploadBlob(request, `${logoEndpoint}?${params}`, file);
+      const params = new URLSearchParams({ id, provider: name });
+      if (previousId) params.set("previousId", previousId);
+      if (previousProvider) params.set("previousProvider", previousProvider);
+      const result = file
+        ? await uploadBlob(request, `${logoEndpoint}?${params}`, file)
+        : await request<GameTipsLibrary>(logoEndpoint, "PUT", { provider: previousProvider, name, previousId: previousId ?? "" });
       setData(result);
-      onProvidersChanged(result.providers);
+      onProvidersChanged(result.providers, logoNameChanged);
       setSelectedProvider(key);
       setLogoDraft(null);
       if (key !== currentKey) {
@@ -221,7 +239,41 @@ export default function TelegramGameTipsLibrary({
         setEdit(null);
         setBackgroundDraft(null);
       }
-      setNotice({ message: `${name} 的 Logo 已保存。` });
+      setNotice({ message: logoNameChanged ? `平台名称已更新为 ${name}。` : `${name} 的 Logo 已保存。` });
+    } catch (error) {
+      setNotice(errorNotice(error));
+      if (error instanceof Error && "status" in error && error.status === 409) setReload(value => value + 1);
+    } finally {
+      busyRef.current = false;
+      setBusy("");
+    }
+  }
+
+  async function removePlatformItem(provider: GameTipsProvider, action: PlatformRemoval) {
+    if (busyRef.current) return;
+    const deleting = action === "deletePlatform";
+    const message = deleting
+      ? `删除平台「${provider.name}」？平台 Logo、背景模板及游戏图片会从图库移除，已发送记录会保留。删除前请暂停该平台尚未执行的计划，并等待队列完成。`
+      : `移除「${provider.name}」的平台 Logo？平台、背景模板和游戏图片会保留。`;
+    if (!window.confirm(message)) return;
+    busyRef.current = true;
+    setBusy(action);
+    setNotice(null);
+    try {
+      const result = await request<GameTipsLibrary>(logoEndpoint, "DELETE", {
+        provider: provider.name, previousId: provider.logoId ?? "", action,
+      });
+      setData(result);
+      onProvidersChanged(result.providers, deleting);
+      setLogoDraft(null);
+      if (deleting) {
+        setSelectedProvider("");
+        setGalleryView(initialGalleryView);
+        setPending([]);
+        setEdit(null);
+        setBackgroundDraft(null);
+      } else setSelectedProvider(gameTipsProviderKey(provider.name));
+      setNotice({ message: deleting ? `已删除平台「${provider.name}」。` : "平台 Logo 已移除。" });
     } catch (error) {
       setNotice(errorNotice(error));
       if (error instanceof Error && "status" in error && error.status === 409) setReload(value => value + 1);
@@ -388,17 +440,17 @@ export default function TelegramGameTipsLibrary({
     </div>}
     {logoDraft && <form className="cms-scheduled-card cms-scheduled-editor" onSubmit={saveLogo}>
       <fieldset disabled={Boolean(busy)}>
-        <div className="cms-scheduled-heading"><h3>{logoDraft.providerKey ? "管理平台 Logo" : "新增游戏平台"}</h3>
+        <div className="cms-scheduled-heading"><h3>{logoDraft.mode === "rename" ? "编辑平台名称" : logoDraft.mode === "logo" ? "管理平台 Logo" : "新增游戏平台"}</h3>
           <button type="button" className="cms-icon-button" aria-label="关闭 Logo 编辑" onClick={() => {
-            if (!logoDraft.file || window.confirm("放弃当前未保存的 Logo？")) setLogoDraft(null);
+            if ((!logoDraft.file && !logoNameChanged) || window.confirm("放弃当前未保存的平台资料？")) setLogoDraft(null);
           }}><X size={15} /></button>
         </div>
-        {logoConflict && <div className="cms-scheduled-conflict" role="alert">Logo 已更新。请关闭编辑后从平台重新打开以加载新版本。</div>}
+        {logoConflict && <div className="cms-scheduled-conflict" role="alert">平台资料已更新。请关闭编辑并重新选择平台。</div>}
         <label>平台名称<input required maxLength={GAME_TIPS_PROVIDER_LIMIT} autoComplete="off" value={logoDraft.provider}
-          readOnly={Boolean(logoDraft.providerKey)} placeholder="例如 MEGA888、PUSSY88、918KISS"
+          readOnly={logoDraft.mode === "logo"} placeholder="例如 MEGA888、PUSSY88、918KISS"
           onChange={event => setLogoDraft({ ...logoDraft, provider: event.target.value })} /></label>
         <div className="cms-scheduled-heading">
-          <div><h3>Logo 图片</h3><p>JPG、PNG 或 WebP，每张最多 4 MB。</p></div>
+          <div><h3>{logoDraft.mode === "rename" ? "同时更换 Logo（选填）" : "Logo 图片"}</h3><p>支持 JPG、PNG 或 WebP，每张最多 4 MB。</p></div>
           <label className="cms-secondary cms-scheduled-file-button"><Upload size={14} />
             <span aria-hidden="true">{logoDraft.file ? "更换文件" : "选择 Logo"}</span>
             <input type="file" accept={imageTypes} aria-label="选择平台 Logo" onChange={event => {
@@ -407,8 +459,8 @@ export default function TelegramGameTipsLibrary({
           </label>
         </div>
         {logoDraft.file && <div className="cms-game-tips-logo-preview"><FilePreview file={logoDraft.file} /></div>}
-        <button type="submit" className="cms-primary cms-scheduled-save-channel" disabled={logoConflict || !logoDraft.file || !logoDraft.provider.trim()}>
-          {busy === "logo" ? <LoaderCircle size={14} className="cms-spin" /> : <Check size={14} />}{logoDraft.providerKey ? "保存平台 Logo" : "保存新平台"}
+        <button type="submit" className="cms-primary cms-scheduled-save-channel" disabled={!canSaveLogo}>
+          {busy === "logo" ? <LoaderCircle size={14} className="cms-spin" /> : <Check size={14} />}{logoDraft.mode === "rename" ? "保存平台资料" : logoDraft.mode === "logo" ? "保存平台 Logo" : "保存新平台"}
         </button>
       </fieldset>
     </form>}
@@ -421,14 +473,21 @@ export default function TelegramGameTipsLibrary({
           </span>
           <div><h3>{current.name}</h3><p>{current.logoId ? "平台 Logo 已上传" : "尚未上传平台 Logo"} · {current.count} 款可用</p></div>
         </div>
-        <button type="button" className="cms-secondary" disabled={Boolean(busy)} onClick={() => startLogo(current)}><Upload size={14} />{current.logoId ? "更换平台 Logo" : "上传平台 Logo"}</button>
+        <div className="cms-scheduled-actions cms-game-tips-platform-actions">
+          <button type="button" className="cms-secondary" disabled={Boolean(busy)} onClick={() => startLogo(current, "rename")}><Pencil size={14} />编辑平台名称</button>
+          <button type="button" className="cms-secondary" disabled={Boolean(busy)} onClick={() => startLogo(current)}><Upload size={14} />{current.logoId ? "更换平台 Logo" : "上传平台 Logo"}</button>
+          {current.logoId && <button type="button" className="cms-secondary cms-game-tips-delete" disabled={Boolean(busy)}
+            onClick={() => void removePlatformItem(current, "removeLogo")}><X size={14} />移除 Logo</button>}
+          <button type="button" className="cms-secondary cms-game-tips-delete" disabled={Boolean(busy)}
+            onClick={() => void removePlatformItem(current, "deletePlatform")}><Trash2 size={14} />删除平台</button>
+        </div>
       </div>
     </div>
     <div className="cms-scheduled-card cms-game-tips-platform-background">
       <div className="cms-scheduled-heading">
         <div>
           <h3>海报背景模板</h3>
-          <p>{current.backgroundId ? "已保存。发送时会从当前平台抽取 3 张游戏图，自动放进模板。" : "当前使用带平台 Logo 的系统默认模板。也可上传自己的三格背景图。"}</p>
+          <p>{current.backgroundId ? "已保存。发送时会从当前平台抽取 3 张游戏图，自动放进模板。" : current.logoId ? "当前使用带平台 Logo 的系统默认模板。也可上传自己的三格背景图。" : "当前使用系统默认模板。也可上传自己的三格背景图。"}</p>
         </div>
         <button type="button" className="cms-secondary" disabled={Boolean(busy) || Boolean(backgroundDraft)}
           onClick={() => startBackground(current)}><Upload size={14} />{current.backgroundId ? "更换模板或调整位置" : "上传模板"}</button>
